@@ -24,7 +24,7 @@ flutter analyze
 # Run tests
 flutter test
 
-# Run a single test file
+# Run a single test file (example)
 flutter test test/core/connection/connection_manager_test.dart
 ```
 
@@ -59,6 +59,7 @@ Binary framing: 4-byte magic `EXTD` + 1-byte type + 4-byte payload length + 8-by
 | `ScreenCapturePlugin.swift` | ScreenCaptureKit capture → VideoToolbox H.264 encode → `FlutterEventChannel` frame stream. Also manages `CGVirtualDisplay` (Extend mode). Requires macOS 12.3+. |
 | `InputInjectPlugin.swift` | Injects mouse/keyboard events via CGEvent APIs. Requires Accessibility permission. |
 | `AdbManagerPlugin.swift` | Wraps `adb` binary calls (`devices`, `reverse`, `forward --remove`). |
+| `PermissionsPlugin.swift` | Checks/requests macOS permissions (Screen Recording, Accessibility) and exposes them to Dart via `MethodChannel`. |
 | `SocketSender.swift` | (legacy/alternative) NWConnection TCP sender; main path now goes through `SocketService` on the Dart side. |
 
 ### Display modes
