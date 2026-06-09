@@ -1,0 +1,88 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+
+        // ─── macOS Host (Screen Capture Server) ────────────────────────────
+        {
+            "name": "macOS Host – Debug",
+            "request": "launch",
+            "type": "dart",
+            "deviceId": "macos",
+            "flutterMode": "debug",
+            "program": "lib/main.dart"
+        },
+        {
+            "name": "macOS Host – Profile",
+            "request": "launch",
+            "type": "dart",
+            "deviceId": "macos",
+            "flutterMode": "profile",
+            "program": "lib/main.dart"
+        },
+        {
+            "name": "macOS Host – Release",
+            "request": "launch",
+            "type": "dart",
+            "deviceId": "macos",
+            "flutterMode": "release",
+            "program": "lib/main.dart"
+        },
+
+        // ─── Samsung Galaxy Tab S10 Ultra (R52XC02C9RT / SM-X926B) ─────────
+        {
+            "name": "Tab S10 Ultra – Debug",
+            "request": "launch",
+            "type": "dart",
+            "deviceId": "R52XC02C9RT",
+            "flutterMode": "debug",
+            "program": "lib/main.dart",
+            "args": ["--dart-define=DEVICE_SERIAL=R52XC02C9RT"]
+        },
+        {
+            "name": "Tab S10 Ultra – Profile",
+            "request": "launch",
+            "type": "dart",
+            "deviceId": "R52XC02C9RT",
+            "flutterMode": "profile",
+            "program": "lib/main.dart",
+            "args": ["--dart-define=DEVICE_SERIAL=R52XC02C9RT"]
+        },
+        {
+            "name": "Tab S10 Ultra – Release",
+            "request": "launch",
+            "type": "dart",
+            "deviceId": "R52XC02C9RT",
+            "flutterMode": "release",
+            "program": "lib/main.dart",
+            "args": ["--dart-define=DEVICE_SERIAL=R52XC02C9RT"]
+        },
+
+        // ─── Android Emulator (sdk_gphone64_arm64) ──────────────────────────
+        {
+            "name": "Emulator – Debug",
+            "request": "launch",
+            "type": "dart",
+            "deviceId": "emulator-5554",
+            "flutterMode": "debug",
+            "program": "lib/main.dart"
+        },
+
+        // ─── Attach to running instance ─────────────────────────────────────
+        {
+            "name": "Attach (any device)",
+            "request": "attach",
+            "type": "dart"
+        }
+    ],
+
+    "compounds": [
+        {
+            "name": "macOS + Tab S10 Ultra (both)",
+            "configurations": [
+                "macOS Host – Debug",
+                "Tab S10 Ultra – Debug"
+            ],
+            "stopAll": true
+        }
+    ]
+}
