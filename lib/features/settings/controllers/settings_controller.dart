@@ -30,6 +30,9 @@ class SettingsController extends GetxController {
   RxBool get showPerformanceOverlay => _settings.showPerformanceOverlay;
   RxBool get showHudOverlay => _settings.showHudOverlay;
 
+  /// Settings are adjustable only on the host (macOS); the client is read-only.
+  bool get isHost => _cm.isHost;
+
   final isApplying = false.obs;
   final permissions = <PermissionItem>[].obs;
   final isLoadingPerms = false.obs;
@@ -91,7 +94,8 @@ class SettingsController extends GetxController {
   void setMode(DisplayMode m) {
     if (mode.value == m) return;
     mode.value = m;
-    _applyMode(m);
+    _settings.setDisplayMode(m);
+    _reconnect();
   }
 
   void setEncodePreset(EncodePreset preset) {
@@ -108,18 +112,9 @@ class SettingsController extends GetxController {
     _reconnect();
   }
 
-  Future<void> _applyMode(DisplayMode m) async {
-    if (isApplying.value) return;
-    isApplying.value = true;
-    try {
-      await _cm.changeMode(m);
-    } finally {
-      isApplying.value = false;
-    }
-  }
-
-  /// Performance changes (encode preset) require a full reconnect to take
-  /// effect — the capture + handshake pipeline restarts with the new settings.
+  /// Every setting change persists the value, then restarts the connection so
+  /// the host's capture + encode pipeline picks it up. No-op (just saves) when
+  /// nothing is connected.
   Future<void> _reconnect() async {
     if (isApplying.value) return;
     isApplying.value = true;

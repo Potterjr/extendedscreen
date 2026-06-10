@@ -43,32 +43,13 @@ class ClientConnectionManager extends BaseConnectionManager {
     }
   }
 
-  @override
-  Future<void> changeMode(DisplayMode mode) async {
-    settings.setDisplayMode(mode);
-    if (phase.value.isActive) {
-      socket.send(Packet(
-        type: PacketType.control,
-        timestampUs: DateTime.now().microsecondsSinceEpoch,
-        payload: Uint8List.fromList([0xFD, mode == DisplayMode.mirror ? 1 : 0]),
-      ));
-    }
-  }
-
   void _sendHandshake() {
-    // HELLO carries the client's desired config so the host (which only obeys)
-    // captures with the Android-side settings:
-    //   [0x01, 0x02 (Android), modeByte, presetIndex, codecByte]
+    // HELLO: version byte + platform byte (0x02 = Android client). The host
+    // owns all config now, so the client no longer sends settings.
     socket.send(Packet(
       type: PacketType.control,
       timestampUs: DateTime.now().microsecondsSinceEpoch,
-      payload: Uint8List.fromList([
-        0x01,
-        0x02,
-        settings.displayMode == DisplayMode.mirror ? 1 : 0,
-        settings.encodePreset.index,
-        settings.codec == CodecType.h265 ? 1 : 0,
-      ]),
+      payload: Uint8List.fromList([0x01, 0x02]),
     ));
   }
 
@@ -86,6 +67,12 @@ class ClientConnectionManager extends BaseConnectionManager {
     // 0xFC + codec_byte — Host → Tablet: codec changed, reinitialize decoder.
     if (p.length >= 2 && p[0] == 0xFC) {
       settings.setCodec(p[1] == 1 ? CodecType.h265 : CodecType.h264);
+      return;
+    }
+
+    // 0xFB + refreshRate — Host → Tablet: capture refresh rate (Hz) for the HUD.
+    if (p.length >= 2 && p[0] == 0xFB) {
+      refreshRateHz.value = p[1];
     }
   }
 }

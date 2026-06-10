@@ -27,7 +27,6 @@ class HostConnectionManager extends BaseConnectionManager {
   Map<String, double> _displayBounds = {'x': 0, 'y': 0, 'w': 2960, 'h': 1848};
 
   StreamSubscription? _frameSub;
-  Completer<void>? _helloCompleter; // completes when the client HELLO arrives
 
   /// The host never connects automatically — it only loads the device list; the
   /// user must pick a client from the picker to connect.
@@ -75,17 +74,7 @@ class HostConnectionManager extends BaseConnectionManager {
       log.i('Host: waiting for tablet to connect…');
       await socket.waitForClient();
 
-      _helloCompleter = Completer<void>();
       startPacketLoop();
-
-      // Android is the sole control surface: wait for the client's HELLO so its
-      // chosen mode/preset/codec are applied before capture starts. Fall back
-      // to the host's own settings if it doesn't arrive promptly.
-      try {
-        await _helloCompleter!.future.timeout(const Duration(seconds: 2));
-      } catch (_) {
-        log.w('Host: no client HELLO; using local settings');
-      }
 
       setPhase(ConnectionPhase.configuring);
       // Capture start is non-fatal: the connection still goes live so the link
@@ -139,6 +128,15 @@ class HostConnectionManager extends BaseConnectionManager {
       payload: Uint8List.fromList([0xFC, config.codec == CodecType.h265 ? 1 : 0]),
     ));
 
+    // Tell the client the capture refresh rate so its HUD shows the real value.
+    // 0xFB + refreshRate (Hz, single byte).
+    refreshRateHz.value = config.refreshRate;
+    socket.send(Packet(
+      type: PacketType.control,
+      timestampUs: DateTime.now().microsecondsSinceEpoch,
+      payload: Uint8List.fromList([0xFB, config.refreshRate.clamp(0, 255)]),
+    ));
+
     // Forward each encoded NAL unit from native → socket as FRAME_DATA.
     _frameSub = _capture.frameStream.listen((nal) {
       socket.send(Packet(
@@ -148,41 +146,6 @@ class HostConnectionManager extends BaseConnectionManager {
       ));
     });
   }
-
-  @override
-  Future<void> changeMode(DisplayMode mode) async {
-    settings.setDisplayMode(mode);
-    await reapplyCapture();
-  }
-
-  /// Stop capture, destroy virtual display, restart with the new mode. Call this
-  /// after a display-mode change while streaming.
-  Future<void> reapplyCapture() async {
-    if (!phase.value.isActive) return;
-    log.i('Reapplying capture settings (mode=${settings.displayMode.name})');
-    await _frameSub?.cancel();
-    _frameSub = null;
-    await _capture.stopCapture();
-    await _capture.removeVirtualDisplay();
-    forceKeyframe = true;
-    try {
-      await _startCapture();
-      // Tell the tablet to request a fresh IDR so it sees the change instantly.
-      socket.send(Packet(
-        type: PacketType.control,
-        timestampUs: DateTime.now().microsecondsSinceEpoch,
-        payload: Uint8List.fromList([0xFE]), // 0xFE = "reload"
-      ));
-    } catch (e, st) {
-      log.e('reapplyCapture failed', e, st);
-    }
-  }
-
-  // Exposed so reapplyCapture can force a keyframe without going through the
-  // Swift plugin call (the next encoded frame will naturally be an IDR once
-  // ScreenCapturePlugin.forceKeyframe is set via requestIdr).
-  bool get forceKeyframe => false; // read-only alias; actual flag lives in Swift
-  set forceKeyframe(bool _) => _capture.requestIdr();
 
   @override
   Future<void> onTeardown() async {
@@ -209,28 +172,10 @@ class HostConnectionManager extends BaseConnectionManager {
         _injectKey(packet);
         break;
 
-      // 0x01 — Tablet → Host: HELLO with the client's desired config.
-      case PacketType.control
-          when packet.payload.length >= 5 && packet.payload[0] == 0x01:
-        _applyClientConfig(packet.payload);
-        if (_helloCompleter?.isCompleted == false) {
-          _helloCompleter!.complete();
-        }
-        break;
-
       // 0xFF — Tablet → Host: request a fresh keyframe (IDR).
       case PacketType.control
           when packet.payload.isNotEmpty && packet.payload[0] == 0xFF:
         _capture.requestIdr();
-        break;
-
-      // 0xFD + mode_byte — Tablet → Host: change display mode (0=extend,1=mirror).
-      case PacketType.control
-          when packet.payload.length >= 2 && packet.payload[0] == 0xFD:
-        final newMode =
-            packet.payload[1] == 1 ? DisplayMode.mirror : DisplayMode.extend;
-        settings.setDisplayMode(newMode);
-        reapplyCapture();
         break;
 
       default:
@@ -269,19 +214,5 @@ class HostConnectionManager extends BaseConnectionManager {
   void _injectKey(Packet packet) {
     final k = PacketCodec.decodeKey(packet.payload);
     if (k != null) _input.injectKey(k);
-  }
-
-  /// Adopt the client's config from its HELLO payload. Android is the only
-  /// place these are edited, so the host mirrors them before capturing.
-  void _applyClientConfig(Uint8List p) {
-    final mode = p[2] == 1 ? DisplayMode.mirror : DisplayMode.extend;
-    final preset =
-        EncodePreset.values[p[3].clamp(0, EncodePreset.values.length - 1)];
-    final codec = p[4] == 1 ? CodecType.h265 : CodecType.h264;
-    settings.setDisplayMode(mode);
-    settings.setEncodePreset(preset);
-    settings.setCodec(codec);
-    log.i('Host adopted client config: '
-        'mode=${mode.name} preset=${preset.name} codec=${codec.name}');
   }
 }

@@ -128,10 +128,11 @@ class _HudOverlay extends StatelessWidget {
                 ),
               ),
               const Spacer(),
-              _StatChip(
-                icon: Icons.refresh,
-                label: '${Get.find<SettingsService>().refreshRate} Hz',
-              ),
+              Obx(() => _StatChip(
+                    icon: Icons.refresh,
+                    label:
+                        '${Get.find<BaseConnectionManager>().refreshRateHz.value} Hz',
+                  )),
               const SizedBox(width: 8),
               Obx(() => _StatChip(
                     icon: Icons.speed,

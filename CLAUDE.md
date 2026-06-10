@@ -53,7 +53,7 @@ Services are registered as `GetxService`/permanent singletons in `InitialBinding
 `BaseConnectionManager` owns the shared phase/latency observables, the packet loop with heartbeat handling, the reconnect timer, and input-send helpers. It exposes abstract `connect()`/`autoConnect()`/`changeMode()` hooks and overridable `onRolePacket()`/`onTeardown()` callbacks. `HostConnectionManager` and `ClientConnectionManager` implement the role specifics. The phase observable runs through:
 `disconnected → detectingDevice → portForwarding → handshaking → configuring → streaming`
 
-On error it schedules a 5-second reconnect automatically. `SocketService` owns the raw TCP socket; `AdbService` wraps `adb` CLI calls. The Android client is the sole settings/control surface — it sends its desired mode/preset/codec in the HELLO handshake, and the host adopts that config before capturing.
+On error it schedules a 5-second reconnect automatically. `SocketService` owns the raw TCP socket; `AdbService` wraps `adb` CLI calls. The **macOS host is the sole settings/control surface**: display mode, encode preset and codec are editable only on the host (the client's Settings page is read-only). Every setting change persists the value and then calls `reconnect()` (full disconnect + reconnect to the same device) so the capture/encode pipeline restarts with the new value; the host announces the active codec to the client via a `0xFC` control packet so its decoder reinitializes.
 
 ### Packet protocol (`lib/shared/protocol/packet_codec.dart`)
 

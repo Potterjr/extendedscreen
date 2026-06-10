@@ -5,7 +5,6 @@ import 'package:get/get.dart';
 import 'package:extendedscreen/shared/connection/socket_service.dart';
 import 'package:extendedscreen/shared/connection/connection_state.dart';
 import 'package:extendedscreen/shared/models/device_model.dart';
-import 'package:extendedscreen/shared/models/display_config_model.dart';
 import 'package:extendedscreen/shared/models/packet_model.dart';
 import 'package:extendedscreen/shared/models/touch_event_model.dart';
 import 'package:extendedscreen/shared/protocol/packet_codec.dart';
@@ -42,6 +41,11 @@ abstract class BaseConnectionManager extends GetxService
   final errorMessage = ''.obs;
   final activeDevice = Rxn<DeviceModel>();
   final latencyMs = 0.obs;
+
+  /// Refresh rate (Hz) of the stream the host is capturing. The host sets this
+  /// to its own value; the client receives it via a `0xFB` control packet so
+  /// its HUD reflects the host's actual rate (settings live only on the host).
+  final refreshRateHz = 60.obs;
 
   /// Host only: ADB devices currently detected, for the picker UI. Always empty
   /// on the client.
@@ -91,9 +95,6 @@ abstract class BaseConnectionManager extends GetxService
 
   /// Entry-point auto-connect (called from splash).
   Future<void> autoConnect();
-
-  /// Change display mode — host reapplies capture, client signals the host.
-  Future<void> changeMode(DisplayMode mode);
 
   /// Host populates the detected device list; no-op on the client.
   Future<void> refreshDevices() async {}
