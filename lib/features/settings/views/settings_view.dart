@@ -16,7 +16,7 @@ class SettingsView extends GetView<SettingsController> {
       body: ListView(
         padding: const EdgeInsets.all(20),
         children: [
-          if (GetPlatform.isAndroid) ...[
+          if (controller.isHost) ...[
             _SectionHeader('Display'),
             _SettingsCard(children: [
               Obx(() => _SegmentRow(
@@ -99,7 +99,7 @@ class SettingsView extends GetView<SettingsController> {
                 padding: EdgeInsets.all(16),
                 child: Text(
                   'Display mode, encode preset and codec are configured on the '
-                  'Android app. The host applies whatever the tablet selects.',
+                  'Mac host. This device renders whatever the host streams.',
                   style: TextStyle(color: Colors.white70, fontSize: 13),
                 ),
               ),
