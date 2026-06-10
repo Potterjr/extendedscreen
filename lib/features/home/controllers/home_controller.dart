@@ -1,11 +1,11 @@
 import 'package:get/get.dart';
-import '../../../app/routes/app_routes.dart';
-import '../../../core/connection/connection_manager.dart';
-import '../../../core/connection/connection_state.dart';
-import '../../../core/models/device_model.dart';
+import 'package:extendedscreen/app/routes/app_routes.dart';
+import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
+import 'package:extendedscreen/shared/connection/connection_state.dart';
+import 'package:extendedscreen/shared/models/device_model.dart';
 
 class HomeController extends GetxController {
-  final _connection = Get.find<ConnectionManager>();
+  final _connection = Get.find<BaseConnectionManager>();
 
   ConnectionPhase get phase => _connection.phase.value;
   DeviceModel? get device => _connection.activeDevice.value;
@@ -22,6 +22,16 @@ class HomeController extends GetxController {
     super.onInit();
     // Populate the device picker as soon as the host screen opens.
     _connection.refreshDevices();
+
+    // Client (Android) is the viewer: when the link goes live, open the display
+    // to render frames. The host (Mac) is the source and stays on this screen.
+    if (!_connection.isHost) {
+      ever<ConnectionPhase>(_connection.phase, (p) {
+        if (p.isActive && Get.currentRoute == AppRoutes.home) {
+          Get.toNamed(AppRoutes.display);
+        }
+      });
+    }
   }
 
   Future<void> refreshDevices() => _connection.refreshDevices();
@@ -34,13 +44,11 @@ class HomeController extends GetxController {
     }
   }
 
-  /// Host: connect to the chosen Android client and open the display once the
-  /// link is live. Selecting a device is the only way to connect.
+  /// Host: connect to the chosen Android client. Selecting a device is the only
+  /// way to connect. The display renders on the Android device (it auto-opens
+  /// there); the Mac stays on this screen as the capture source.
   Future<void> onSelectDevice(DeviceModel device) async {
     await _connection.connect(serial: device.serial);
-    if (_connection.phase.value.isActive) {
-      Get.toNamed(AppRoutes.display);
-    }
   }
 
   void onGoToSettings() {

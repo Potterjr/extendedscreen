@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import '../../../core/connection/connection_state.dart';
+import 'package:extendedscreen/shared/connection/connection_state.dart';
 
 class ConnectionCard extends StatelessWidget {
   final ConnectionPhase phase;

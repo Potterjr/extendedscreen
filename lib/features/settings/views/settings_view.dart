@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
-import '../controllers/settings_controller.dart';
-import '../../../core/models/display_config_model.dart';
+import 'package:extendedscreen/features/settings/controllers/settings_controller.dart';
+import 'package:extendedscreen/shared/models/display_config_model.dart';
 
 class SettingsView extends GetView<SettingsController> {
   const SettingsView({super.key});
@@ -16,39 +16,19 @@ class SettingsView extends GetView<SettingsController> {
       body: ListView(
         padding: const EdgeInsets.all(20),
         children: [
-          _SectionHeader('Display'),
-          _SettingsCard(children: [
-            Obx(() => _SegmentRow(
-                  label: 'Mode',
-                  options: const ['Extend', 'Mirror'],
-                  selected: controller.mode.value == DisplayMode.extend ? 0 : 1,
-                  enabled: !controller.isApplying.value,
-                  onChanged: (i) => controller
-                      .setMode(i == 0 ? DisplayMode.extend : DisplayMode.mirror),
-                )),
-            Obx(() => controller.isApplying.value
-                ? const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                    child: Row(
-                      children: [
-                        SizedBox(
-                          width: 14,
-                          height: 14,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: Color(0xFF00C8FF),
-                          ),
-                        ),
-                        SizedBox(width: 10),
-                        Text('Applying…',
-                            style: TextStyle(
-                                color: Color(0xFF00C8FF), fontSize: 13)),
-                      ],
-                    ),
-                  )
-                : const SizedBox.shrink()),
-          ]),
           if (GetPlatform.isAndroid) ...[
+            _SectionHeader('Display'),
+            _SettingsCard(children: [
+              Obx(() => _SegmentRow(
+                    label: 'Mode',
+                    options: const ['Extend', 'Mirror'],
+                    selected:
+                        controller.mode.value == DisplayMode.extend ? 0 : 1,
+                    enabled: !controller.isApplying.value,
+                    onChanged: (i) => controller.setMode(
+                        i == 0 ? DisplayMode.extend : DisplayMode.mirror),
+                  )),
+            ]),
             const SizedBox(height: 16),
             _SectionHeader('Performance'),
             _SettingsCard(children: [
@@ -60,11 +40,45 @@ class SettingsView extends GetView<SettingsController> {
                   )),
               const Divider(height: 1, color: Colors.white12),
               Obx(() => _ChoiceRow(
-                    label: 'Frame Rate',
-                    value: '${controller.fps.value} fps',
+                    label: 'Codec',
+                    value: controller.codec.value == CodecType.h265
+                        ? 'H.265 (HEVC)'
+                        : 'H.264 (AVC)',
                     enabled: !controller.isApplying.value,
-                    onTap: () => _showFpsPicker(context),
+                    onTap: () => _showCodecPicker(context),
                   )),
+              Obx(() => controller.isApplying.value
+                  ? const Padding(
+                      padding:
+                          EdgeInsets.only(left: 16, right: 16, bottom: 12),
+                      child: Row(
+                        children: [
+                          SizedBox(
+                            width: 14,
+                            height: 14,
+                            child: CircularProgressIndicator(
+                                strokeWidth: 2, color: Color(0xFF00C8FF)),
+                          ),
+                          SizedBox(width: 10),
+                          Text('Reconnecting to apply…',
+                              style: TextStyle(
+                                  color: Color(0xFF00C8FF), fontSize: 13)),
+                        ],
+                      ),
+                    )
+                  : Padding(
+                      padding: const EdgeInsets.only(
+                          left: 16, right: 16, bottom: 12),
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          'Changing performance settings reconnects the link.',
+                          style: TextStyle(
+                              color: Colors.white.withValues(alpha: 0.35),
+                              fontSize: 12),
+                        ),
+                      ),
+                    )),
               const Divider(height: 1, color: Colors.white12),
               Obx(() => _ToggleRow(
                     label: 'Performance Overlay',
@@ -77,6 +91,18 @@ class SettingsView extends GetView<SettingsController> {
                     value: controller.showHudOverlay.value,
                     onChanged: (_) => controller.toggleHudOverlay(),
                   )),
+            ]),
+          ] else ...[
+            _SectionHeader('Display'),
+            const _SettingsCard(children: [
+              Padding(
+                padding: EdgeInsets.all(16),
+                child: Text(
+                  'Display mode, encode preset and codec are configured on the '
+                  'Android app. The host applies whatever the tablet selects.',
+                  style: TextStyle(color: Colors.white70, fontSize: 13),
+                ),
+              ),
             ]),
           ],
           const SizedBox(height: 16),
@@ -137,7 +163,12 @@ class SettingsView extends GetView<SettingsController> {
           _SettingsCard(children: [
             _InfoRow(label: 'Transport', value: 'USB-C / ADB'),
             const Divider(height: 1, color: Colors.white12),
-            _InfoRow(label: 'Codec', value: 'H.264 Hardware'),
+            Obx(() => _InfoRow(
+                  label: 'Codec',
+                  value: controller.codec.value == CodecType.h265
+                      ? 'H.265 Hardware'
+                      : 'H.264 Hardware',
+                )),
             const Divider(height: 1, color: Colors.white12),
             _InfoRow(label: 'Port', value: '7001'),
           ]),
@@ -167,18 +198,20 @@ class SettingsView extends GetView<SettingsController> {
     );
   }
 
-  void _showFpsPicker(BuildContext context) {
+  void _showCodecPicker(BuildContext context) {
+    const codecs = CodecType.values;
     Get.bottomSheet(
       _PickerSheet(
-        title: 'Frame Rate',
-        items: controller.fpsOptions.map((f) => '$f fps').toList(),
-        selected: controller.fpsOptions.indexOf(controller.fps.value),
-        onSelected: (i) => controller.setFps(controller.fpsOptions[i]),
+        title: 'Codec',
+        items: const [
+          'H.264 (AVC)  —  widest compatibility',
+          'H.265 (HEVC)  —  better quality per bitrate',
+        ],
+        selected: codecs.indexOf(controller.codec.value),
+        onSelected: (i) => controller.setCodec(codecs[i]),
       ),
     );
   }
-
-
 }
 
 class _SectionHeader extends StatelessWidget {

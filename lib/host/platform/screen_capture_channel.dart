@@ -1,7 +1,7 @@
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
-import '../models/display_config_model.dart';
-import '../services/logger_service.dart';
+import 'package:extendedscreen/shared/models/display_config_model.dart';
+import 'package:extendedscreen/shared/services/logger_service.dart';
 
 /// macOS only — bridges to ScreenCaptureKit + VideoToolbox via Swift plugin.
 class ScreenCaptureChannel extends GetxService {

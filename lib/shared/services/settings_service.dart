@@ -1,13 +1,12 @@
 import 'package:get/get.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import '../models/display_config_model.dart';
+import 'package:extendedscreen/shared/models/display_config_model.dart';
 
 class SettingsService extends GetxService {
   late SharedPreferences _prefs;
 
   static const _keyMode = 'display_mode';
   static const _keyBitrate = 'bitrate';
-  static const _keyFps = 'fps';
   static const _keyLastDevice = 'last_device';
   static const _keyPerfOverlay = 'perf_overlay';
   static const _keyHudOverlay = 'hud_overlay';
@@ -51,8 +50,8 @@ class SettingsService extends GetxService {
   Future<void> setEncodePreset(EncodePreset preset) =>
       _prefs.setString(_keyEncodePreset, preset.name);
 
-  int get fps => _prefs.getInt(_keyFps) ?? 60;
-  Future<void> setFps(int fps) => _prefs.setInt(_keyFps, fps);
+  /// Refresh rate is derived from the active encode preset (no standalone setting).
+  int get refreshRate => encodePreset.refreshRate;
 
   CodecType get codec {
     final v = _prefs.getString(_keyCodec);

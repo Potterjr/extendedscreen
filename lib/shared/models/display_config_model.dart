@@ -43,6 +43,14 @@ extension EncodePresetX on EncodePreset {
         EncodePreset.balanced => 8000000,
         EncodePreset.performance => 12000000,
       };
+
+  // Refresh rate is tied to the preset (no separate frame-rate setting).
+  // Performance trades resolution for a high 120Hz capture; the rest run 60Hz.
+  int get refreshRate => switch (this) {
+        EncodePreset.quality => 60,
+        EncodePreset.balanced => 60,
+        EncodePreset.performance => 120,
+      };
 }
 
 class DisplayConfigModel {

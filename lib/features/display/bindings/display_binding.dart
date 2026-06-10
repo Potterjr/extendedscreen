@@ -1,5 +1,5 @@
 import 'package:get/get.dart';
-import '../controllers/display_controller.dart';
+import 'package:extendedscreen/features/display/controllers/display_controller.dart';
 
 class DisplayBinding extends Bindings {
   @override

@@ -1,19 +1,19 @@
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
-import '../controllers/home_controller.dart';
-import '../../../core/connection/connection_manager.dart';
-import '../../../core/connection/connection_state.dart';
-import '../widgets/connection_card.dart';
-import '../widgets/device_info_card.dart';
-import '../widgets/device_picker_card.dart';
-import '../widgets/latency_chip.dart';
+import 'package:extendedscreen/features/home/controllers/home_controller.dart';
+import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
+import 'package:extendedscreen/shared/connection/connection_state.dart';
+import 'package:extendedscreen/shared/widgets/connection_card.dart';
+import 'package:extendedscreen/shared/widgets/device_info_card.dart';
+import 'package:extendedscreen/shared/widgets/device_picker_card.dart';
+import 'package:extendedscreen/shared/widgets/latency_chip.dart';
 
 class HomeView extends GetView<HomeController> {
   const HomeView({super.key});
 
   @override
   Widget build(BuildContext context) {
-    final cm = Get.find<ConnectionManager>();
+    final cm = Get.find<BaseConnectionManager>();
 
     return Scaffold(
       appBar: AppBar(

@@ -1,6 +1,6 @@
 import 'dart:typed_data';
-import '../models/packet_model.dart';
-import '../models/touch_event_model.dart';
+import 'package:extendedscreen/shared/models/packet_model.dart';
+import 'package:extendedscreen/shared/models/touch_event_model.dart';
 
 /// Encodes domain models → Packet payload bytes (simple binary encoding).
 /// Replace with generated protobuf when proto files are added.

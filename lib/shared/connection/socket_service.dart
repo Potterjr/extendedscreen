@@ -2,8 +2,8 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:get/get.dart';
-import '../models/packet_model.dart';
-import '../services/logger_service.dart';
+import 'package:extendedscreen/shared/models/packet_model.dart';
+import 'package:extendedscreen/shared/services/logger_service.dart';
 
 /// A single-connection TCP transport that can act as either:
 ///  - CLIENT (Android): [connect] to the host through the adb-reverse tunnel.

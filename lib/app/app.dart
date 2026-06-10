@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
-import 'routes/app_pages.dart';
-import 'bindings/initial_binding.dart';
-import 'theme/app_theme.dart';
-import '../core/services/settings_service.dart';
+import 'package:extendedscreen/app/routes/app_pages.dart';
+import 'package:extendedscreen/app/bindings/initial_binding.dart';
+import 'package:extendedscreen/app/theme/app_theme.dart';
+import 'package:extendedscreen/shared/services/settings_service.dart';
 
 class ExtendedScreenApp extends StatelessWidget {
   const ExtendedScreenApp({super.key});

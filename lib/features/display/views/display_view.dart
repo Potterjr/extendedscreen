@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
-import '../controllers/display_controller.dart';
-import '../../../core/connection/connection_manager.dart';
-import '../../../core/services/settings_service.dart';
+import 'package:extendedscreen/features/display/controllers/display_controller.dart';
+import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
+import 'package:extendedscreen/shared/services/settings_service.dart';
 
 class DisplayView extends GetView<DisplayController> {
   const DisplayView({super.key});
@@ -130,7 +130,7 @@ class _HudOverlay extends StatelessWidget {
               const Spacer(),
               _StatChip(
                 icon: Icons.refresh,
-                label: '${Get.find<SettingsService>().fps} Hz',
+                label: '${Get.find<SettingsService>().refreshRate} Hz',
               ),
               const SizedBox(width: 8),
               Obx(() => _StatChip(
@@ -140,7 +140,7 @@ class _HudOverlay extends StatelessWidget {
               const SizedBox(width: 8),
               Obx(() => _StatChip(
                     icon: Icons.bolt,
-                    label: '${Get.find<ConnectionManager>().latencyMs.value}ms',
+                    label: '${Get.find<BaseConnectionManager>().latencyMs.value}ms',
                   )),
               const SizedBox(width: 8),
               Obx(() {

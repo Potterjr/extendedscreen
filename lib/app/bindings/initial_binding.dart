@@ -1,13 +1,15 @@
 import 'package:flutter/foundation.dart';
 import 'package:get/get.dart';
-import '../../core/connection/adb_service.dart';
-import '../../core/connection/socket_service.dart';
-import '../../core/connection/connection_manager.dart';
-import '../../core/platform/screen_capture_channel.dart';
-import '../../core/platform/input_inject_channel.dart';
-import '../../core/platform/video_decoder_channel.dart';
-import '../../core/services/settings_service.dart';
-import '../../core/services/logger_service.dart';
+import 'package:extendedscreen/shared/connection/socket_service.dart';
+import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
+import 'package:extendedscreen/shared/services/settings_service.dart';
+import 'package:extendedscreen/shared/services/logger_service.dart';
+import 'package:extendedscreen/host/connection/adb_service.dart';
+import 'package:extendedscreen/host/connection/host_connection_manager.dart';
+import 'package:extendedscreen/host/platform/screen_capture_channel.dart';
+import 'package:extendedscreen/host/platform/input_inject_channel.dart';
+import 'package:extendedscreen/client/connection/client_connection_manager.dart';
+import 'package:extendedscreen/client/platform/video_decoder_channel.dart';
 
 class InitialBinding extends Bindings {
   @override
@@ -15,22 +17,21 @@ class InitialBinding extends Bindings {
     Get.put(LoggerService(), permanent: true);
     Get.put(SettingsService(), permanent: true);
 
-    // Connection layer — permanent so they survive route changes.
-    Get.put(AdbService(), permanent: true);
+    // Transport — shared by both roles; permanent so it survives route changes.
     Get.put(SocketService(), permanent: true);
 
-    // macOS-only capture / input channels.
+    // Role-specific wiring. The chosen manager is bound to BaseConnectionManager
+    // so all shared UI depends on a single interface.
     if (GetPlatform.isMacOS || GetPlatform.isDesktop) {
+      // HOST (macOS): capture + input + adb, then the host connection manager.
       Get.put(ScreenCaptureChannel(), permanent: true);
       Get.put(InputInjectChannel(), permanent: true);
-    }
-
-    // Android video decoder — permanent so the channel is always registered;
-    // the native codec is initialized/released per-session by DisplayController.
-    if (defaultTargetPlatform == TargetPlatform.android) {
+      Get.put(AdbService(), permanent: true);
+      Get.put<BaseConnectionManager>(HostConnectionManager(), permanent: true);
+    } else if (defaultTargetPlatform == TargetPlatform.android) {
+      // CLIENT (Android): video decoder, then the client connection manager.
       Get.put(VideoDecoderChannel(), permanent: true);
+      Get.put<BaseConnectionManager>(ClientConnectionManager(), permanent: true);
     }
-
-    Get.put(ConnectionManager(), permanent: true);
   }
 }

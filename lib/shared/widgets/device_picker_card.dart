@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import '../../../core/models/device_model.dart';
+import 'package:extendedscreen/shared/models/device_model.dart';
 
 /// Host-only picker: lists detected ADB clients so the user chooses which
 /// Android device to stream to (instead of auto-picking the first one).

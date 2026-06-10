@@ -1,10 +1,9 @@
 import 'package:flutter/foundation.dart';
 import 'package:get/get.dart';
-import '../../../core/connection/connection_manager.dart';
-import '../../../core/connection/connection_state.dart';
-import '../../../core/models/display_config_model.dart';
-import '../../../core/platform/permissions_channel.dart';
-import '../../../core/services/settings_service.dart';
+import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
+import 'package:extendedscreen/shared/models/display_config_model.dart';
+import 'package:extendedscreen/shared/platform/permissions_channel.dart';
+import 'package:extendedscreen/shared/services/settings_service.dart';
 
 class PermissionItem {
   final String key;
@@ -22,24 +21,15 @@ class PermissionItem {
 
 class SettingsController extends GetxController {
   final _settings = Get.find<SettingsService>();
-  final _cm = Get.find<ConnectionManager>();
+  final _cm = Get.find<BaseConnectionManager>();
   final _perms = PermissionsChannel();
 
   late final mode = _settings.displayMode.obs;
-  late final fps = _settings.fps.obs;
-  late final bitrate = _settings.bitrate.obs;
   late final encodePreset = _settings.encodePreset.obs;
+  late final codec = _settings.codec.obs;
   RxBool get showPerformanceOverlay => _settings.showPerformanceOverlay;
   RxBool get showHudOverlay => _settings.showHudOverlay;
 
-  final bitrateOptions = [
-    (label: '8 Mbps', value: 8000000),
-    (label: '15 Mbps', value: 15000000),
-    (label: '25 Mbps', value: 25000000),
-    (label: '40 Mbps', value: 40000000),
-  ];
-
-  final fpsOptions = [30, 60, 120];
   final isApplying = false.obs;
   final permissions = <PermissionItem>[].obs;
   final isLoadingPerms = false.obs;
@@ -104,25 +94,18 @@ class SettingsController extends GetxController {
     _applyMode(m);
   }
 
-  void setFps(int f) {
-    if (fps.value == f) return;
-    fps.value = f;
-    _settings.setFps(f);
-    _reapply();
-  }
-
-  void setBitrate(int bps) {
-    if (bitrate.value == bps) return;
-    bitrate.value = bps;
-    _settings.setBitrate(bps);
-    _reapply();
-  }
-
   void setEncodePreset(EncodePreset preset) {
     if (encodePreset.value == preset) return;
     encodePreset.value = preset;
     _settings.setEncodePreset(preset);
-    _reapply();
+    _reconnect();
+  }
+
+  void setCodec(CodecType c) {
+    if (codec.value == c) return;
+    codec.value = c;
+    _settings.setCodec(c);
+    _reconnect();
   }
 
   Future<void> _applyMode(DisplayMode m) async {
@@ -135,15 +118,13 @@ class SettingsController extends GetxController {
     }
   }
 
-  Future<void> _reapply() async {
+  /// Performance changes (encode preset) require a full reconnect to take
+  /// effect — the capture + handshake pipeline restarts with the new settings.
+  Future<void> _reconnect() async {
     if (isApplying.value) return;
     isApplying.value = true;
     try {
-      if (_cm.isHost) {
-        await _cm.reapplyCapture();
-      } else if (_cm.phase.value.isActive) {
-        _cm.requestIdr();
-      }
+      await _cm.reconnect();
     } finally {
       isApplying.value = false;
     }
@@ -154,10 +135,4 @@ class SettingsController extends GetxController {
 
   void toggleHudOverlay() =>
       _settings.setShowHudOverlay(!showHudOverlay.value);
-
-  String get bitrateLabel =>
-      bitrateOptions
-          .firstWhereOrNull((o) => o.value == bitrate.value)
-          ?.label ??
-      '${(bitrate.value / 1000000).toStringAsFixed(0)} Mbps';
 }

@@ -1,7 +1,7 @@
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
-import '../models/device_model.dart';
-import '../services/logger_service.dart';
+import 'package:extendedscreen/shared/models/device_model.dart';
+import 'package:extendedscreen/shared/services/logger_service.dart';
 
 class AdbService extends GetxService {
   static const _channel = MethodChannel('extended_screen/adb');

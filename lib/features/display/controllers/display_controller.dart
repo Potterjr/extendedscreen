@@ -3,16 +3,16 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
-import '../../../core/connection/connection_manager.dart';
-import '../../../core/models/display_config_model.dart';
-import '../../../core/models/packet_model.dart';
-import '../../../core/models/touch_event_model.dart';
-import '../../../core/platform/video_decoder_channel.dart';
-import '../../../core/services/settings_service.dart';
-import '../../../core/services/logger_service.dart';
+import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
+import 'package:extendedscreen/shared/models/display_config_model.dart';
+import 'package:extendedscreen/shared/models/packet_model.dart';
+import 'package:extendedscreen/shared/models/touch_event_model.dart';
+import 'package:extendedscreen/client/platform/video_decoder_channel.dart';
+import 'package:extendedscreen/shared/services/settings_service.dart';
+import 'package:extendedscreen/shared/services/logger_service.dart';
 
 class DisplayController extends GetxController {
-  final _cm = Get.find<ConnectionManager>();
+  final _cm = Get.find<BaseConnectionManager>();
   final _settings = Get.find<SettingsService>();
   final _log = Get.find<LoggerService>();
 
@@ -41,7 +41,7 @@ class DisplayController extends GetxController {
   Future<void> _initDecoderAndSubscribe() async {
     final decoder = Get.find<VideoDecoderChannel>();
     final config = DisplayConfigModel.defaultConfig.copyWith(
-      refreshRate: _settings.fps,
+      refreshRate: _settings.refreshRate,
       bitrate: _settings.bitrate,
       codec: _settings.codec,
     );
@@ -74,7 +74,7 @@ class DisplayController extends GetxController {
           }
         }
       },
-      onError: (_) {}, // ConnectionManager handles reconnect; ignore here.
+      onError: (_) {}, // BaseConnectionManager handles reconnect; ignore here.
     );
   }
 

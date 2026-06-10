@@ -1,13 +1,13 @@
 import 'package:get/get.dart';
-import '../routes/app_routes.dart';
-import '../../features/splash/bindings/splash_binding.dart';
-import '../../features/splash/views/splash_view.dart';
-import '../../features/home/bindings/home_binding.dart';
-import '../../features/home/views/home_view.dart';
-import '../../features/display/bindings/display_binding.dart';
-import '../../features/display/views/display_view.dart';
-import '../../features/settings/bindings/settings_binding.dart';
-import '../../features/settings/views/settings_view.dart';
+import 'package:extendedscreen/app/routes/app_routes.dart';
+import 'package:extendedscreen/features/splash/bindings/splash_binding.dart';
+import 'package:extendedscreen/features/splash/views/splash_view.dart';
+import 'package:extendedscreen/features/home/bindings/home_binding.dart';
+import 'package:extendedscreen/features/home/views/home_view.dart';
+import 'package:extendedscreen/features/display/bindings/display_binding.dart';
+import 'package:extendedscreen/features/display/views/display_view.dart';
+import 'package:extendedscreen/features/settings/bindings/settings_binding.dart';
+import 'package:extendedscreen/features/settings/views/settings_view.dart';
 
 abstract class AppPages {
   static const initial = AppRoutes.splash;

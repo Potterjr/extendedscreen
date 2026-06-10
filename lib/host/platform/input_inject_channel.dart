@@ -1,7 +1,7 @@
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
-import '../models/touch_event_model.dart';
-import '../services/logger_service.dart';
+import 'package:extendedscreen/shared/models/touch_event_model.dart';
+import 'package:extendedscreen/shared/services/logger_service.dart';
 
 /// macOS only — injects touch/mouse/key events via CGEvent (Quartz).
 class InputInjectChannel extends GetxService {
