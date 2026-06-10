@@ -5,7 +5,7 @@
         "scrollbar.shadow": "#00000000"
     },
     "dart.env": {
-        "PATH": "/Users/porto/.rbenv/shims:/Users/porto/.rbenv/bin:${env:PATH}",
+        "PATH": "/Users/porto/.rbenv/shims:/Users/porto/.rbenv/bin:/Users/porto/Development/flutter/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${env:PATH}",
         "LANG": "en_US.UTF-8",
         "LC_ALL": "en_US.UTF-8"
     }
