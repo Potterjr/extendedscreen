@@ -6,6 +6,9 @@ import '../services/logger_service.dart';
 /// Android only — bridges to MediaCodec decoder via Kotlin plugin.
 class VideoDecoderChannel extends GetxService {
   static const _channel = MethodChannel('extended_screen/video_decoder');
+  // Binary channel bypasses StandardMessageCodec JSON overhead — raw bytes only.
+  static const _nalChannel =
+      BasicMessageChannel<ByteData?>('extended_screen/nal_feed', BinaryCodec());
   final _log = Get.find<LoggerService>();
 
   /// Invoked when the native decoder needs a keyframe (post-configure / error).
@@ -35,15 +38,25 @@ class VideoDecoderChannel extends GetxService {
     _log.i('VideoDecoder initialized ${config.width * 2}x${config.height * 2} @${config.refreshRate}fps');
   }
 
-  /// Feed a raw NAL unit to MediaCodec.
+  /// Feed a raw NAL unit to MediaCodec via binary channel (no JSON overhead).
   Future<void> feedNal(List<int> nalBytes) async {
     final nal = nalBytes is Uint8List ? nalBytes : Uint8List.fromList(nalBytes);
-    await _channel.invokeMethod('feedNal', {'nal': nal});
+    await _nalChannel.send(nal.buffer.asByteData());
   }
 
   /// Request an IDR frame from macOS host (codec error recovery).
   Future<void> requestIdr() async {
     await _channel.invokeMethod('requestIdr');
+  }
+
+  /// Returns and resets the NAL drop counter since the last call.
+  Future<int> fetchDropCount() async {
+    try {
+      final v = await _channel.invokeMethod<int>('getDropCount');
+      return v ?? 0;
+    } catch (_) {
+      return 0;
+    }
   }
 
   Future<void> dispose() async {

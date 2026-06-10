@@ -12,6 +12,7 @@ class SettingsService extends GetxService {
   static const _keyPerfOverlay = 'perf_overlay';
   static const _keyHudOverlay = 'hud_overlay';
   static const _keyEncodePreset = 'encode_preset';
+  static const _keyCodec = 'codec';
 
   final showPerformanceOverlay = false.obs;
   final showHudOverlay = true.obs;
@@ -52,6 +53,12 @@ class SettingsService extends GetxService {
 
   int get fps => _prefs.getInt(_keyFps) ?? 60;
   Future<void> setFps(int fps) => _prefs.setInt(_keyFps, fps);
+
+  CodecType get codec {
+    final v = _prefs.getString(_keyCodec);
+    return v == 'h265' ? CodecType.h265 : CodecType.h264;
+  }
+  Future<void> setCodec(CodecType c) => _prefs.setString(_keyCodec, c == CodecType.h265 ? 'h265' : 'h264');
 
   // Returns saved serial, falls back to compile-time default (Tab S10 Ultra).
   String? get lastDeviceSerial =>

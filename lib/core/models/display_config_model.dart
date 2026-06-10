@@ -14,22 +14,24 @@ extension EncodePresetX on EncodePreset {
   String get description => switch (this) {
         EncodePreset.quality => '2960×1848 · 20 Mbps — sharpest',
         EncodePreset.balanced => '2960×1848 · 8 Mbps — native + smooth',
-        EncodePreset.performance => '1920×1200 · 15 Mbps — smoothest',
+        EncodePreset.performance => '1480×924 · 12 Mbps — high fps (120Hz)',
       };
 
   // Logical width/height passed to CGVirtualDisplay (Swift doubles if HiDPI).
   int get width => switch (this) {
         EncodePreset.quality => 1480,
         EncodePreset.balanced => 1480,
-        EncodePreset.performance => 1920,
+        EncodePreset.performance => 1480,
       };
 
   int get height => switch (this) {
         EncodePreset.quality => 924,
         EncodePreset.balanced => 924,
-        EncodePreset.performance => 1200,
+        EncodePreset.performance => 924,
       };
 
+  // Performance uses 1.0x (no HiDPI): encodes 1480×924 instead of 2960×1848
+  // — 25% of Quality pixel count so VT can sustain 120fps throughput.
   double get scaleFactor => switch (this) {
         EncodePreset.quality => 2.0,
         EncodePreset.balanced => 2.0,
@@ -39,7 +41,7 @@ extension EncodePresetX on EncodePreset {
   int get bitrate => switch (this) {
         EncodePreset.quality => 20000000,
         EncodePreset.balanced => 8000000,
-        EncodePreset.performance => 15000000,
+        EncodePreset.performance => 12000000,
       };
 }
 
@@ -99,7 +101,7 @@ class DisplayConfigModel {
         'refreshRate': refreshRate,
         'scaleFactor': scaleFactor,
         'mode': mode.index,
-        'codec': codec.index,
+        'codec': codec == CodecType.h265 ? 'h265' : 'h264',
         'bitrate': bitrate,
       };
 }

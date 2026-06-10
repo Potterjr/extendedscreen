@@ -18,6 +18,7 @@ class DisplayController extends GetxController {
 
   final frameCount = 0.obs;
   final currentFps = 0.obs;
+  final droppedPerSec = 0.obs;
 
   StreamSubscription? _packetSub;
   Timer? _fpsTimer;
@@ -42,6 +43,7 @@ class DisplayController extends GetxController {
     final config = DisplayConfigModel.defaultConfig.copyWith(
       refreshRate: _settings.fps,
       bitrate: _settings.bitrate,
+      codec: _settings.codec,
     );
 
     // Release any previous codec/surface before creating a new one so the old
@@ -59,6 +61,17 @@ class DisplayController extends GetxController {
           decoder.feedNal(packet.payload);
           _fpsCounter++;
           frameCount.value++;
+        } else if (packet.type == PacketType.control &&
+            packet.payload.length >= 2 &&
+            packet.payload[0] == 0xFC) {
+          // Host told us which codec it's using — reinitialize decoder.
+          final newCodec = packet.payload[1] == 1 ? CodecType.h265 : CodecType.h264;
+          if (newCodec != _settings.codec) {
+            _settings.setCodec(newCodec);
+            _packetSub?.cancel();
+            _packetSub = null;
+            _initDecoderAndSubscribe();
+          }
         }
       },
       onError: (_) {}, // ConnectionManager handles reconnect; ignore here.
@@ -66,9 +79,13 @@ class DisplayController extends GetxController {
   }
 
   void _startFpsCounter() {
-    _fpsTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+    _fpsTimer = Timer.periodic(const Duration(seconds: 1), (_) async {
       currentFps.value = _fpsCounter;
       _fpsCounter = 0;
+      if (isAndroid) {
+        droppedPerSec.value =
+            await Get.find<VideoDecoderChannel>().fetchDropCount();
+      }
     });
   }
 

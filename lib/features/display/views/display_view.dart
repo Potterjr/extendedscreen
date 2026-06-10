@@ -143,6 +143,19 @@ class _HudOverlay extends StatelessWidget {
                     label: '${Get.find<ConnectionManager>().latencyMs.value}ms',
                   )),
               const SizedBox(width: 8),
+              Obx(() {
+                final drops = controller.droppedPerSec.value;
+                return _StatChip(
+                  icon: Icons.warning_amber_rounded,
+                  label: '${drops}drop/s',
+                  color: drops == 0
+                      ? Colors.white70
+                      : drops <= 3
+                          ? Colors.orangeAccent
+                          : Colors.redAccent,
+                );
+              }),
+              const SizedBox(width: 8),
               TextButton(
                 onPressed: controller.onDisconnect,
                 style: TextButton.styleFrom(
@@ -162,7 +175,8 @@ class _HudOverlay extends StatelessWidget {
 class _StatChip extends StatelessWidget {
   final IconData icon;
   final String label;
-  const _StatChip({required this.icon, required this.label});
+  final Color? color;
+  const _StatChip({required this.icon, required this.label, this.color});
 
   @override
   Widget build(BuildContext context) {
@@ -175,10 +189,10 @@ class _StatChip extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, size: 12, color: Colors.white70),
+          Icon(icon, size: 12, color: color ?? Colors.white70),
           const SizedBox(width: 4),
           Text(label,
-              style: const TextStyle(color: Colors.white70, fontSize: 12)),
+              style: TextStyle(color: color ?? Colors.white70, fontSize: 12)),
         ],
       ),
     );

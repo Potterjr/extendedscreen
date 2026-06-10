@@ -147,6 +147,7 @@ class ConnectionManager extends GetxService with WidgetsBindingObserver {
       refreshRate: _settings.fps,
       bitrate: preset.bitrate,
       mode: _settings.displayMode,
+      codec: _settings.codec,
     );
 
     await _capture.requestPermission();
@@ -160,6 +161,14 @@ class ConnectionManager extends GetxService with WidgetsBindingObserver {
     // Fetch actual display bounds so touch injection lands on the right screen.
     _displayBounds = await _capture.getDisplayBounds();
     _log.i('Display bounds: $_displayBounds');
+
+    // Tell client which codec we're using so it can initialize the right decoder.
+    // 0xFC + 0x00 = H264, 0xFC + 0x01 = H265/HEVC.
+    _socket.send(Packet(
+      type: PacketType.control,
+      timestampUs: DateTime.now().microsecondsSinceEpoch,
+      payload: Uint8List.fromList([0xFC, config.codec == CodecType.h265 ? 1 : 0]),
+    ));
 
     // Forward each encoded NAL unit from native → socket as FRAME_DATA.
     _frameSub = _capture.frameStream.listen((nal) {
@@ -334,6 +343,13 @@ class ConnectionManager extends GetxService with WidgetsBindingObserver {
       case PacketType.control
           when !isHost && packet.payload.isNotEmpty && packet.payload[0] == 0xFE:
         requestIdr();
+        break;
+
+      // 0xFC + codec_byte — Host → Tablet: codec changed, reinitialize decoder.
+      case PacketType.control
+          when !isHost && packet.payload.length >= 2 && packet.payload[0] == 0xFC:
+        final newCodec = packet.payload[1] == 1 ? CodecType.h265 : CodecType.h264;
+        _settings.setCodec(newCodec);
         break;
 
       // 0xFD + mode_byte — Tablet → Host: change display mode (0=extend,1=mirror).

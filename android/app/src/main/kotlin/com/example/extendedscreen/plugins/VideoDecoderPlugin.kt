@@ -4,22 +4,31 @@ import android.app.Activity
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
+import android.os.Build
 import android.view.Surface
+import android.view.WindowManager
 import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.BasicMessageChannel
+import io.flutter.plugin.common.BinaryCodec
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import java.nio.ByteBuffer
 import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.atomic.AtomicInteger
 
 object VideoDecoderPlugin : MethodChannel.MethodCallHandler {
 
     private const val CHANNEL = "extended_screen/video_decoder"
+    private const val NAL_CHANNEL = "extended_screen/nal_feed"
 
     private var mediaCodec: MediaCodec? = null
     private var surface: Surface? = null
     private val nalQueue = LinkedBlockingQueue<ByteArray>(120)
     private val availableInputs = LinkedBlockingQueue<Int>()
     private var channel: MethodChannel? = null
+    private var activity: Activity? = null
     private var configured = false
+    private val droppedNalCount = AtomicInteger(0)
 
     // Pending init params (set by Dart `initialize`); codec is configured once
     // BOTH the surface and these params are available — whichever arrives last.
@@ -28,9 +37,20 @@ object VideoDecoderPlugin : MethodChannel.MethodCallHandler {
     private var pendingFps = 60
     private var pendingMime: String? = null
 
-    fun register(engine: FlutterEngine, activity: Activity) {
+    fun register(engine: FlutterEngine, act: Activity) {
+        activity = act
         channel = MethodChannel(engine.dartExecutor.binaryMessenger, CHANNEL)
         channel?.setMethodCallHandler(this)
+        // Binary channel for NAL data — avoids StandardMessageCodec overhead on hot path.
+        BasicMessageChannel(engine.dartExecutor.binaryMessenger, NAL_CHANNEL, BinaryCodec.INSTANCE)
+            .setMessageHandler { buf, reply ->
+                if (buf != null) {
+                    val nal = ByteArray(buf.remaining())
+                    buf.get(nal)
+                    feedNal(nal)
+                }
+                reply.reply(null)
+            }
     }
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
@@ -41,12 +61,8 @@ object VideoDecoderPlugin : MethodChannel.MethodCallHandler {
                 pendingFps = call.argument<Int>("fps") ?: 60
                 pendingMime = if ((call.argument<String>("codec") ?: "h264") == "h265")
                     MediaFormat.MIMETYPE_VIDEO_HEVC else MediaFormat.MIMETYPE_VIDEO_AVC
+                setDisplayRefreshRate(pendingFps.toFloat())
                 tryConfigure()
-                result.success(null)
-            }
-            "feedNal" -> {
-                val nal = call.argument<ByteArray>("nal")
-                if (nal != null) feedNal(nal)
                 result.success(null)
             }
             "requestIdr" -> {
@@ -56,6 +72,9 @@ object VideoDecoderPlugin : MethodChannel.MethodCallHandler {
             "dispose" -> {
                 dispose()
                 result.success(null)
+            }
+            "getDropCount" -> {
+                result.success(droppedNalCount.getAndSet(0))
             }
             else -> result.notImplemented()
         }
@@ -99,6 +118,11 @@ object VideoDecoderPlugin : MethodChannel.MethodCallHandler {
         }
     }
 
+    // NAL type 7 = SPS, which always leads a keyframe group (SPS+PPS+IDR).
+    // Dropping a keyframe NAL corrupts all following P-frames until the next IDR.
+    private fun isKeyframeNal(nal: ByteArray) =
+        nal.size >= 5 && (nal[4].toInt() and 0x1F) == 7
+
     // Pair an incoming NAL with an available input buffer; whichever is ready.
     @Synchronized
     private fun feedNal(nal: ByteArray) {
@@ -108,10 +132,26 @@ object VideoDecoderPlugin : MethodChannel.MethodCallHandler {
             submit(codec, index, nal)
         } else {
             if (!nalQueue.offer(nal)) {
-                nalQueue.poll() // drop oldest to bound latency
+                // Queue full — prefer dropping a P-frame over a keyframe so the
+                // decoder stays in a decodable state without forcing an IDR request.
+                val dropped = dropOldestNonKeyframe()
+                if (!dropped) nalQueue.poll() // all keyframes — drop oldest anyway
                 nalQueue.offer(nal)
+                droppedNalCount.incrementAndGet()
             }
         }
+    }
+
+    // Returns true if a non-keyframe NAL was found and removed.
+    private fun dropOldestNonKeyframe(): Boolean {
+        val iter = nalQueue.iterator()
+        while (iter.hasNext()) {
+            if (!isKeyframeNal(iter.next())) {
+                iter.remove()
+                return true
+            }
+        }
+        return false
     }
 
     @Synchronized
@@ -133,6 +173,28 @@ object VideoDecoderPlugin : MethodChannel.MethodCallHandler {
         } catch (_: Exception) {}
     }
 
+    private fun setDisplayRefreshRate(fps: Float) {
+        val act = activity ?: return
+        act.runOnUiThread {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                // API 30+: request exact display mode with target refresh rate
+                val display = act.display ?: return@runOnUiThread
+                val targetMode = display.supportedModes
+                    .filter { it.physicalWidth == display.mode.physicalWidth }
+                    .maxByOrNull { if (it.refreshRate <= fps) it.refreshRate else 0f }
+                if (targetMode != null) {
+                    val params = act.window.attributes
+                    params.preferredDisplayModeId = targetMode.modeId
+                    act.window.attributes = params
+                }
+            } else {
+                val params = act.window.attributes
+                params.preferredRefreshRate = fps
+                act.window.attributes = params
+            }
+        }
+    }
+
     @Synchronized
     private fun dispose() {
         try {
@@ -145,6 +207,7 @@ object VideoDecoderPlugin : MethodChannel.MethodCallHandler {
         pendingMime = null
         nalQueue.clear()
         availableInputs.clear()
+        droppedNalCount.set(0)
     }
 
     private class CodecCallback : MediaCodec.Callback() {
@@ -155,7 +218,6 @@ object VideoDecoderPlugin : MethodChannel.MethodCallHandler {
         override fun onOutputBufferAvailable(
             codec: MediaCodec, index: Int, info: MediaCodec.BufferInfo
         ) {
-            // render = true → releases the buffer straight to the Surface.
             try { codec.releaseOutputBuffer(index, true) } catch (_: Exception) {}
         }
 

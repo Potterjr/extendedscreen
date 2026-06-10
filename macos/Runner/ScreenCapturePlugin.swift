@@ -36,9 +36,31 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
     private var virtualDisplayID: CGDirectDisplayID = 0
     private var forceKeyframe = true  // first encoded frame is always an IDR
     private var frameCount = 0
+    private var targetFps = 60
+    // Counts frames dispatched to encodeQueue but not yet returned.
+    // If this grows beyond the threshold we skip the incoming frame to bound latency.
+    private var pendingEncodeFrames: Int32 = 0
+    private static let maxPendingEncodeFrames: Int32 = 10
+
+    // High-resolution Mach thread drives encode at exactly targetFps.
+    // GCD DispatchSourceTimer is capped by the OS at ~60fps; mach_wait_until bypasses this.
+    private var encodeTimer: DispatchSourceTimer?
+    private var machThread: Thread?
+    private var machThreadRunning = false
+    private var latestPixelBuffer: CVPixelBuffer?
+    private var latestPTS: CMTime = .zero
+    private let bufferLock = NSLock()
+
+    // Diagnostic counters.
+    private var diagSckCount: Int32 = 0
+    private var diagEncCount: Int32 = 0
+    private var diagDropCount: Int32 = 0
+    private var diagTickCount: Int32 = 0   // timer ticks per second
+    private var diagLastLog = Date()
 
     private let captureQueue = DispatchQueue(label: "capture", qos: .userInteractive)
     private let encodeQueue  = DispatchQueue(label: "encode",  qos: .userInteractive)
+    private let timerQueue   = DispatchQueue(label: "timer",   qos: .userInteractive)
 
     static func register(with messenger: FlutterBinaryMessenger) {
         let plugin = ScreenCapturePluginImpl()
@@ -170,10 +192,12 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
         let hLogical = args["height"] as? Int ?? 924
         let w   = wLogical * 2   // 2960 physical pixels
         let h   = hLogical * 2   // 1848 physical pixels
-        let fps = args["refreshRate"] as? Int ?? 60
-        let br  = args["bitrate"]     as? Int ?? 20_000_000
+        let fps   = args["refreshRate"] as? Int ?? 60
+        let br    = args["bitrate"]     as? Int ?? 20_000_000
+        let codec = args["codec"]       as? String ?? "h264"
+        targetFps = fps
 
-        setupEncoder(width: w, height: h, fps: fps, bitrate: br)
+        setupEncoder(width: w, height: h, fps: fps, bitrate: br, codec: codec)
 
         SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { [weak self] content, error in
             guard let self = self, let content = content, error == nil else {
@@ -212,8 +236,11 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
 
             do {
                 try self.stream?.addStreamOutput(self, type: .screen, sampleHandlerQueue: self.captureQueue)
-                self.stream?.startCapture { err in
+                self.stream?.startCapture { [weak self] err in
                     DispatchQueue.main.async {
+                        if err == nil {
+                            self?.startDisplayLink(displayID: targetDisplay.displayID)
+                        }
                         result(err == nil ? nil : FlutterError(code: "START_FAILED", message: err?.localizedDescription, details: nil))
                     }
                 }
@@ -225,10 +252,111 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
         }
     }
 
+    private func startDisplayLink(displayID: CGDirectDisplayID) {
+        stopDisplayLink()
+        // Use a dedicated real-time Mach thread — mach_wait_until gives nanosecond-accurate
+        // wakeups independent of GCD's ~60fps scheduler cap.
+        machThreadRunning = true
+        let t = Thread { [weak self] in self?.machTimerLoop() }
+        t.qualityOfService = .userInteractive
+        t.threadPriority = 1.0
+        t.start()
+        machThread = t
+    }
+
+    private func stopDisplayLink() {
+        machThreadRunning = false
+        machThread = nil
+        encodeTimer?.cancel()
+        encodeTimer = nil
+        bufferLock.lock(); latestPixelBuffer = nil; bufferLock.unlock()
+    }
+
+    private func machTimerLoop() {
+        let intervalNs = UInt64(1_000_000_000) / UInt64(max(targetFps, 1))
+        var info = mach_timebase_info_data_t()
+        mach_timebase_info(&info)
+        // On Apple Silicon numer==denom==1, so intervalMach==intervalNs.
+        let intervalMach = intervalNs * UInt64(info.denom) / UInt64(info.numer)
+        NSLog("[ExtendedScreen] machTimerLoop: targetFps=\(targetFps) intervalNs=\(intervalNs) intervalMach=\(intervalMach) numer=\(info.numer) denom=\(info.denom)")
+
+        var next = mach_absolute_time() + intervalMach
+        var loopCount: Int32 = 0
+        var loopStart = mach_absolute_time()
+        while machThreadRunning {
+            mach_wait_until(next)
+            next += intervalMach
+            OSAtomicIncrement32(&loopCount)
+            // Log loop rate every ~1s independently of onDisplayLinkTick
+            let elapsed = mach_absolute_time() - loopStart
+            let elapsedNs = elapsed * UInt64(info.numer) / UInt64(info.denom)
+            if elapsedNs >= 1_000_000_000 {
+                NSLog("[ExtendedScreen] loopRate=\(loopCount)/s")
+                loopCount = 0
+                loopStart = mach_absolute_time()
+            }
+            onDisplayLinkTick()
+        }
+    }
+
+    private func onDisplayLinkTick() {
+        OSAtomicIncrement32(&diagTickCount)
+        // Diagnostic log every 1s (happens regardless of encode)
+        let now = Date()
+        if now.timeIntervalSince(diagLastLog) >= 1.0 {
+            let sck  = OSAtomicAdd32(0, &diagSckCount);  OSAtomicAnd32(0, &diagSckCount)
+            let enc  = OSAtomicAdd32(0, &diagEncCount);  OSAtomicAnd32(0, &diagEncCount)
+            let drp  = OSAtomicAdd32(0, &diagDropCount); OSAtomicAnd32(0, &diagDropCount)
+            let tick = OSAtomicAdd32(0, &diagTickCount); OSAtomicAnd32(0, &diagTickCount)
+            NSLog("[ExtendedScreen] diag: tick=\(tick)/s  SCK=\(sck)/s  encoded=\(enc)/s  skipped=\(drp)/s  pending=\(OSAtomicAdd32(0, &pendingEncodeFrames))")
+            diagLastLog = now
+        }
+        guard let session = compressionSession else { return }
+
+        bufferLock.lock()
+        let pixelBuffer = latestPixelBuffer
+        let pts = latestPTS
+        bufferLock.unlock()
+
+        guard let pb = pixelBuffer else { return }
+
+        let pending = OSAtomicAdd32(0, &pendingEncodeFrames)
+        if pending >= Self.maxPendingEncodeFrames {
+            OSAtomicIncrement32(&diagDropCount)
+            return
+        }
+
+        var frameProps: CFDictionary? = nil
+        if forceKeyframe {
+            forceKeyframe = false
+            frameProps = [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue] as CFDictionary
+        }
+
+        OSAtomicIncrement32(&diagEncCount)
+        OSAtomicIncrement32(&pendingEncodeFrames)
+        // Call VT directly on the timer thread — no serial queue bottleneck.
+        // VTCompressionSessionEncodeFrame is non-blocking (submits to hardware) and
+        // fires its callback on a VT-internal thread, so this is safe.
+        VTCompressionSessionEncodeFrame(
+            session,
+            imageBuffer: pb,
+            presentationTimeStamp: pts,
+            duration: .invalid,
+            frameProperties: frameProps,
+            infoFlagsOut: nil
+        ) { [weak self] status, _, encodedBuffer in
+            OSAtomicDecrement32(&self!.pendingEncodeFrames)
+            guard status == noErr, let encoded = encodedBuffer else { return }
+            self?.handleEncodedFrame(encoded)
+        }
+    }
+
     private func stopCapture() {
+        stopDisplayLink()  // cancel timer first so no new encodes fire during teardown
         stream?.stopCapture { _ in }
         stream = nil
         frameCount = 0
+        pendingEncodeFrames = 0
         if let session = compressionSession {
             VTCompressionSessionInvalidate(session)
             compressionSession = nil
@@ -239,8 +367,7 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .screen,
-              let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer),
-              let session = compressionSession else { return }
+              let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
         if frameCount == 0 {
             let pw = CVPixelBufferGetWidth(pixelBuffer)
@@ -248,26 +375,14 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
             NSLog("[ExtendedScreen] First frame pixel size: \(pw)x\(ph)")
         }
         frameCount += 1
+        OSAtomicIncrement32(&diagSckCount)
 
+        // Store latest frame; CVDisplayLink tick drives the actual encode.
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        var frameProps: CFDictionary? = nil
-        if forceKeyframe {
-            forceKeyframe = false
-            frameProps = [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue] as CFDictionary
-        }
-        encodeQueue.async {
-            VTCompressionSessionEncodeFrame(
-                session,
-                imageBuffer: pixelBuffer,
-                presentationTimeStamp: pts,
-                duration: .invalid,
-                frameProperties: frameProps,
-                infoFlagsOut: nil
-            ) { [weak self] status, _, encodedBuffer in
-                guard status == noErr, let encoded = encodedBuffer else { return }
-                self?.handleEncodedFrame(encoded)
-            }
-        }
+        bufferLock.lock()
+        latestPixelBuffer = pixelBuffer
+        latestPTS = pts
+        bufferLock.unlock()
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
@@ -276,8 +391,10 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
 
     // MARK: - VideoToolbox Encoder
 
-    private func setupEncoder(width: Int, height: Int, fps: Int, bitrate: Int) {
+    private func setupEncoder(width: Int, height: Int, fps: Int, bitrate: Int, codec: String) {
         var session: VTCompressionSession?
+        let isHEVC = codec == "h265"
+        let codecType: CMVideoCodecType = isHEVC ? kCMVideoCodecType_HEVC : kCMVideoCodecType_H264
         let spec: [CFString: Any] = [
             kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: true
         ]
@@ -285,7 +402,7 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
             allocator: nil,
             width: Int32(width),
             height: Int32(height),
-            codecType: kCMVideoCodecType_H264,
+            codecType: codecType,
             encoderSpecification: spec as CFDictionary,
             imageBufferAttributes: nil,
             compressedDataAllocator: nil,
@@ -295,17 +412,21 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
         )
         guard let s = session else { return }
 
-        // Baseline profile + CAVLC: lower decode complexity on Android MediaCodec,
-        // directly reducing end-to-end latency vs High+CABAC.
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_RealTime,                value: kCFBooleanTrue)
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AllowFrameReordering,    value: kCFBooleanFalse)
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ProfileLevel,            value: kVTProfileLevel_H264_Baseline_AutoLevel)
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_H264EntropyMode,         value: kVTH264EntropyMode_CAVLC)
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_MaxKeyFrameInterval,     value: NSNumber(value: fps))
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate,          value: NSNumber(value: bitrate))
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ExpectedFrameRate,       value: NSNumber(value: fps))
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_RealTime,             value: kCFBooleanTrue)
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
+        if isHEVC {
+            VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ProfileLevel,     value: kVTProfileLevel_HEVC_Main_AutoLevel)
+        } else {
+            // Baseline+CAVLC: lowest decode complexity on Android MediaCodec.
+            VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ProfileLevel,     value: kVTProfileLevel_H264_Baseline_AutoLevel)
+            VTSessionSetProperty(s, key: kVTCompressionPropertyKey_H264EntropyMode,  value: kVTH264EntropyMode_CAVLC)
+        }
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_MaxKeyFrameInterval,  value: NSNumber(value: fps))
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate,       value: NSNumber(value: bitrate))
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ExpectedFrameRate,    value: NSNumber(value: fps))
         VTCompressionSessionPrepareToEncodeFrames(s)
         compressionSession = s
+        NSLog("[ExtendedScreen] Encoder: \(isHEVC ? "HEVC" : "H264") \(width)x\(height) \(fps)fps \(bitrate/1000)kbps")
     }
 
     private static let startCode: [UInt8] = [0x00, 0x00, 0x00, 0x01]
@@ -325,21 +446,37 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
 
         var out = Data()
 
-        // On keyframes, prepend SPS/PPS (parameter sets) in Annex-B form.
+        // On keyframes, prepend parameter sets (SPS/PPS for H264; VPS/SPS/PPS for HEVC).
         if isKeyframe, let fmt = CMSampleBufferGetFormatDescription(sampleBuffer) {
+            let isHEVC = CMFormatDescriptionGetMediaSubType(fmt) == kCMVideoCodecType_HEVC
             var count = 0
-            CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
-                fmt, parameterSetIndex: 0, parameterSetPointerOut: nil,
-                parameterSetSizeOut: nil, parameterSetCountOut: &count, nalUnitHeaderLengthOut: nil)
-            for i in 0..<count {
-                var psPtr: UnsafePointer<UInt8>?
-                var psSize = 0
-                if CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
-                    fmt, parameterSetIndex: i, parameterSetPointerOut: &psPtr,
-                    parameterSetSizeOut: &psSize, parameterSetCountOut: nil,
-                    nalUnitHeaderLengthOut: nil) == noErr, let p = psPtr {
-                    out.append(contentsOf: Self.startCode)
-                    out.append(p, count: psSize)
+            if isHEVC {
+                CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+                    fmt, parameterSetIndex: 0, parameterSetPointerOut: nil,
+                    parameterSetSizeOut: nil, parameterSetCountOut: &count, nalUnitHeaderLengthOut: nil)
+                for i in 0..<count {
+                    var psPtr: UnsafePointer<UInt8>?; var psSize = 0
+                    if CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+                        fmt, parameterSetIndex: i, parameterSetPointerOut: &psPtr,
+                        parameterSetSizeOut: &psSize, parameterSetCountOut: nil,
+                        nalUnitHeaderLengthOut: nil) == noErr, let p = psPtr {
+                        out.append(contentsOf: Self.startCode)
+                        out.append(p, count: psSize)
+                    }
+                }
+            } else {
+                CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                    fmt, parameterSetIndex: 0, parameterSetPointerOut: nil,
+                    parameterSetSizeOut: nil, parameterSetCountOut: &count, nalUnitHeaderLengthOut: nil)
+                for i in 0..<count {
+                    var psPtr: UnsafePointer<UInt8>?; var psSize = 0
+                    if CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                        fmt, parameterSetIndex: i, parameterSetPointerOut: &psPtr,
+                        parameterSetSizeOut: &psSize, parameterSetCountOut: nil,
+                        nalUnitHeaderLengthOut: nil) == noErr, let p = psPtr {
+                        out.append(contentsOf: Self.startCode)
+                        out.append(p, count: psSize)
+                    }
                 }
             }
         }
