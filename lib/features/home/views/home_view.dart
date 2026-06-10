@@ -5,6 +5,7 @@ import '../../../core/connection/connection_manager.dart';
 import '../../../core/connection/connection_state.dart';
 import '../widgets/connection_card.dart';
 import '../widgets/device_info_card.dart';
+import '../widgets/device_picker_card.dart';
 import '../widgets/latency_chip.dart';
 
 class HomeView extends GetView<HomeController> {
@@ -36,30 +37,25 @@ class HomeView extends GetView<HomeController> {
               ConnectionCard(
                 phase: phase,
                 onTap: controller.onConnectTap,
+                // Host connects only via the device picker, not this button.
+                canConnect: !controller.isHost,
               ),
               const SizedBox(height: 16),
+              // Host: pick which Android client to stream to while idle.
+              if (controller.isHost &&
+                  !phase.isActive &&
+                  !phase.isConnecting) ...[
+                DevicePickerCard(
+                  devices: cm.availableDevices,
+                  onSelect: controller.onSelectDevice,
+                  onRefresh: controller.refreshDevices,
+                ),
+                const SizedBox(height: 16),
+              ],
               if (phase.isActive) ...[
                 DeviceInfoCard(device: cm.activeDevice.value),
                 const SizedBox(height: 12),
                 LatencyChip(latencyMs: cm.latencyMs.value),
-                const SizedBox(height: 24),
-                SizedBox(
-                  width: double.infinity,
-                  height: 52,
-                  child: FilledButton.icon(
-                    onPressed: controller.onGoToDisplay,
-                    icon: const Icon(Icons.open_in_full),
-                    label: const Text('Open Display'),
-                    style: FilledButton.styleFrom(
-                      backgroundColor: const Color(0xFF00C8FF),
-                      foregroundColor: Colors.black,
-                      textStyle: const TextStyle(
-                        fontWeight: FontWeight.w600,
-                        fontSize: 16,
-                      ),
-                    ),
-                  ),
-                ),
               ],
               if (phase == ConnectionPhase.error) ...[
                 const SizedBox(height: 16),

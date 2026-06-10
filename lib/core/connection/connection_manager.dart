@@ -41,6 +41,9 @@ class ConnectionManager extends GetxService with WidgetsBindingObserver {
   final activeDevice = Rxn<DeviceModel>();
   final latencyMs = 0.obs;
 
+  /// Host only: ADB devices currently detected, for the picker UI.
+  final availableDevices = <DeviceModel>[].obs;
+
   /// Raw packet stream for consumers (DisplayController reads FRAME_DATA here).
   Stream<Packet> get packetStream => _socket.packetStream;
 
@@ -70,16 +73,41 @@ class ConnectionManager extends GetxService with WidgetsBindingObserver {
     // Only disconnect on full process detach; hidden/paused keeps streaming.
     if (state == AppLifecycleState.detached) {
       disconnect();
-    } else if (state == AppLifecycleState.resumed && !phase.value.isActive) {
-      // Reconnect if the link was lost while backgrounded.
-      connect();
+    } else if (state == AppLifecycleState.resumed &&
+        !phase.value.isActive &&
+        activeDevice.value != null) {
+      // Reconnect only if a session was already established and the link was
+      // lost while backgrounded — never auto-connect a fresh launch. The host
+      // reconnects to the same chosen device.
+      connect(serial: isHost ? activeDevice.value!.serial : null);
     }
   }
 
-  Future<void> connect() async {
+  /// Host only: refresh the list of detected ADB devices for the picker.
+  Future<void> refreshDevices() async {
+    if (!isHost) return;
+    availableDevices.value = await _adb.listDevices();
+  }
+
+  /// Entry-point auto-connect (called from splash).
+  ///
+  /// Client always dials in. The host never connects automatically — it only
+  /// loads the device list; the user must pick a client from the picker to
+  /// connect (and open the display).
+  Future<void> autoConnect() async {
+    if (!isHost) {
+      await connect();
+      return;
+    }
+    await refreshDevices();
+  }
+
+  /// [serial] (host only) overrides which Android client to connect to;
+  /// when null the last-used device (or the first detected) is chosen.
+  Future<void> connect({String? serial}) async {
     if (phase.value.isConnecting || phase.value.isActive) return;
     if (isHost) {
-      await _connectAsHost();
+      await _connectAsHost(serial: serial);
     } else {
       await _connectAsClient();
     }
@@ -87,13 +115,15 @@ class ConnectionManager extends GetxService with WidgetsBindingObserver {
 
   // ─── HOST (macOS) ───────────────────────────────────────────────────────
 
-  Future<void> _connectAsHost() async {
+  Future<void> _connectAsHost({String? serial}) async {
     try {
       _setPhase(ConnectionPhase.detectingDevice);
       final devices = await _adb.listDevices();
+      availableDevices.value = devices;
       if (devices.isEmpty) throw Exception('No ADB device detected');
 
-      final preferred = _settings.lastDeviceSerial;
+      // Pick the explicitly requested device, else the last-used one, else first.
+      final preferred = serial ?? _settings.lastDeviceSerial;
       final device = preferred != null
           ? (devices.firstWhereOrNull((d) => d.serial == preferred) ??
               devices.first)

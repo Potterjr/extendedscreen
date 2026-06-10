@@ -5,10 +5,16 @@ class ConnectionCard extends StatelessWidget {
   final ConnectionPhase phase;
   final VoidCallback onTap;
 
+  /// Whether to show the "Connect" action while disconnected. On the host this
+  /// is false — connecting happens only by picking a device. "Disconnect" is
+  /// always shown while active.
+  final bool canConnect;
+
   const ConnectionCard({
     super.key,
     required this.phase,
     required this.onTap,
+    this.canConnect = true,
   });
 
   @override
@@ -70,7 +76,7 @@ class ConnectionCard extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 12),
-          if (!isConnecting)
+          if (!isConnecting && (isActive || canConnect))
             TextButton(
               onPressed: onTap,
               style: TextButton.styleFrom(
