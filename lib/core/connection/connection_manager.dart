@@ -139,9 +139,13 @@ class ConnectionManager extends GetxService with WidgetsBindingObserver {
   }
 
   Future<void> _startCapture() async {
+    final preset = _settings.encodePreset;
     final config = DisplayConfigModel.defaultConfig.copyWith(
+      width: preset.width,
+      height: preset.height,
+      scaleFactor: preset.scaleFactor,
       refreshRate: _settings.fps,
-      bitrate: _settings.bitrate,
+      bitrate: preset.bitrate,
       mode: _settings.displayMode,
     );
 

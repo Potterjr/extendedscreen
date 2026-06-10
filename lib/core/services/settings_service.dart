@@ -11,6 +11,7 @@ class SettingsService extends GetxService {
   static const _keyLastDevice = 'last_device';
   static const _keyPerfOverlay = 'perf_overlay';
   static const _keyHudOverlay = 'hud_overlay';
+  static const _keyEncodePreset = 'encode_preset';
 
   final showPerformanceOverlay = false.obs;
   final showHudOverlay = true.obs;
@@ -37,6 +38,17 @@ class SettingsService extends GetxService {
 
   int get bitrate => _prefs.getInt(_keyBitrate) ?? 15000000; // 15 Mbps
   Future<void> setBitrate(int bps) => _prefs.setInt(_keyBitrate, bps);
+
+  EncodePreset get encodePreset {
+    final v = _prefs.getString(_keyEncodePreset);
+    return EncodePreset.values.firstWhere(
+      (e) => e.name == v,
+      orElse: () => EncodePreset.balanced,
+    );
+  }
+
+  Future<void> setEncodePreset(EncodePreset preset) =>
+      _prefs.setString(_keyEncodePreset, preset.name);
 
   int get fps => _prefs.getInt(_keyFps) ?? 60;
   Future<void> setFps(int fps) => _prefs.setInt(_keyFps, fps);

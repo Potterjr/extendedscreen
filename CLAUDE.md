@@ -71,4 +71,8 @@ Mode changes while streaming call `reapplyCapture()` which tears down and restar
 
 ### Key settings (`lib/core/services/settings_service.dart`)
 
-Persisted via `shared_preferences`: FPS, bitrate, display mode, last paired device serial. Secure storage (`flutter_secure_storage`) is available for pairing tokens/TLS certs.
+Persisted via `shared_preferences`: FPS, display mode, last paired device serial, encode preset. Secure storage (`flutter_secure_storage`) is available for pairing tokens/TLS certs.
+
+### Encode presets (`lib/core/models/display_config_model.dart`)
+
+`EncodePreset` bundles resolution + scale factor + bitrate into three named presets (`quality`, `balanced`, `performance`). `ConnectionManager._startCapture()` reads the active preset and applies all four values to `DisplayConfigModel` at once. The logical width/height passed to `CGVirtualDisplay` are half the physical pixels when `scaleFactor` is 2.0 (HiDPI path).

@@ -48,35 +48,37 @@ class SettingsView extends GetView<SettingsController> {
                   )
                 : const SizedBox.shrink()),
           ]),
-          const SizedBox(height: 16),
-          _SectionHeader('Performance'),
-          _SettingsCard(children: [
-            Obx(() => _ChoiceRow(
-                  label: 'Frame Rate',
-                  value: '${controller.fps.value} fps',
-                  enabled: !controller.isApplying.value,
-                  onTap: () => _showFpsPicker(context),
-                )),
-            const Divider(height: 1, color: Colors.white12),
-            Obx(() => _ChoiceRow(
-                  label: 'Bitrate',
-                  value: controller.bitrateLabel,
-                  enabled: !controller.isApplying.value,
-                  onTap: () => _showBitratePicker(context),
-                )),
-            const Divider(height: 1, color: Colors.white12),
-            Obx(() => _ToggleRow(
-                  label: 'Performance Overlay',
-                  value: controller.showPerformanceOverlay.value,
-                  onChanged: (_) => controller.togglePerformanceOverlay(),
-                )),
-            const Divider(height: 1, color: Colors.white12),
-            Obx(() => _ToggleRow(
-                  label: 'Show HUD (fps / latency / disconnect)',
-                  value: controller.showHudOverlay.value,
-                  onChanged: (_) => controller.toggleHudOverlay(),
-                )),
-          ]),
+          if (GetPlatform.isAndroid) ...[
+            const SizedBox(height: 16),
+            _SectionHeader('Performance'),
+            _SettingsCard(children: [
+              Obx(() => _ChoiceRow(
+                    label: 'Encode Preset',
+                    value: controller.encodePreset.value.label,
+                    enabled: !controller.isApplying.value,
+                    onTap: () => _showPresetPicker(context),
+                  )),
+              const Divider(height: 1, color: Colors.white12),
+              Obx(() => _ChoiceRow(
+                    label: 'Frame Rate',
+                    value: '${controller.fps.value} fps',
+                    enabled: !controller.isApplying.value,
+                    onTap: () => _showFpsPicker(context),
+                  )),
+              const Divider(height: 1, color: Colors.white12),
+              Obx(() => _ToggleRow(
+                    label: 'Performance Overlay',
+                    value: controller.showPerformanceOverlay.value,
+                    onChanged: (_) => controller.togglePerformanceOverlay(),
+                  )),
+              const Divider(height: 1, color: Colors.white12),
+              Obx(() => _ToggleRow(
+                    label: 'Show HUD (fps / latency / disconnect)',
+                    value: controller.showHudOverlay.value,
+                    onChanged: (_) => controller.toggleHudOverlay(),
+                  )),
+            ]),
+          ],
           const SizedBox(height: 16),
           _SectionHeader('Permissions'),
           Obx(() {
@@ -153,6 +155,18 @@ class SettingsView extends GetView<SettingsController> {
     );
   }
 
+  void _showPresetPicker(BuildContext context) {
+    final presets = EncodePreset.values;
+    Get.bottomSheet(
+      _PickerSheet(
+        title: 'Encode Preset',
+        items: presets.map((p) => '${p.label}  —  ${p.description}').toList(),
+        selected: presets.indexOf(controller.encodePreset.value),
+        onSelected: (i) => controller.setEncodePreset(presets[i]),
+      ),
+    );
+  }
+
   void _showFpsPicker(BuildContext context) {
     Get.bottomSheet(
       _PickerSheet(
@@ -164,18 +178,7 @@ class SettingsView extends GetView<SettingsController> {
     );
   }
 
-  void _showBitratePicker(BuildContext context) {
-    Get.bottomSheet(
-      _PickerSheet(
-        title: 'Bitrate',
-        items: controller.bitrateOptions.map((o) => o.label).toList(),
-        selected: controller.bitrateOptions
-            .indexWhere((o) => o.value == controller.bitrate.value),
-        onSelected: (i) =>
-            controller.setBitrate(controller.bitrateOptions[i].value),
-      ),
-    );
-  }
+
 }
 
 class _SectionHeader extends StatelessWidget {

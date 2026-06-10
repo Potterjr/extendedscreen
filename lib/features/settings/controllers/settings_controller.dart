@@ -28,6 +28,7 @@ class SettingsController extends GetxController {
   late final mode = _settings.displayMode.obs;
   late final fps = _settings.fps.obs;
   late final bitrate = _settings.bitrate.obs;
+  late final encodePreset = _settings.encodePreset.obs;
   RxBool get showPerformanceOverlay => _settings.showPerformanceOverlay;
   RxBool get showHudOverlay => _settings.showHudOverlay;
 
@@ -114,6 +115,13 @@ class SettingsController extends GetxController {
     if (bitrate.value == bps) return;
     bitrate.value = bps;
     _settings.setBitrate(bps);
+    _reapply();
+  }
+
+  void setEncodePreset(EncodePreset preset) {
+    if (encodePreset.value == preset) return;
+    encodePreset.value = preset;
+    _settings.setEncodePreset(preset);
     _reapply();
   }
 

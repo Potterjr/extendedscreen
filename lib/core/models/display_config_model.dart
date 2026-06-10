@@ -2,6 +2,47 @@ enum DisplayMode { extend, mirror }
 
 enum CodecType { h264, h265 }
 
+enum EncodePreset { quality, balanced, performance }
+
+extension EncodePresetX on EncodePreset {
+  String get label => switch (this) {
+        EncodePreset.quality => 'Quality',
+        EncodePreset.balanced => 'Balanced',
+        EncodePreset.performance => 'Performance',
+      };
+
+  String get description => switch (this) {
+        EncodePreset.quality => '2960×1848 · 20 Mbps — sharpest',
+        EncodePreset.balanced => '2960×1848 · 8 Mbps — native + smooth',
+        EncodePreset.performance => '1920×1200 · 15 Mbps — smoothest',
+      };
+
+  // Logical width/height passed to CGVirtualDisplay (Swift doubles if HiDPI).
+  int get width => switch (this) {
+        EncodePreset.quality => 1480,
+        EncodePreset.balanced => 1480,
+        EncodePreset.performance => 1920,
+      };
+
+  int get height => switch (this) {
+        EncodePreset.quality => 924,
+        EncodePreset.balanced => 924,
+        EncodePreset.performance => 1200,
+      };
+
+  double get scaleFactor => switch (this) {
+        EncodePreset.quality => 2.0,
+        EncodePreset.balanced => 2.0,
+        EncodePreset.performance => 1.0,
+      };
+
+  int get bitrate => switch (this) {
+        EncodePreset.quality => 20000000,
+        EncodePreset.balanced => 8000000,
+        EncodePreset.performance => 15000000,
+      };
+}
+
 class DisplayConfigModel {
   final int width;
   final int height;
