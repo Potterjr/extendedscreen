@@ -2,32 +2,67 @@ enum DisplayMode { extend, mirror }
 
 enum CodecType { h264, h265 }
 
-enum EncodePreset { quality, balanced, performance }
+enum EncodePreset { quality, balanced, performance, custom }
 
 extension EncodePresetX on EncodePreset {
   String get label => switch (this) {
         EncodePreset.quality => 'Quality',
         EncodePreset.balanced => 'Balanced',
         EncodePreset.performance => 'Performance',
+        EncodePreset.custom => 'Custom',
       };
 
-  String get description => switch (this) {
-        EncodePreset.quality => '2960×1848 · 20 Mbps — sharpest',
-        EncodePreset.balanced => '2960×1848 · 8 Mbps — native + smooth',
-        EncodePreset.performance => '1480×924 · 12 Mbps — high fps (120Hz)',
+  /// One-line spec, e.g. "2960×1848 · 20 Mbps · 60 Hz".
+  String get specLine => '$resolutionLabel · $bitrateLabel · $refreshRate Hz';
+
+  /// Short tagline shown next to the preset name.
+  String get tagline => switch (this) {
+        EncodePreset.quality => 'Sharpest image',
+        EncodePreset.balanced => 'Best all-round',
+        EncodePreset.performance => 'Smoothest motion',
+        EncodePreset.custom => 'Your settings',
       };
+
+  /// Detailed, plain-language explanation of the trade-off.
+  String get description => switch (this) {
+        EncodePreset.quality =>
+          'Full native resolution at a high bitrate. Text and fine detail look '
+              'their crispest — best for reading, writing and design work. '
+              'Uses the most USB bandwidth.',
+        EncodePreset.balanced =>
+          'Full native resolution at a moderate bitrate. Keeps the picture '
+              'sharp while using about half the data of Quality — the best '
+              'choice for everyday use.',
+        EncodePreset.performance =>
+          'Half the resolution but double the frame rate (120 Hz). Motion looks '
+              'much smoother at the cost of fine sharpness — best for video, '
+              'fast scrolling and animation.',
+        EncodePreset.custom =>
+          'Set your own resolution, bitrate and refresh rate. For advanced '
+              'tuning when the fixed presets do not fit.',
+      };
+
+  /// Physical pixels the host actually captures (logical size × scaleFactor).
+  String get resolutionLabel =>
+      '${(width * scaleFactor).round()}×${(height * scaleFactor).round()}';
+
+  /// Bitrate in Mbps, e.g. "20 Mbps".
+  String get bitrateLabel => '${(bitrate / 1000000).round()} Mbps';
 
   // Logical width/height passed to CGVirtualDisplay (Swift doubles if HiDPI).
+  // For `custom` these are fallbacks — the live values come from SettingsService.
   int get width => switch (this) {
         EncodePreset.quality => 1480,
         EncodePreset.balanced => 1480,
         EncodePreset.performance => 1480,
+        EncodePreset.custom => 1920,
       };
 
   int get height => switch (this) {
         EncodePreset.quality => 924,
         EncodePreset.balanced => 924,
         EncodePreset.performance => 924,
+        EncodePreset.custom => 1200,
       };
 
   // Performance uses 1.0x (no HiDPI): encodes 1480×924 instead of 2960×1848
@@ -36,12 +71,14 @@ extension EncodePresetX on EncodePreset {
         EncodePreset.quality => 2.0,
         EncodePreset.balanced => 2.0,
         EncodePreset.performance => 1.0,
+        EncodePreset.custom => 1.0,
       };
 
   int get bitrate => switch (this) {
         EncodePreset.quality => 20000000,
         EncodePreset.balanced => 8000000,
         EncodePreset.performance => 12000000,
+        EncodePreset.custom => 12000000,
       };
 
   // Refresh rate is tied to the preset (no separate frame-rate setting).
@@ -50,6 +87,7 @@ extension EncodePresetX on EncodePreset {
         EncodePreset.quality => 60,
         EncodePreset.balanced => 60,
         EncodePreset.performance => 120,
+        EncodePreset.custom => 60,
       };
 }
 

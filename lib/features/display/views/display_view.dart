@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:get/get.dart';
 import 'package:extendedscreen/features/display/controllers/display_controller.dart';
 import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
+import 'package:extendedscreen/shared/connection/connection_state.dart';
 import 'package:extendedscreen/shared/services/settings_service.dart';
 
 class DisplayView extends GetView<DisplayController> {
@@ -25,7 +26,55 @@ class DisplayView extends GetView<DisplayController> {
           Obx(() => Get.find<SettingsService>().showHudOverlay.value
               ? _HudOverlay(controller: controller)
               : const SizedBox.shrink()),
+
+          // Reconnect overlay — shown while the host restarts the stream (e.g.
+          // after a preset/codec change) and the link is being re-established.
+          Obx(() {
+            final phase = Get.find<BaseConnectionManager>().phase.value;
+            final reconnecting =
+                phase.isConnecting || phase == ConnectionPhase.error;
+            return reconnecting
+                ? const _ReconnectingOverlay()
+                : const SizedBox.shrink();
+          }),
         ],
+      ),
+    );
+  }
+}
+
+class _ReconnectingOverlay extends StatelessWidget {
+  const _ReconnectingOverlay();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: Colors.black.withValues(alpha: 0.78),
+      child: const Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(
+              width: 44,
+              height: 44,
+              child: CircularProgressIndicator(
+                  strokeWidth: 3, color: Color(0xFF00C8FF)),
+            ),
+            SizedBox(height: 20),
+            Text(
+              'Reconnecting…',
+              style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 17,
+                  fontWeight: FontWeight.w600),
+            ),
+            SizedBox(height: 6),
+            Text(
+              'Applying new settings from the host',
+              style: TextStyle(color: Colors.white60, fontSize: 13),
+            ),
+          ],
+        ),
       ),
     );
   }

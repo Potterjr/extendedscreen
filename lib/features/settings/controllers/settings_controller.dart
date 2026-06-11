@@ -27,6 +27,26 @@ class SettingsController extends GetxController {
   late final mode = _settings.displayMode.obs;
   late final encodePreset = _settings.encodePreset.obs;
   late final codec = _settings.codec.obs;
+
+  // Custom preset values (physical resolution px, Mbps, Hz).
+  late final customWidth = _settings.customWidth.obs;
+  late final customHeight = _settings.customHeight.obs;
+  late final customBitrateMbps = _settings.customBitrateMbps.obs;
+  late final customRefreshRate = _settings.customRefreshRate.obs;
+
+  String get customResolutionLabel => '${customWidth.value}×${customHeight.value}';
+  String get customBitrateLabel => '${customBitrateMbps.value} Mbps';
+
+  /// Resolution / bitrate / refresh-rate options offered for the custom preset.
+  final customResolutions = const [
+    (w: 2960, h: 1848),
+    (w: 2368, h: 1480),
+    (w: 1920, h: 1200),
+    (w: 1480, h: 924),
+    (w: 1280, h: 800),
+  ];
+  final customBitrateOptions = const [4, 6, 8, 12, 16, 20, 30, 40];
+  final customRefreshOptions = const [30, 60, 90, 120];
   RxBool get showPerformanceOverlay => _settings.showPerformanceOverlay;
   RxBool get showHudOverlay => _settings.showHudOverlay;
 
@@ -109,6 +129,28 @@ class SettingsController extends GetxController {
     if (codec.value == c) return;
     codec.value = c;
     _settings.setCodec(c);
+    _reconnect();
+  }
+
+  void setCustomResolution(int w, int h) {
+    if (customWidth.value == w && customHeight.value == h) return;
+    customWidth.value = w;
+    customHeight.value = h;
+    _settings.setCustomResolution(w, h);
+    _reconnect();
+  }
+
+  void setCustomBitrate(int mbps) {
+    if (customBitrateMbps.value == mbps) return;
+    customBitrateMbps.value = mbps;
+    _settings.setCustomBitrateMbps(mbps);
+    _reconnect();
+  }
+
+  void setCustomRefreshRate(int hz) {
+    if (customRefreshRate.value == hz) return;
+    customRefreshRate.value = hz;
+    _settings.setCustomRefreshRate(hz);
     _reconnect();
   }
 

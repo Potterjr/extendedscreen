@@ -97,13 +97,12 @@ class HostConnectionManager extends BaseConnectionManager {
   }
 
   Future<void> _startCapture() async {
-    final preset = settings.encodePreset;
     final config = DisplayConfigModel.defaultConfig.copyWith(
-      width: preset.width,
-      height: preset.height,
-      scaleFactor: preset.scaleFactor,
-      refreshRate: preset.refreshRate,
-      bitrate: preset.bitrate,
+      width: settings.captureWidth,
+      height: settings.captureHeight,
+      scaleFactor: settings.captureScaleFactor,
+      refreshRate: settings.refreshRate,
+      bitrate: settings.captureBitrate,
       mode: settings.displayMode,
       codec: settings.codec,
     );

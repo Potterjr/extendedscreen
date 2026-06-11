@@ -12,6 +12,11 @@ class SettingsService extends GetxService {
   static const _keyHudOverlay = 'hud_overlay';
   static const _keyEncodePreset = 'encode_preset';
   static const _keyCodec = 'codec';
+  // Custom preset values (physical resolution px, bitrate Mbps, refresh Hz).
+  static const _keyCustomW = 'custom_width';
+  static const _keyCustomH = 'custom_height';
+  static const _keyCustomMbps = 'custom_bitrate_mbps';
+  static const _keyCustomFps = 'custom_refresh_rate';
 
   final showPerformanceOverlay = false.obs;
   final showHudOverlay = true.obs;
@@ -50,8 +55,38 @@ class SettingsService extends GetxService {
   Future<void> setEncodePreset(EncodePreset preset) =>
       _prefs.setString(_keyEncodePreset, preset.name);
 
-  /// Refresh rate is derived from the active encode preset (no standalone setting).
-  int get refreshRate => encodePreset.refreshRate;
+  // ─── Custom preset values (physical resolution, Mbps, Hz) ─────────────────
+  int get customWidth => _prefs.getInt(_keyCustomW) ?? 1920;
+  int get customHeight => _prefs.getInt(_keyCustomH) ?? 1200;
+  int get customBitrateMbps => _prefs.getInt(_keyCustomMbps) ?? 12;
+  int get customRefreshRate => _prefs.getInt(_keyCustomFps) ?? 60;
+
+  Future<void> setCustomResolution(int w, int h) async {
+    await _prefs.setInt(_keyCustomW, w);
+    await _prefs.setInt(_keyCustomH, h);
+  }
+
+  Future<void> setCustomBitrateMbps(int mbps) =>
+      _prefs.setInt(_keyCustomMbps, mbps);
+  Future<void> setCustomRefreshRate(int hz) =>
+      _prefs.setInt(_keyCustomFps, hz);
+
+  bool get isCustomPreset => encodePreset == EncodePreset.custom;
+
+  // ─── Effective capture values (resolve custom vs fixed preset) ────────────
+  // Custom encodes at the chosen physical resolution with no HiDPI scaling.
+  int get captureWidth =>
+      isCustomPreset ? customWidth : encodePreset.width;
+  int get captureHeight =>
+      isCustomPreset ? customHeight : encodePreset.height;
+  double get captureScaleFactor =>
+      isCustomPreset ? 1.0 : encodePreset.scaleFactor;
+  int get captureBitrate =>
+      isCustomPreset ? customBitrateMbps * 1000000 : encodePreset.bitrate;
+
+  /// Effective refresh rate of the active preset (custom-aware).
+  int get refreshRate =>
+      isCustomPreset ? customRefreshRate : encodePreset.refreshRate;
 
   CodecType get codec {
     final v = _prefs.getString(_keyCodec);
