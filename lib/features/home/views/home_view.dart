@@ -21,9 +21,9 @@ class HomeView extends GetView<HomeController> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text(
-          'Extended Screen',
-          style: TextStyle(fontWeight: FontWeight.w600),
+        title: Text(
+          'app_name'.tr,
+          style: const TextStyle(fontWeight: FontWeight.w600),
         ),
         actions: [
           IconButton(
@@ -71,7 +71,9 @@ class HomeView extends GetView<HomeController> {
                     onPressed: phase.isActive ? controller.onOpenView : null,
                     icon: const Icon(Icons.open_in_full),
                     label: Text(
-                      phase.isActive ? 'Open View' : 'Waiting for stream…',
+                      phase.isActive
+                          ? 'home_open_view'.tr
+                          : 'home_waiting_for_stream'.tr,
                     ),
                     style: FilledButton.styleFrom(
                       backgroundColor: const Color(0xFF00C8FF),

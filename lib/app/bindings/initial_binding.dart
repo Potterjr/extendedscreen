@@ -15,7 +15,11 @@ class InitialBinding extends Bindings {
   @override
   void dependencies() {
     Get.put(LoggerService(), permanent: true);
-    Get.put(SettingsService(), permanent: true);
+    // SettingsService is registered in main() (loaded before runApp) so its
+    // saved language is ready when GetMaterialApp reads the locale.
+    if (!Get.isRegistered<SettingsService>()) {
+      Get.put(SettingsService(), permanent: true);
+    }
 
     // Transport — shared by both roles; permanent so it survives route changes.
     Get.put(SocketService(), permanent: true);

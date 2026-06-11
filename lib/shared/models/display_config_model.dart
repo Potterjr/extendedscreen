@@ -1,3 +1,6 @@
+import 'package:get/get.dart';
+import 'package:extendedscreen/shared/services/settings_service.dart';
+
 enum DisplayMode { extend, mirror }
 
 enum CodecType { h264, h265 }
@@ -5,11 +8,12 @@ enum CodecType { h264, h265 }
 enum EncodePreset { quality, balanced, performance, custom }
 
 extension EncodePresetX on EncodePreset {
+  // Localized strings resolve against the active GetX locale at read time.
   String get label => switch (this) {
-        EncodePreset.quality => 'Quality',
-        EncodePreset.balanced => 'Balanced',
-        EncodePreset.performance => 'Performance',
-        EncodePreset.custom => 'Custom',
+        EncodePreset.quality => 'preset_quality_label'.tr,
+        EncodePreset.balanced => 'preset_balanced_label'.tr,
+        EncodePreset.performance => 'preset_performance_label'.tr,
+        EncodePreset.custom => 'preset_custom_label'.tr,
       };
 
   /// One-line spec, e.g. "2960×1848 · 20 Mbps · 60 Hz".
@@ -17,29 +21,18 @@ extension EncodePresetX on EncodePreset {
 
   /// Short tagline shown next to the preset name.
   String get tagline => switch (this) {
-        EncodePreset.quality => 'Sharpest image',
-        EncodePreset.balanced => 'Best all-round',
-        EncodePreset.performance => 'Smoothest motion',
-        EncodePreset.custom => 'Your settings',
+        EncodePreset.quality => 'preset_quality_tagline'.tr,
+        EncodePreset.balanced => 'preset_balanced_tagline'.tr,
+        EncodePreset.performance => 'preset_performance_tagline'.tr,
+        EncodePreset.custom => 'preset_custom_tagline'.tr,
       };
 
   /// Detailed, plain-language explanation of the trade-off.
   String get description => switch (this) {
-        EncodePreset.quality =>
-          'Full native resolution at a high bitrate. Text and fine detail look '
-              'their crispest — best for reading, writing and design work. '
-              'Uses the most USB bandwidth.',
-        EncodePreset.balanced =>
-          'Full native resolution at a moderate bitrate. Keeps the picture '
-              'sharp while using about half the data of Quality — the best '
-              'choice for everyday use.',
-        EncodePreset.performance =>
-          'Half the resolution but double the frame rate (120 Hz). Motion looks '
-              'much smoother at the cost of fine sharpness — best for video, '
-              'fast scrolling and animation.',
-        EncodePreset.custom =>
-          'Set your own resolution, bitrate and refresh rate. For advanced '
-              'tuning when the fixed presets do not fit.',
+        EncodePreset.quality => 'preset_quality_desc'.tr,
+        EncodePreset.balanced => 'preset_balanced_desc'.tr,
+        EncodePreset.performance => 'preset_performance_desc'.tr,
+        EncodePreset.custom => 'preset_custom_desc'.tr,
       };
 
   /// Physical pixels the host actually captures (logical size × scaleFactor).
@@ -49,23 +42,25 @@ extension EncodePresetX on EncodePreset {
   /// Bitrate in Mbps, e.g. "20 Mbps".
   String get bitrateLabel => '${(bitrate / 1000000).round()} Mbps';
 
-  // Logical width/height passed to CGVirtualDisplay (Swift doubles if HiDPI).
+  // Native panel of the connected client (physical px, learned from its HELLO
+  // and persisted) — fixed presets are defined relative to this, so they adapt
+  // to whatever device is plugged in.
+  static int get _panelW => Get.find<SettingsService>().clientPanelWidth.value;
+  static int get _panelH => Get.find<SettingsService>().clientPanelHeight.value;
+
+  // Logical width/height passed to CGVirtualDisplay (panel ÷ 2 = HiDPI points).
   // For `custom` these are fallbacks — the live values come from SettingsService.
   int get width => switch (this) {
-        EncodePreset.quality => 1480,
-        EncodePreset.balanced => 1480,
-        EncodePreset.performance => 1480,
         EncodePreset.custom => 1920,
+        _ => _panelW ~/ 2,
       };
 
   int get height => switch (this) {
-        EncodePreset.quality => 924,
-        EncodePreset.balanced => 924,
-        EncodePreset.performance => 924,
         EncodePreset.custom => 1200,
+        _ => _panelH ~/ 2,
       };
 
-  // Performance uses 1.0x (no HiDPI): encodes 1480×924 instead of 2960×1848
+  // Performance uses 1.0x (no HiDPI): encodes at half the panel resolution
   // — 25% of Quality pixel count so VT can sustain 120fps throughput.
   double get scaleFactor => switch (this) {
         EncodePreset.quality => 2.0,
@@ -110,8 +105,9 @@ class DisplayConfigModel {
     required this.bitrate,
   });
 
-  // Logical desktop 1480×924 @ 2x HiDPI → captures 2960×1848 physical pixels,
-  // matching the Tab S10 Ultra's native panel for pixel-perfect sharpness.
+  // Logical desktop @ 2x HiDPI → captures at the client's native panel
+  // resolution for pixel-perfect sharpness. Width/height here are only
+  // fallbacks; the live values are derived from the connected device.
   static const defaultConfig = DisplayConfigModel(
     width: 1480,
     height: 924,

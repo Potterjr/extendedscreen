@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:get/get.dart';
 import 'package:extendedscreen/shared/models/device_model.dart';
 
 class DeviceInfoCard extends StatelessWidget {
@@ -22,7 +23,7 @@ class DeviceInfoCard extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                device!.model ?? 'Samsung Galaxy Tab',
+                device!.model ?? 'device_default_name'.tr,
                 style: const TextStyle(
                   color: Colors.white,
                   fontWeight: FontWeight.w500,

@@ -3,6 +3,7 @@ import 'package:get/get.dart';
 import 'package:extendedscreen/app/routes/app_pages.dart';
 import 'package:extendedscreen/app/bindings/initial_binding.dart';
 import 'package:extendedscreen/app/theme/app_theme.dart';
+import 'package:extendedscreen/shared/services/app_translations.dart';
 import 'package:extendedscreen/shared/services/settings_service.dart';
 
 class ExtendedScreenApp extends StatelessWidget {
@@ -16,6 +17,9 @@ class ExtendedScreenApp extends StatelessWidget {
       initialBinding: InitialBinding(),
       initialRoute: AppPages.initial,
       getPages: AppPages.routes,
+      translations: AppTranslations(),
+      locale: Get.find<SettingsService>().locale,
+      fallbackLocale: const Locale('en'),
       debugShowCheckedModeBanner: false,
       builder: (context, child) {
         return Obx(() {

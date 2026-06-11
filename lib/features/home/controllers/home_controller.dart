@@ -4,9 +4,14 @@ import 'package:extendedscreen/app/routes/app_routes.dart';
 import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
 import 'package:extendedscreen/shared/connection/connection_state.dart';
 import 'package:extendedscreen/shared/models/device_model.dart';
+import 'package:extendedscreen/shared/platform/permissions_channel.dart';
 
 class HomeController extends GetxController {
   final _connection = Get.find<BaseConnectionManager>();
+  final _perms = PermissionsChannel();
+
+  /// macOS host permissions that must be granted before capture can start.
+  static const _requiredHostPermissions = ['screen_recording', 'accessibility'];
 
   ConnectionPhase get phase => _connection.phase.value;
   DeviceModel? get device => _connection.activeDevice.value;
@@ -59,15 +64,39 @@ class HomeController extends GetxController {
     if (_connection.phase.value.isActive) {
       _connection.disconnect();
     } else {
-      _connection.connect();
+      _connect();
     }
   }
 
   /// Host: connect to the chosen Android client. Selecting a device is the only
   /// way to connect. The display renders on the Android device (it auto-opens
   /// there); the Mac stays on this screen as the capture source.
-  Future<void> onSelectDevice(DeviceModel device) async {
-    await _connection.connect(serial: device.serial);
+  Future<void> onSelectDevice(DeviceModel device) =>
+      _connect(serial: device.serial);
+
+  /// Gate every connect attempt behind a permission check on the host: capture
+  /// and input injection need Screen Recording + Accessibility. If anything is
+  /// missing, bounce to Settings (scrolled to Permissions) instead of failing
+  /// mid-handshake.
+  Future<void> _connect({String? serial}) async {
+    if (isHost && !await _ensureHostPermissions()) return;
+    await _connection.connect(serial: serial);
+  }
+
+  Future<bool> _ensureHostPermissions() async {
+    final status = await _perms.checkPermissions();
+    final granted = _requiredHostPermissions
+        .every((key) => status[key] ?? false);
+    if (!granted) {
+      Get.snackbar(
+        'perm_required_title'.tr,
+        'perm_required_msg'.tr,
+        snackPosition: SnackPosition.BOTTOM,
+        margin: const EdgeInsets.all(16),
+      );
+      Get.toNamed(AppRoutes.settings, arguments: {'scrollTo': 'permissions'});
+    }
+    return granted;
   }
 
   void onGoToSettings() {

@@ -146,10 +146,10 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
             guard let self else { return }
 
-            // w/h are the LOGICAL desktop points (e.g. 1480×924).
-            // Physical pixel buffer = w*2 × h*2 (2960×1848) — full Tab S10 Ultra panel.
-            let w = args["width"]  as? Int ?? 1480
-            let h = args["height"] as? Int ?? 924
+            // w/h are the LOGICAL desktop points (the client panel ÷ 2).
+            // Physical pixel buffer = w*2 × h*2 — the client's native panel.
+            let w = args["width"]  as? Int ?? 1280
+            let h = args["height"] as? Int ?? 800
             let r = args["refreshRate"] as? Int ?? 60
             let pw = w * 2, ph = h * 2  // physical pixels
 
@@ -159,7 +159,7 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
             descriptor.maxPixelsWide = UInt32(pw)
             descriptor.maxPixelsHigh = UInt32(ph)
             // ~220 PPI → macOS treats this as a Retina display and applies 2x
-            // HiDPI scaling: logical 1480×924 points, physical 2960×1848 pixels.
+            // HiDPI scaling: logical w×h points, physical pw×ph pixels.
             let mmW = CGFloat(w) / 220.0 * 25.4
             let mmH = CGFloat(h) / 220.0 * 25.4
             descriptor.sizeInMillimeters = CGSize(width: mmW, height: mmH)
@@ -187,11 +187,13 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
     // MARK: - Screen Capture
 
     private func startCapture(args: [String: Any], result: @escaping FlutterResult) {
-        // logical size from config; capture/encode at physical (2x HiDPI) resolution.
-        let wLogical = args["width"]  as? Int ?? 1480
-        let hLogical = args["height"] as? Int ?? 924
-        let w   = wLogical * 2   // 2960 physical pixels
-        let h   = hLogical * 2   // 1848 physical pixels
+        // Logical size × scaleFactor = the resolution we capture/encode at
+        // (2.0 = native panel via HiDPI, 1.0 = half-res for performance/custom).
+        let wLogical = args["width"]  as? Int ?? 1280
+        let hLogical = args["height"] as? Int ?? 800
+        let scale = args["scaleFactor"] as? Double ?? 2.0
+        let w = (Int(Double(wLogical) * scale) >> 1) << 1  // encoder needs even dims
+        let h = (Int(Double(hLogical) * scale) >> 1) << 1
         let fps   = args["refreshRate"] as? Int ?? 60
         let br    = args["bitrate"]     as? Int ?? 20_000_000
         let codec = args["codec"]       as? String ?? "h264"

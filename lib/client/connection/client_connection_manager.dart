@@ -1,4 +1,5 @@
 import 'dart:typed_data';
+import 'dart:ui';
 import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
 import 'package:extendedscreen/shared/connection/connection_state.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
@@ -44,13 +45,30 @@ class ClientConnectionManager extends BaseConnectionManager {
   }
 
   void _sendHandshake() {
-    // HELLO: version byte + platform byte (0x02 = Android client). The host
-    // owns all config now, so the client no longer sends settings.
+    // HELLO: version byte + platform byte (0x02 = Android client) + native
+    // panel size (uint16 BE width, uint16 BE height, physical px, landscape).
+    // The host derives its capture/virtual-display resolution from this, so
+    // any connected device gets a pixel-matched stream.
+    final panel = _nativePanelSize();
     socket.send(Packet(
       type: PacketType.control,
       timestampUs: DateTime.now().microsecondsSinceEpoch,
-      payload: Uint8List.fromList([0x01, 0x02]),
+      payload: Uint8List.fromList([
+        0x01,
+        0x02,
+        (panel.w >> 8) & 0xFF, panel.w & 0xFF,
+        (panel.h >> 8) & 0xFF, panel.h & 0xFF,
+      ]),
     ));
+  }
+
+  /// Physical screen size in landscape orientation (the client is landscape-
+  /// locked, but normalize anyway in case this runs before rotation applies).
+  ({int w, int h}) _nativePanelSize() {
+    final size = PlatformDispatcher.instance.views.first.physicalSize;
+    final long = size.longestSide.round();
+    final short = size.shortestSide.round();
+    return (w: long, h: short);
   }
 
   @override

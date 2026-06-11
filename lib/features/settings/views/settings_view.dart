@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:extendedscreen/features/settings/controllers/settings_controller.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
+import 'package:extendedscreen/shared/services/app_translations.dart';
 
 class SettingsView extends GetView<SettingsController> {
   const SettingsView({super.key});
@@ -10,18 +11,32 @@ class SettingsView extends GetView<SettingsController> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Settings',
-            style: TextStyle(fontWeight: FontWeight.w600)),
+        title: Text('settings_title'.tr,
+            style: const TextStyle(fontWeight: FontWeight.w600)),
       ),
       body: ListView(
+        controller: controller.scrollController,
         padding: const EdgeInsets.all(20),
         children: [
+          // Language picker — available on both roles (a UI-level preference).
+          _SectionHeader('settings_section_general'.tr),
+          _SettingsCard(children: [
+            Obx(() => _ChoiceRow(
+                  label: 'settings_language'.tr,
+                  value: AppTranslations.localeName(controller.localeCode.value),
+                  onTap: () => _showLanguagePicker(context),
+                )),
+          ]),
+          const SizedBox(height: 16),
           if (controller.isHost) ...[
-            _SectionHeader('Display'),
+            _SectionHeader('settings_section_display'.tr),
             _SettingsCard(children: [
               Obx(() => _SegmentRow(
-                    label: 'Mode',
-                    options: const ['Extend', 'Mirror'],
+                    label: 'settings_mode'.tr,
+                    options: [
+                      'settings_mode_extend'.tr,
+                      'settings_mode_mirror'.tr,
+                    ],
                     selected:
                         controller.mode.value == DisplayMode.extend ? 0 : 1,
                     enabled: !controller.isApplying.value,
@@ -30,38 +45,38 @@ class SettingsView extends GetView<SettingsController> {
                   )),
             ]),
             const SizedBox(height: 16),
-            _SectionHeader('Performance'),
+            _SectionHeader('settings_section_performance'.tr),
             _SettingsCard(children: [
               Obx(() => _ChoiceRow(
-                    label: 'Encode Preset',
+                    label: 'settings_encode_preset'.tr,
                     value: controller.encodePreset.value.label,
                     enabled: !controller.isApplying.value,
                     onTap: () => _showPresetPicker(context),
                   )),
               const Divider(height: 1, color: Colors.white12),
               Obx(() => _ChoiceRow(
-                    label: 'Codec',
+                    label: 'settings_codec'.tr,
                     value: controller.codec.value == CodecType.h265
-                        ? 'H.265 (HEVC)'
-                        : 'H.264 (AVC)',
+                        ? 'settings_codec_h265'.tr
+                        : 'settings_codec_h264'.tr,
                     enabled: !controller.isApplying.value,
                     onTap: () => _showCodecPicker(context),
                   )),
               Obx(() => controller.isApplying.value
-                  ? const Padding(
-                      padding:
-                          EdgeInsets.only(left: 16, right: 16, bottom: 12),
+                  ? Padding(
+                      padding: const EdgeInsets.only(
+                          left: 16, right: 16, bottom: 12),
                       child: Row(
                         children: [
-                          SizedBox(
+                          const SizedBox(
                             width: 14,
                             height: 14,
                             child: CircularProgressIndicator(
                                 strokeWidth: 2, color: Color(0xFF00C8FF)),
                           ),
-                          SizedBox(width: 10),
-                          Text('Reconnecting to apply…',
-                              style: TextStyle(
+                          const SizedBox(width: 10),
+                          Text('settings_reconnecting_to_apply'.tr,
+                              style: const TextStyle(
                                   color: Color(0xFF00C8FF), fontSize: 13)),
                         ],
                       ),
@@ -72,7 +87,7 @@ class SettingsView extends GetView<SettingsController> {
                       child: Align(
                         alignment: Alignment.centerLeft,
                         child: Text(
-                          'Changing performance settings reconnects the link.',
+                          'settings_perf_reconnect_note'.tr,
                           style: TextStyle(
                               color: Colors.white.withValues(alpha: 0.35),
                               fontSize: 12),
@@ -81,13 +96,13 @@ class SettingsView extends GetView<SettingsController> {
                     )),
               const Divider(height: 1, color: Colors.white12),
               Obx(() => _ToggleRow(
-                    label: 'Performance Overlay',
+                    label: 'settings_performance_overlay'.tr,
                     value: controller.showPerformanceOverlay.value,
                     onChanged: (_) => controller.togglePerformanceOverlay(),
                   )),
               const Divider(height: 1, color: Colors.white12),
               Obx(() => _ToggleRow(
-                    label: 'Show HUD (fps / latency / disconnect)',
+                    label: 'settings_show_hud'.tr,
                     value: controller.showHudOverlay.value,
                     onChanged: (_) => controller.toggleHudOverlay(),
                   )),
@@ -98,67 +113,50 @@ class SettingsView extends GetView<SettingsController> {
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       const SizedBox(height: 16),
-                      _SectionHeader('Custom'),
+                      _SectionHeader('settings_section_custom'.tr),
                       _SettingsCard(children: [
                         Obx(() => _ChoiceRow(
-                              label: 'Resolution',
+                              label: 'settings_resolution'.tr,
                               value: controller.customResolutionLabel,
                               enabled: !controller.isApplying.value,
                               onTap: () => _showCustomResolutionPicker(context),
                             )),
-                        const _HelpText(
-                          'Higher (e.g. 2960×1848): sharper, more detail — '
-                          'crisp text and fine lines, but needs more bitrate '
-                          'and can lower the frame rate.\n'
-                          'Lower (e.g. 1280×800): softer and less detailed, but '
-                          'much lighter on bandwidth and easier to keep smooth.',
-                        ),
+                        _HelpText('settings_help_resolution'.tr),
                         const Divider(height: 1, color: Colors.white12),
                         Obx(() => _ChoiceRow(
-                              label: 'Bitrate',
+                              label: 'settings_bitrate'.tr,
                               value: controller.customBitrateLabel,
                               enabled: !controller.isApplying.value,
                               onTap: () => _showCustomBitratePicker(context),
                             )),
-                        const _HelpText(
-                          'Higher (e.g. 40 Mbps): cleaner image, fewer blocky '
-                          'artifacts in motion — but uses more USB bandwidth.\n'
-                          'Lower (e.g. 4 Mbps): saves bandwidth, but the picture '
-                          'can look blocky or smeared when things move fast.',
-                        ),
+                        _HelpText('settings_help_bitrate'.tr),
                         const Divider(height: 1, color: Colors.white12),
                         Obx(() => _ChoiceRow(
-                              label: 'Refresh Rate',
+                              label: 'settings_refresh_rate'.tr,
                               value: '${controller.customRefreshRate.value} Hz',
                               enabled: !controller.isApplying.value,
                               onTap: () => _showCustomRefreshPicker(context),
                             )),
-                        const _HelpText(
-                          'Higher (e.g. 120 Hz): smoother motion for scrolling, '
-                          'video and animation — but more demanding to encode '
-                          'and stream.\n'
-                          'Lower (e.g. 30 Hz): less smooth motion, but lighter '
-                          'and steadier on a slower link.',
-                        ),
+                        _HelpText('settings_help_refresh'.tr),
                       ]),
                     ],
                   )
                 : const SizedBox.shrink()),
           ] else ...[
-            _SectionHeader('Display'),
-            const _SettingsCard(children: [
+            _SectionHeader('settings_section_display'.tr),
+            _SettingsCard(children: [
               Padding(
-                padding: EdgeInsets.all(16),
+                padding: const EdgeInsets.all(16),
                 child: Text(
-                  'Display mode, encode preset and codec are configured on the '
-                  'Mac host. This device renders whatever the host streams.',
-                  style: TextStyle(color: Colors.white70, fontSize: 13),
+                  'settings_client_display_note'.tr,
+                  style: const TextStyle(color: Colors.white70, fontSize: 13),
                 ),
               ),
             ]),
           ],
           const SizedBox(height: 16),
-          _SectionHeader('Permissions'),
+          _SectionHeader('settings_section_permissions'.tr,
+              key: controller.permissionsKey),
           Obx(() {
             if (controller.isLoadingPerms.value) {
               return const _SettingsCard(children: [
@@ -191,17 +189,17 @@ class SettingsView extends GetView<SettingsController> {
                   onTap: controller.refreshPermissions,
                   borderRadius: const BorderRadius.vertical(
                       bottom: Radius.circular(12)),
-                  child: const Padding(
-                    padding:
-                        EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 12),
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        Icon(Icons.refresh,
+                        const Icon(Icons.refresh,
                             size: 14, color: Color(0xFF00C8FF)),
-                        SizedBox(width: 6),
-                        Text('Refresh',
-                            style: TextStyle(
+                        const SizedBox(width: 6),
+                        Text('common_refresh'.tr,
+                            style: const TextStyle(
                                 color: Color(0xFF00C8FF), fontSize: 13)),
                       ],
                     ),
@@ -211,27 +209,29 @@ class SettingsView extends GetView<SettingsController> {
             );
           }),
           const SizedBox(height: 16),
-          _SectionHeader('Connection'),
+          _SectionHeader('settings_section_connection'.tr),
           _SettingsCard(children: [
-            _InfoRow(label: 'Transport', value: 'USB-C / ADB'),
+            _InfoRow(label: 'settings_transport'.tr, value: 'USB-C / ADB'),
             const Divider(height: 1, color: Colors.white12),
             Obx(() => _InfoRow(
-                  label: 'Codec',
+                  label: 'settings_codec'.tr,
                   value: controller.codec.value == CodecType.h265
-                      ? 'H.265 Hardware'
-                      : 'H.264 Hardware',
+                      ? 'settings_codec_h265_hw'.tr
+                      : 'settings_codec_h264_hw'.tr,
                 )),
             const Divider(height: 1, color: Colors.white12),
-            _InfoRow(label: 'Port', value: '7001'),
+            _InfoRow(label: 'settings_port'.tr, value: '7001'),
           ]),
           const SizedBox(height: 16),
-          _SectionHeader('About'),
+          _SectionHeader('settings_section_about'.tr),
           _SettingsCard(children: [
-            _InfoRow(label: 'Version', value: '1.0.0'),
+            _InfoRow(label: 'settings_version'.tr, value: '1.0.0'),
             const Divider(height: 1, color: Colors.white12),
-            _InfoRow(label: 'Target Device', value: 'Samsung Tab S10 Ultra'),
+            Obx(() => _InfoRow(
+                label: 'settings_target_device'.tr,
+                value: controller.targetDeviceName)),
             const Divider(height: 1, color: Colors.white12),
-            _InfoRow(label: 'Host', value: 'macOS 13+'),
+            _InfoRow(label: 'settings_host'.tr, value: 'macOS 13+'),
           ]),
         ],
       ),
@@ -251,11 +251,23 @@ class SettingsView extends GetView<SettingsController> {
     );
   }
 
+  void _showLanguagePicker(BuildContext context) {
+    final codes = AppTranslations.supportedLocales;
+    Get.bottomSheet(
+      _PickerSheet(
+        title: 'settings_language'.tr,
+        items: codes.map(AppTranslations.localeName).toList(),
+        selected: codes.indexOf(controller.localeCode.value),
+        onSelected: (i) => controller.setLocale(codes[i]),
+      ),
+    );
+  }
+
   void _showCustomResolutionPicker(BuildContext context) {
     final res = controller.customResolutions;
     Get.bottomSheet(
       _PickerSheet(
-        title: 'Resolution',
+        title: 'settings_resolution'.tr,
         items: res.map((r) => '${r.w}×${r.h}').toList(),
         selected: res.indexWhere((r) =>
             r.w == controller.customWidth.value &&
@@ -271,7 +283,7 @@ class SettingsView extends GetView<SettingsController> {
     final opts = controller.customBitrateOptions;
     Get.bottomSheet(
       _PickerSheet(
-        title: 'Bitrate',
+        title: 'settings_bitrate'.tr,
         items: opts.map((b) => '$b Mbps').toList(),
         selected: opts.indexOf(controller.customBitrateMbps.value),
         onSelected: (i) => controller.setCustomBitrate(opts[i]),
@@ -284,7 +296,7 @@ class SettingsView extends GetView<SettingsController> {
     final opts = controller.customRefreshOptions;
     Get.bottomSheet(
       _PickerSheet(
-        title: 'Refresh Rate',
+        title: 'settings_refresh_rate'.tr,
         items: opts.map((r) => '$r Hz').toList(),
         selected: opts.indexOf(controller.customRefreshRate.value),
         onSelected: (i) => controller.setCustomRefreshRate(opts[i]),
@@ -297,10 +309,10 @@ class SettingsView extends GetView<SettingsController> {
     const codecs = CodecType.values;
     Get.bottomSheet(
       _PickerSheet(
-        title: 'Codec',
-        items: const [
-          'H.264 (AVC)  —  widest compatibility',
-          'H.265 (HEVC)  —  better quality per bitrate',
+        title: 'settings_codec'.tr,
+        items: [
+          'codec_picker_h264'.tr,
+          'codec_picker_h265'.tr,
         ],
         selected: codecs.indexOf(controller.codec.value),
         onSelected: (i) => controller.setCodec(codecs[i]),
@@ -311,7 +323,7 @@ class SettingsView extends GetView<SettingsController> {
 
 class _SectionHeader extends StatelessWidget {
   final String title;
-  const _SectionHeader(this.title);
+  const _SectionHeader(this.title, {super.key});
 
   @override
   Widget build(BuildContext context) => Padding(
@@ -512,9 +524,9 @@ class _PresetPickerSheet extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          const Center(
-            child: Text('Encode Preset',
-                style: TextStyle(
+          Center(
+            child: Text('settings_encode_preset'.tr,
+                style: const TextStyle(
                     color: Colors.white,
                     fontSize: 17,
                     fontWeight: FontWeight.w600)),
@@ -522,8 +534,7 @@ class _PresetPickerSheet extends StatelessWidget {
           const SizedBox(height: 6),
           // Legend explaining the numbers.
           Text(
-            'Resolution = sharpness · Bitrate = image quality & USB bandwidth · '
-            'Hz = motion smoothness',
+            'preset_picker_legend'.tr,
             textAlign: TextAlign.center,
             style: TextStyle(
                 color: Colors.white.withValues(alpha: 0.4), fontSize: 11),
@@ -797,7 +808,8 @@ class _PermissionRow extends StatelessWidget {
                 minimumSize: Size.zero,
                 tapTargetSize: MaterialTapTargetSize.shrinkWrap,
               ),
-              child: const Text('Open', style: TextStyle(fontSize: 13)),
+              child: Text('common_open'.tr,
+                  style: const TextStyle(fontSize: 13)),
             ),
         ],
       ),

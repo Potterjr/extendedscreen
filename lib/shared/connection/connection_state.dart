@@ -1,3 +1,5 @@
+import 'package:get/get.dart';
+
 enum ConnectionPhase {
   disconnected,
   detectingDevice,
@@ -21,14 +23,14 @@ extension ConnectionPhaseX on ConnectionPhase {
       this != ConnectionPhase.error;
 
   String get label => switch (this) {
-        ConnectionPhase.disconnected => 'Disconnected',
-        ConnectionPhase.detectingDevice => 'Detecting device…',
-        ConnectionPhase.adbConnecting => 'Connecting via ADB…',
-        ConnectionPhase.portForwarding => 'Forwarding port…',
-        ConnectionPhase.handshaking => 'Handshaking…',
-        ConnectionPhase.configuring => 'Configuring display…',
-        ConnectionPhase.streaming => 'Streaming',
-        ConnectionPhase.paused => 'Paused',
-        ConnectionPhase.error => 'Error',
+        ConnectionPhase.disconnected => 'phase_disconnected'.tr,
+        ConnectionPhase.detectingDevice => 'phase_detecting_device'.tr,
+        ConnectionPhase.adbConnecting => 'phase_adb_connecting'.tr,
+        ConnectionPhase.portForwarding => 'phase_port_forwarding'.tr,
+        ConnectionPhase.handshaking => 'phase_handshaking'.tr,
+        ConnectionPhase.configuring => 'phase_configuring'.tr,
+        ConnectionPhase.streaming => 'phase_streaming'.tr,
+        ConnectionPhase.paused => 'phase_paused'.tr,
+        ConnectionPhase.error => 'phase_error'.tr,
       };
 }

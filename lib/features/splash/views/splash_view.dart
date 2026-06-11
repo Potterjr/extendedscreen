@@ -31,9 +31,9 @@ class SplashView extends GetView<SplashController> {
               ),
             ),
             const SizedBox(height: 24),
-            const Text(
-              'Extended Screen',
-              style: TextStyle(
+            Text(
+              'app_name'.tr,
+              style: const TextStyle(
                 color: Colors.white,
                 fontSize: 28,
                 fontWeight: FontWeight.w700,
@@ -42,7 +42,7 @@ class SplashView extends GetView<SplashController> {
             ),
             const SizedBox(height: 8),
             Text(
-              'Samsung Tab S10 Ultra • macOS',
+              'app_subtitle'.tr,
               style: TextStyle(
                 color: Colors.white.withValues(alpha: 0.5),
                 fontSize: 14,
