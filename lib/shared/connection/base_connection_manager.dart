@@ -77,13 +77,18 @@ abstract class BaseConnectionManager extends GetxService
     // Only disconnect on full process detach; hidden/paused keeps streaming.
     if (state == AppLifecycleState.detached) {
       disconnect();
-    } else if (state == AppLifecycleState.resumed &&
-        !phase.value.isActive &&
-        activeDevice.value != null) {
-      // Reconnect only if a session was already established and the link was
-      // lost while backgrounded — never auto-connect a fresh launch. The host
-      // reconnects to the same chosen device.
-      connect(serial: isHost ? activeDevice.value!.serial : null);
+    } else if (state == AppLifecycleState.resumed && !phase.value.isActive) {
+      if (isHost) {
+        // Host: reconnect only to an already-chosen device (never auto-grab a
+        // device on a fresh launch).
+        if (activeDevice.value != null) {
+          connect(serial: activeDevice.value!.serial);
+        }
+      } else {
+        // Client: always try to reconnect on resume (it dials the host and
+        // retries until the server is up).
+        connect();
+      }
     }
   }
 
@@ -98,6 +103,10 @@ abstract class BaseConnectionManager extends GetxService
 
   /// Host populates the detected device list; no-op on the client.
   Future<void> refreshDevices() async {}
+
+  /// Host → client: push the overlay/HUD toggle states (which render on the
+  /// client but are edited on the host) so they stay in sync. No-op on client.
+  void sendUiFlags() {}
 
   // ─── Shared lifecycle ─────────────────────────────────────────────────────
 

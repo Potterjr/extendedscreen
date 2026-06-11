@@ -41,6 +41,21 @@ class HostConnectionManager extends BaseConnectionManager {
   }
 
   @override
+  void sendUiFlags() {
+    if (!phase.value.isActive) return;
+    // 0xFA + performanceOverlay(0/1) + showHud(0/1).
+    socket.send(Packet(
+      type: PacketType.control,
+      timestampUs: DateTime.now().microsecondsSinceEpoch,
+      payload: Uint8List.fromList([
+        0xFA,
+        settings.showPerformanceOverlay.value ? 1 : 0,
+        settings.showHudOverlay.value ? 1 : 0,
+      ]),
+    ));
+  }
+
+  @override
   Future<void> connect({String? serial}) async {
     if (phase.value.isConnecting || phase.value.isActive) return;
     try {
@@ -135,6 +150,9 @@ class HostConnectionManager extends BaseConnectionManager {
       timestampUs: DateTime.now().microsecondsSinceEpoch,
       payload: Uint8List.fromList([0xFB, config.refreshRate.clamp(0, 255)]),
     ));
+
+    // Sync the overlay/HUD toggles so a fresh client matches the host.
+    sendUiFlags();
 
     // Forward each encoded NAL unit from native → socket as FRAME_DATA.
     _frameSub = _capture.frameStream.listen((nal) {

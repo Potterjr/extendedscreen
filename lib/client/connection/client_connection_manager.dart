@@ -73,6 +73,14 @@ class ClientConnectionManager extends BaseConnectionManager {
     // 0xFB + refreshRate — Host → Tablet: capture refresh rate (Hz) for the HUD.
     if (p.length >= 2 && p[0] == 0xFB) {
       refreshRateHz.value = p[1];
+      return;
+    }
+
+    // 0xFA + perfOverlay + showHud — Host → Tablet: sync overlay toggles which
+    // render on the client but are edited on the host.
+    if (p.length >= 3 && p[0] == 0xFA) {
+      settings.setShowPerformanceOverlay(p[1] == 1);
+      settings.setShowHudOverlay(p[2] == 1);
     }
   }
 }

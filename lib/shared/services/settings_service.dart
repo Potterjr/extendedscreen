@@ -20,6 +20,8 @@ class SettingsService extends GetxService {
 
   final showPerformanceOverlay = false.obs;
   final showHudOverlay = true.obs;
+  // Reactive mirror of the active codec so UI (e.g. the home card) updates live.
+  final codecRx = CodecType.h264.obs;
 
   // Injected at build time via --dart-define=DEVICE_SERIAL=R52XC02C9RT
   static const _buildSerial =
@@ -31,6 +33,8 @@ class SettingsService extends GetxService {
     _prefs = await SharedPreferences.getInstance();
     showPerformanceOverlay.value = _prefs.getBool(_keyPerfOverlay) ?? false;
     showHudOverlay.value = _prefs.getBool(_keyHudOverlay) ?? true;
+    codecRx.value =
+        _prefs.getString(_keyCodec) == 'h265' ? CodecType.h265 : CodecType.h264;
   }
 
   DisplayMode get displayMode {
@@ -88,11 +92,12 @@ class SettingsService extends GetxService {
   int get refreshRate =>
       isCustomPreset ? customRefreshRate : encodePreset.refreshRate;
 
-  CodecType get codec {
-    final v = _prefs.getString(_keyCodec);
-    return v == 'h265' ? CodecType.h265 : CodecType.h264;
+  CodecType get codec => codecRx.value;
+
+  Future<void> setCodec(CodecType c) {
+    codecRx.value = c;
+    return _prefs.setString(_keyCodec, c == CodecType.h265 ? 'h265' : 'h264');
   }
-  Future<void> setCodec(CodecType c) => _prefs.setString(_keyCodec, c == CodecType.h265 ? 'h265' : 'h264');
 
   // Returns saved serial, falls back to compile-time default (Tab S10 Ultra).
   String? get lastDeviceSerial =>
