@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:get/get.dart';
 
 class LatencyChip extends StatelessWidget {
   final int latencyMs;
@@ -27,7 +28,7 @@ class LatencyChip extends StatelessWidget {
               Icon(Icons.bolt, size: 14, color: color),
               const SizedBox(width: 4),
               Text(
-                '${latencyMs}ms latency',
+                'latency_value'.trParams({'ms': '$latencyMs'}),
                 style: TextStyle(
                   color: color,
                   fontSize: 13,

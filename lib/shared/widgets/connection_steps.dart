@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:get/get.dart';
 import 'package:extendedscreen/shared/connection/connection_state.dart';
 
 enum _StepState { done, active, pending, error }
@@ -9,11 +10,20 @@ class ConnectionSteps extends StatelessWidget {
   final ConnectionPhase phase;
   const ConnectionSteps({super.key, required this.phase});
 
-  static const _steps = [
-    (label: 'Connect to Mac host', detail: 'Linking over the USB-C tunnel'),
-    (label: 'Configure display', detail: 'Negotiating codec & resolution'),
-    (label: 'Ready to display', detail: 'Stream is live — tap Open View'),
-  ];
+  static List<({String label, String detail})> get _steps => [
+        (
+          label: 'step_connect_label'.tr,
+          detail: 'step_connect_detail'.tr,
+        ),
+        (
+          label: 'step_configure_label'.tr,
+          detail: 'step_configure_detail'.tr,
+        ),
+        (
+          label: 'step_ready_label'.tr,
+          detail: 'step_ready_detail'.tr,
+        ),
+      ];
 
   /// How many steps are fully completed for the current phase.
   int get _completed {
@@ -40,6 +50,7 @@ class ConnectionSteps extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final completed = _completed;
+    final steps = _steps;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       decoration: BoxDecoration(
@@ -48,12 +59,12 @@ class ConnectionSteps extends StatelessWidget {
       ),
       child: Column(
         children: [
-          for (int i = 0; i < _steps.length; i++)
+          for (int i = 0; i < steps.length; i++)
             _StepRow(
-              label: _steps[i].label,
-              detail: _steps[i].detail,
+              label: steps[i].label,
+              detail: steps[i].detail,
               state: _stateFor(i, completed),
-              isLast: i == _steps.length - 1,
+              isLast: i == steps.length - 1,
             ),
         ],
       ),

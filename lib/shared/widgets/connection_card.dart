@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:get/get.dart';
 import 'package:extendedscreen/shared/connection/connection_state.dart';
 
 class ConnectionCard extends StatelessWidget {
@@ -59,7 +60,7 @@ class ConnectionCard extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  isActive ? 'Connected' : phase.label,
+                  isActive ? 'common_connected'.tr : phase.label,
                   style: TextStyle(
                     color: color,
                     fontWeight: FontWeight.w600,
@@ -69,8 +70,9 @@ class ConnectionCard extends StatelessWidget {
                 const SizedBox(height: 2),
                 Text(
                   isActive
-                      ? 'USB-C  •  $codecLabel'
-                      : 'Plug tablet via USB-C cable',
+                      ? 'conn_card_active_subtitle'
+                          .trParams({'codec': codecLabel})
+                      : 'conn_card_plug_prompt'.tr,
                   style: TextStyle(
                     color: Colors.white.withValues(alpha: 0.4),
                     fontSize: 13,
@@ -86,7 +88,8 @@ class ConnectionCard extends StatelessWidget {
               style: TextButton.styleFrom(
                 foregroundColor: isActive ? Colors.redAccent : const Color(0xFF00C8FF),
               ),
-              child: Text(isActive ? 'Disconnect' : 'Connect'),
+              child: Text(
+                  isActive ? 'common_disconnect'.tr : 'common_connect'.tr),
             ),
         ],
       ),

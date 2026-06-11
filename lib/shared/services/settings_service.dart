@@ -1,6 +1,9 @@
+import 'dart:ui';
+
 import 'package:get/get.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
+import 'package:extendedscreen/shared/services/app_translations.dart';
 
 class SettingsService extends GetxService {
   late SharedPreferences _prefs;
@@ -8,10 +11,16 @@ class SettingsService extends GetxService {
   static const _keyMode = 'display_mode';
   static const _keyBitrate = 'bitrate';
   static const _keyLastDevice = 'last_device';
+  static const _keyLastDeviceName = 'last_device_name';
+  // Native panel of the connected client (physical px, landscape), learned
+  // from its HELLO and persisted so presets stay correct across launches.
+  static const _keyPanelW = 'client_panel_w';
+  static const _keyPanelH = 'client_panel_h';
   static const _keyPerfOverlay = 'perf_overlay';
   static const _keyHudOverlay = 'hud_overlay';
   static const _keyEncodePreset = 'encode_preset';
   static const _keyCodec = 'codec';
+  static const _keyLocale = 'locale';
   // Custom preset values (physical resolution px, bitrate Mbps, refresh Hz).
   static const _keyCustomW = 'custom_width';
   static const _keyCustomH = 'custom_height';
@@ -22,19 +31,61 @@ class SettingsService extends GetxService {
   final showHudOverlay = true.obs;
   // Reactive mirror of the active codec so UI (e.g. the home card) updates live.
   final codecRx = CodecType.h264.obs;
+  // Reactive UI language code ('en' / 'th'); drives the language picker.
+  final localeCode = 'en'.obs;
+
+  // Native panel of the connected client device (physical px, landscape).
+  // Fixed presets derive their capture resolution from these. The fallback is
+  // only used until the first client HELLO reports the real panel.
+  final clientPanelWidth = 2560.obs;
+  final clientPanelHeight = 1600.obs;
 
   // Injected at build time via --dart-define=DEVICE_SERIAL=R52XC02C9RT
   static const _buildSerial =
       String.fromEnvironment('DEVICE_SERIAL', defaultValue: 'R52XC02C9RT');
 
-  @override
-  Future<void> onInit() async {
-    super.onInit();
+  /// Loads persisted settings. Called from `main()` before the app builds so
+  /// the saved language is available when [GetMaterialApp] reads [locale].
+  Future<void> init() async {
     _prefs = await SharedPreferences.getInstance();
     showPerformanceOverlay.value = _prefs.getBool(_keyPerfOverlay) ?? false;
     showHudOverlay.value = _prefs.getBool(_keyHudOverlay) ?? true;
     codecRx.value =
         _prefs.getString(_keyCodec) == 'h265' ? CodecType.h265 : CodecType.h264;
+    localeCode.value = _resolveInitialLocale();
+    clientPanelWidth.value = _prefs.getInt(_keyPanelW) ?? clientPanelWidth.value;
+    clientPanelHeight.value =
+        _prefs.getInt(_keyPanelH) ?? clientPanelHeight.value;
+  }
+
+  /// Host: record the client's native panel (from its HELLO). Landscape is
+  /// enforced on the client, so width is always the long side.
+  Future<void> setClientPanel(int w, int h) async {
+    clientPanelWidth.value = w;
+    clientPanelHeight.value = h;
+    await _prefs.setInt(_keyPanelW, w);
+    await _prefs.setInt(_keyPanelH, h);
+  }
+
+  /// Saved language if present, otherwise follow the device language (Thai if
+  /// the system is Thai, English for everything else).
+  String _resolveInitialLocale() {
+    final saved = _prefs.getString(_keyLocale);
+    if (saved != null && AppTranslations.supportedLocales.contains(saved)) {
+      return saved;
+    }
+    final device = PlatformDispatcher.instance.locale.languageCode;
+    return device == 'th' ? 'th' : 'en';
+  }
+
+  /// Resolved [Locale] for [GetMaterialApp]/`Get.updateLocale`.
+  Locale get locale => Locale(localeCode.value);
+
+  Future<void> setLocale(String code) async {
+    if (!AppTranslations.supportedLocales.contains(code)) return;
+    localeCode.value = code;
+    Get.updateLocale(Locale(code));
+    await _prefs.setString(_keyLocale, code);
   }
 
   DisplayMode get displayMode {
@@ -99,12 +150,19 @@ class SettingsService extends GetxService {
     return _prefs.setString(_keyCodec, c == CodecType.h265 ? 'h265' : 'h264');
   }
 
-  // Returns saved serial, falls back to compile-time default (Tab S10 Ultra).
+  // Returns saved serial, falls back to the compile-time default.
   String? get lastDeviceSerial =>
       _prefs.getString(_keyLastDevice) ?? (_buildSerial.isNotEmpty ? _buildSerial : null);
 
   Future<void> setLastDevice(String serial) =>
       _prefs.setString(_keyLastDevice, serial);
+
+  /// Model name of the last connected client (from `adb devices -l`), shown in
+  /// the settings "Target device" row when nothing is connected.
+  String? get lastDeviceName => _prefs.getString(_keyLastDeviceName);
+
+  Future<void> setLastDeviceName(String name) =>
+      _prefs.setString(_keyLastDeviceName, name);
 
   Future<void> setShowPerformanceOverlay(bool v) {
     showPerformanceOverlay.value = v;

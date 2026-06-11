@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:get/get.dart';
 import 'package:extendedscreen/shared/models/device_model.dart';
 
 /// Host-only picker: lists detected ADB clients so the user chooses which
@@ -29,7 +30,7 @@ class DevicePickerCard extends StatelessWidget {
           Row(
             children: [
               Text(
-                'Android client',
+                'device_android_client'.tr,
                 style: TextStyle(
                   color: Colors.white.withValues(alpha: 0.6),
                   fontSize: 13,
@@ -40,7 +41,7 @@ class DevicePickerCard extends StatelessWidget {
               IconButton(
                 icon: const Icon(Icons.refresh, size: 18),
                 color: Colors.white.withValues(alpha: 0.6),
-                tooltip: 'Refresh devices',
+                tooltip: 'device_refresh_tooltip'.tr,
                 onPressed: onRefresh,
                 visualDensity: VisualDensity.compact,
               ),
@@ -50,7 +51,7 @@ class DevicePickerCard extends StatelessWidget {
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 8),
               child: Text(
-                'No device detected — plug in via USB-C',
+                'device_none_detected'.tr,
                 style: TextStyle(
                   color: Colors.white.withValues(alpha: 0.4),
                   fontSize: 13,

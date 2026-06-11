@@ -55,7 +55,13 @@ class DisplayController extends GetxController with WidgetsBindingObserver {
 
   Future<void> _initDecoderAndSubscribe() async {
     final decoder = Get.find<VideoDecoderChannel>();
+    // Size the decoder hint to this device's own panel (landscape-locked, so
+    // the long side is the width); the channel doubles logical → physical.
+    final panel =
+        WidgetsBinding.instance.platformDispatcher.views.first.physicalSize;
     final config = DisplayConfigModel.defaultConfig.copyWith(
+      width: (panel.longestSide / 2).round(),
+      height: (panel.shortestSide / 2).round(),
       refreshRate: _settings.refreshRate,
       bitrate: _settings.bitrate,
       codec: _settings.codec,

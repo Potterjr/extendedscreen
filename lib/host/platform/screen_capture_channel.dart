@@ -72,6 +72,7 @@ class ScreenCaptureChannel extends GetxService {
     } catch (e, st) {
       _log.e('getDisplayBounds failed', e, st);
     }
-    return {'x': 0, 'y': 0, 'w': 2960, 'h': 1848};
+    // Zero size signals failure; the caller falls back to the config size.
+    return {'x': 0, 'y': 0, 'w': 0, 'h': 0};
   }
 }

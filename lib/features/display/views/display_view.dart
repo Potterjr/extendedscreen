@@ -50,28 +50,28 @@ class _ReconnectingOverlay extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       color: Colors.black.withValues(alpha: 0.78),
-      child: const Center(
+      child: Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            SizedBox(
+            const SizedBox(
               width: 44,
               height: 44,
               child: CircularProgressIndicator(
                   strokeWidth: 3, color: Color(0xFF00C8FF)),
             ),
-            SizedBox(height: 20),
+            const SizedBox(height: 20),
             Text(
-              'Reconnecting…',
-              style: TextStyle(
+              'display_reconnecting'.tr,
+              style: const TextStyle(
                   color: Colors.white,
                   fontSize: 17,
                   fontWeight: FontWeight.w600),
             ),
-            SizedBox(height: 6),
+            const SizedBox(height: 6),
             Text(
-              'Applying new settings from the host',
-              style: TextStyle(color: Colors.white60, fontSize: 13),
+              'display_applying_settings'.tr,
+              style: const TextStyle(color: Colors.white60, fontSize: 13),
             ),
           ],
         ),
@@ -87,18 +87,24 @@ class _VideoSurface extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (!controller.isAndroid) {
-      return const Center(
+      return Center(
         child: Text(
-          'Display surface\n(Android only)',
+          'display_surface_android_only'.tr,
           textAlign: TextAlign.center,
-          style: TextStyle(color: Colors.white38),
+          style: const TextStyle(color: Colors.white38),
         ),
       );
     }
+    // Surface buffer = this device's physical screen size.
+    final dpr = MediaQuery.devicePixelRatioOf(context);
+    final size = MediaQuery.sizeOf(context);
     return AndroidView(
       viewType: 'extended_screen/surface_view',
       onPlatformViewCreated: (_) {},
-      creationParams: const {'width': 2960, 'height': 1848},
+      creationParams: {
+        'width': (size.width * dpr).round(),
+        'height': (size.height * dpr).round(),
+      },
       creationParamsCodec: const StandardMessageCodec(),
     );
   }
@@ -169,9 +175,9 @@ class _HudOverlay extends StatelessWidget {
                 constraints: const BoxConstraints(),
               ),
               const SizedBox(width: 12),
-              const Text(
-                'Extended Screen',
-                style: TextStyle(
+              Text(
+                'app_name'.tr,
+                style: const TextStyle(
                   color: Colors.white,
                   fontWeight: FontWeight.w600,
                 ),
@@ -212,7 +218,7 @@ class _HudOverlay extends StatelessWidget {
                   foregroundColor: Colors.redAccent,
                   padding: const EdgeInsets.symmetric(horizontal: 8),
                 ),
-                child: const Text('Disconnect'),
+                child: Text('common_disconnect'.tr),
               ),
             ],
           ),

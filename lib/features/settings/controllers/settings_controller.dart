@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
 import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
@@ -37,30 +38,81 @@ class SettingsController extends GetxController {
   String get customResolutionLabel => '${customWidth.value}×${customHeight.value}';
   String get customBitrateLabel => '${customBitrateMbps.value} Mbps';
 
-  /// Resolution / bitrate / refresh-rate options offered for the custom preset.
-  final customResolutions = const [
-    (w: 2960, h: 1848),
-    (w: 2368, h: 1480),
-    (w: 1920, h: 1200),
-    (w: 1480, h: 924),
-    (w: 1280, h: 800),
-  ];
+  /// Resolution options offered for the custom preset, derived from the
+  /// connected device's native panel (native, 80%, common sizes, half).
+  List<({int w, int h})> get customResolutions {
+    final pw = _settings.clientPanelWidth.value;
+    final ph = _settings.clientPanelHeight.value;
+    ({int w, int h}) even(double w, double h) =>
+        (w: (w / 2).round() * 2, h: (h / 2).round() * 2);
+    final options = [
+      even(pw.toDouble(), ph.toDouble()),
+      even(pw * 0.8, ph * 0.8),
+      (w: 1920, h: 1200),
+      even(pw / 2, ph / 2),
+      (w: 1280, h: 800),
+    ];
+    // De-dupe while preserving order (common sizes may equal a derived one).
+    final seen = <String>{};
+    return options.where((r) => seen.add('${r.w}x${r.h}')).toList();
+  }
   final customBitrateOptions = const [4, 6, 8, 12, 16, 20, 30, 40];
   final customRefreshOptions = const [30, 60, 90, 120];
   RxBool get showPerformanceOverlay => _settings.showPerformanceOverlay;
   RxBool get showHudOverlay => _settings.showHudOverlay;
 
+  /// Active UI language code ('en' / 'th') and its setter for the picker.
+  RxString get localeCode => _settings.localeCode;
+  void setLocale(String code) => _settings.setLocale(code);
+
   /// Settings are adjustable only on the host (macOS); the client is read-only.
   bool get isHost => _cm.isHost;
+
+  /// Name of the target (client) device: the connected device's model, else
+  /// the last connected one, else a generic fallback.
+  String get targetDeviceName {
+    final connected = _cm.activeDevice.value?.model;
+    if (connected != null && connected.isNotEmpty) return connected;
+    final last = _settings.lastDeviceName;
+    if (last != null && last.isNotEmpty) return last;
+    return 'device_default_name'.tr;
+  }
 
   final isApplying = false.obs;
   final permissions = <PermissionItem>[].obs;
   final isLoadingPerms = false.obs;
 
+  // Scrolls the settings list and marks the Permissions section so the host can
+  // jump straight there when a connect attempt is blocked by missing access.
+  final scrollController = ScrollController();
+  final permissionsKey = GlobalKey();
+
   @override
   void onReady() {
     super.onReady();
     refreshPermissions();
+    // Arrived here from the permission gate — bring Permissions into view.
+    final args = Get.arguments;
+    if (args is Map && args['scrollTo'] == 'permissions') {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToPermissions());
+    }
+  }
+
+  void _scrollToPermissions() {
+    final ctx = permissionsKey.currentContext;
+    if (ctx == null) return;
+    Scrollable.ensureVisible(
+      ctx,
+      duration: const Duration(milliseconds: 400),
+      curve: Curves.easeInOut,
+      alignment: 0.05, // near the top of the viewport
+    );
+  }
+
+  @override
+  void onClose() {
+    scrollController.dispose();
+    super.onClose();
   }
 
   Future<void> refreshPermissions() async {
@@ -75,14 +127,14 @@ class SettingsController extends GetxController {
       return [
         PermissionItem(
           key: 'screen_recording',
-          label: 'Screen Recording',
-          description: 'Required to capture the display content',
+          label: 'perm_screen_recording'.tr,
+          description: 'perm_screen_recording_desc'.tr,
           isGranted: status['screen_recording'] ?? false,
         ),
         PermissionItem(
           key: 'accessibility',
-          label: 'Accessibility',
-          description: 'Required to inject touch and keyboard input',
+          label: 'perm_accessibility'.tr,
+          description: 'perm_accessibility_desc'.tr,
           isGranted: status['accessibility'] ?? false,
         ),
       ];
@@ -90,14 +142,14 @@ class SettingsController extends GetxController {
       return [
         PermissionItem(
           key: 'battery_optimization',
-          label: 'Battery Optimization',
-          description: 'Exempt from battery optimization to keep streaming alive',
+          label: 'perm_battery_optimization'.tr,
+          description: 'perm_battery_optimization_desc'.tr,
           isGranted: status['battery_optimization'] ?? false,
         ),
         PermissionItem(
           key: 'display_over_apps',
-          label: 'Display Over Other Apps',
-          description: 'Allows the display overlay to render on top',
+          label: 'perm_display_over_apps'.tr,
+          description: 'perm_display_over_apps_desc'.tr,
           isGranted: status['display_over_apps'] ?? false,
         ),
       ];

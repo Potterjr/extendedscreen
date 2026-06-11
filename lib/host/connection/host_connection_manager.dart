@@ -24,9 +24,13 @@ class HostConnectionManager extends BaseConnectionManager {
   bool get isHost => true;
 
   // Actual display bounds (updated after capture starts in extend/mirror mode).
-  Map<String, double> _displayBounds = {'x': 0, 'y': 0, 'w': 2960, 'h': 1848};
+  Map<String, double> _displayBounds = {'x': 0, 'y': 0, 'w': 0, 'h': 0};
 
   StreamSubscription? _frameSub;
+
+  // Completed when the client's HELLO arrives (it carries the panel size the
+  // capture resolution is derived from).
+  Completer<void>? _helloReceived;
 
   /// The host never connects automatically — it only loads the device list; the
   /// user must pick a client from the picker to connect.
@@ -72,6 +76,9 @@ class HostConnectionManager extends BaseConnectionManager {
           : devices.first;
       activeDevice.value = device;
       await settings.setLastDevice(device.serial);
+      if (device.model != null && device.model!.isNotEmpty) {
+        await settings.setLastDeviceName(device.model!);
+      }
       log.i('Host: using device ${device.serial}');
 
       setPhase(ConnectionPhase.portForwarding);
@@ -89,9 +96,19 @@ class HostConnectionManager extends BaseConnectionManager {
       log.i('Host: waiting for tablet to connect…');
       await socket.waitForClient();
 
+      _helloReceived = Completer<void>();
       startPacketLoop();
 
       setPhase(ConnectionPhase.configuring);
+      // Wait for the client's HELLO so the capture resolution matches its
+      // panel; on timeout fall back to the last-known (persisted) panel.
+      try {
+        await _helloReceived!.future.timeout(const Duration(seconds: 3));
+      } on TimeoutException {
+        log.w('Host: no HELLO from client — using last-known panel '
+            '${settings.clientPanelWidth.value}×${settings.clientPanelHeight.value}');
+      }
+
       // Capture start is non-fatal: the connection still goes live so the link
       // is up; frames begin once Screen Recording permission is granted.
       try {
@@ -132,6 +149,15 @@ class HostConnectionManager extends BaseConnectionManager {
 
     // Fetch actual display bounds so touch injection lands on the right screen.
     _displayBounds = await _capture.getDisplayBounds();
+    if ((_displayBounds['w'] ?? 0) <= 0 || (_displayBounds['h'] ?? 0) <= 0) {
+      // Bounds query failed — fall back to the logical size we configured.
+      _displayBounds = {
+        'x': 0,
+        'y': 0,
+        'w': config.width.toDouble(),
+        'h': config.height.toDouble(),
+      };
+    }
     log.i('Display bounds: $_displayBounds');
 
     // Tell client which codec we're using so it can initialize the right decoder.
@@ -178,6 +204,12 @@ class HostConnectionManager extends BaseConnectionManager {
   @override
   void onRolePacket(Packet packet) {
     switch (packet.type) {
+      // HELLO from the client: version + platform + native panel size.
+      case PacketType.control
+          when packet.payload.isNotEmpty && packet.payload[0] == 0x01:
+        _onHello(packet.payload);
+        break;
+
       // Host injects input received from the tablet.
       case PacketType.touchEvent:
         _injectTouch(packet);
@@ -200,7 +232,26 @@ class HostConnectionManager extends BaseConnectionManager {
     }
   }
 
+  /// Parse the client HELLO: [version, platform, panelW hi, panelW lo,
+  /// panelH hi, panelH lo]. Older clients send only the first two bytes —
+  /// then the last-known panel is kept.
+  void _onHello(Uint8List p) {
+    if (p.length >= 6) {
+      final w = (p[2] << 8) | p[3];
+      final h = (p[4] << 8) | p[5];
+      if (w >= 320 && h >= 240 && w <= 8192 && h <= 8192) {
+        settings.setClientPanel(w, h);
+        log.i('Host: client panel $w×$h');
+      }
+    }
+    if (!(_helloReceived?.isCompleted ?? true)) _helloReceived!.complete();
+  }
+
+  // Without valid bounds, normalized coords can't be mapped to the screen.
+  bool get _hasBounds => (_displayBounds['w'] ?? 0) > 0;
+
   void _injectTouch(Packet packet) {
+    if (!_hasBounds) return;
     // Map a single primary pointer to a mouse move/click on macOS.
     final t = PacketCodec.decodeTouch(packet.payload);
     if (t == null || t.pointers.isEmpty) return;
@@ -224,6 +275,7 @@ class HostConnectionManager extends BaseConnectionManager {
   }
 
   void _injectMouse(Packet packet) {
+    if (!_hasBounds) return;
     final m = PacketCodec.decodeMouse(packet.payload);
     if (m != null) _input.injectMouse(m, _displayBounds);
   }
