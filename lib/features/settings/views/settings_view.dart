@@ -92,6 +92,58 @@ class SettingsView extends GetView<SettingsController> {
                     onChanged: (_) => controller.toggleHudOverlay(),
                   )),
             ]),
+            // Custom values — shown only when the Custom preset is selected.
+            Obx(() => controller.encodePreset.value == EncodePreset.custom
+                ? Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      const SizedBox(height: 16),
+                      _SectionHeader('Custom'),
+                      _SettingsCard(children: [
+                        Obx(() => _ChoiceRow(
+                              label: 'Resolution',
+                              value: controller.customResolutionLabel,
+                              enabled: !controller.isApplying.value,
+                              onTap: () => _showCustomResolutionPicker(context),
+                            )),
+                        const _HelpText(
+                          'Higher (e.g. 2960×1848): sharper, more detail — '
+                          'crisp text and fine lines, but needs more bitrate '
+                          'and can lower the frame rate.\n'
+                          'Lower (e.g. 1280×800): softer and less detailed, but '
+                          'much lighter on bandwidth and easier to keep smooth.',
+                        ),
+                        const Divider(height: 1, color: Colors.white12),
+                        Obx(() => _ChoiceRow(
+                              label: 'Bitrate',
+                              value: controller.customBitrateLabel,
+                              enabled: !controller.isApplying.value,
+                              onTap: () => _showCustomBitratePicker(context),
+                            )),
+                        const _HelpText(
+                          'Higher (e.g. 40 Mbps): cleaner image, fewer blocky '
+                          'artifacts in motion — but uses more USB bandwidth.\n'
+                          'Lower (e.g. 4 Mbps): saves bandwidth, but the picture '
+                          'can look blocky or smeared when things move fast.',
+                        ),
+                        const Divider(height: 1, color: Colors.white12),
+                        Obx(() => _ChoiceRow(
+                              label: 'Refresh Rate',
+                              value: '${controller.customRefreshRate.value} Hz',
+                              enabled: !controller.isApplying.value,
+                              onTap: () => _showCustomRefreshPicker(context),
+                            )),
+                        const _HelpText(
+                          'Higher (e.g. 120 Hz): smoother motion for scrolling, '
+                          'video and animation — but more demanding to encode '
+                          'and stream.\n'
+                          'Lower (e.g. 30 Hz): less smooth motion, but lighter '
+                          'and steadier on a slower link.',
+                        ),
+                      ]),
+                    ],
+                  )
+                : const SizedBox.shrink()),
           ] else ...[
             _SectionHeader('Display'),
             const _SettingsCard(children: [
@@ -187,14 +239,57 @@ class SettingsView extends GetView<SettingsController> {
   }
 
   void _showPresetPicker(BuildContext context) {
-    final presets = EncodePreset.values;
+    Get.bottomSheet(
+      _PresetPickerSheet(
+        selected: controller.encodePreset.value,
+        onSelected: controller.setEncodePreset,
+        customResolutionLabel: controller.customResolutionLabel,
+        customBitrateLabel: controller.customBitrateLabel,
+        customRefreshRate: controller.customRefreshRate.value,
+      ),
+      isScrollControlled: true,
+    );
+  }
+
+  void _showCustomResolutionPicker(BuildContext context) {
+    final res = controller.customResolutions;
     Get.bottomSheet(
       _PickerSheet(
-        title: 'Encode Preset',
-        items: presets.map((p) => '${p.label}  —  ${p.description}').toList(),
-        selected: presets.indexOf(controller.encodePreset.value),
-        onSelected: (i) => controller.setEncodePreset(presets[i]),
+        title: 'Resolution',
+        items: res.map((r) => '${r.w}×${r.h}').toList(),
+        selected: res.indexWhere((r) =>
+            r.w == controller.customWidth.value &&
+            r.h == controller.customHeight.value),
+        onSelected: (i) =>
+            controller.setCustomResolution(res[i].w, res[i].h),
       ),
+      isScrollControlled: true,
+    );
+  }
+
+  void _showCustomBitratePicker(BuildContext context) {
+    final opts = controller.customBitrateOptions;
+    Get.bottomSheet(
+      _PickerSheet(
+        title: 'Bitrate',
+        items: opts.map((b) => '$b Mbps').toList(),
+        selected: opts.indexOf(controller.customBitrateMbps.value),
+        onSelected: (i) => controller.setCustomBitrate(opts[i]),
+      ),
+      isScrollControlled: true,
+    );
+  }
+
+  void _showCustomRefreshPicker(BuildContext context) {
+    final opts = controller.customRefreshOptions;
+    Get.bottomSheet(
+      _PickerSheet(
+        title: 'Refresh Rate',
+        items: opts.map((r) => '$r Hz').toList(),
+        selected: opts.indexOf(controller.customRefreshRate.value),
+        onSelected: (i) => controller.setCustomRefreshRate(opts[i]),
+      ),
+      isScrollControlled: true,
     );
   }
 
@@ -383,6 +478,222 @@ class _InfoRow extends StatelessWidget {
       );
 }
 
+/// Rich picker for encode presets — each option spells out resolution, bitrate
+/// and refresh rate with a plain-language explanation, plus a legend that says
+/// what each number means.
+class _PresetPickerSheet extends StatelessWidget {
+  final EncodePreset selected;
+  final ValueChanged<EncodePreset> onSelected;
+  final String customResolutionLabel;
+  final String customBitrateLabel;
+  final int customRefreshRate;
+
+  const _PresetPickerSheet({
+    required this.selected,
+    required this.onSelected,
+    required this.customResolutionLabel,
+    required this.customBitrateLabel,
+    required this.customRefreshRate,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final bottomInset = MediaQuery.viewPaddingOf(context).bottom;
+    return Container(
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.sizeOf(context).height * 0.85,
+      ),
+      decoration: const BoxDecoration(
+        color: Color(0xFF111827),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      padding: EdgeInsets.fromLTRB(16, 20, 16, 16 + bottomInset),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Center(
+            child: Text('Encode Preset',
+                style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 17,
+                    fontWeight: FontWeight.w600)),
+          ),
+          const SizedBox(height: 6),
+          // Legend explaining the numbers.
+          Text(
+            'Resolution = sharpness · Bitrate = image quality & USB bandwidth · '
+            'Hz = motion smoothness',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.4), fontSize: 11),
+          ),
+          const SizedBox(height: 16),
+          // Scroll the options so the sheet never overflows on small screens.
+          Flexible(
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  for (final p in EncodePreset.values)
+                    _PresetOption(
+                      preset: p,
+                      isSelected: p == selected,
+                      resolutionLabel: p == EncodePreset.custom
+                          ? customResolutionLabel
+                          : p.resolutionLabel,
+                      bitrateLabel: p == EncodePreset.custom
+                          ? customBitrateLabel
+                          : p.bitrateLabel,
+                      refreshRate: p == EncodePreset.custom
+                          ? customRefreshRate
+                          : p.refreshRate,
+                      onTap: () {
+                        onSelected(p);
+                        Get.back();
+                      },
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _PresetOption extends StatelessWidget {
+  final EncodePreset preset;
+  final bool isSelected;
+  final String resolutionLabel;
+  final String bitrateLabel;
+  final int refreshRate;
+  final VoidCallback onTap;
+
+  const _PresetOption({
+    required this.preset,
+    required this.isSelected,
+    required this.resolutionLabel,
+    required this.bitrateLabel,
+    required this.refreshRate,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    const accent = Color(0xFF00C8FF);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Material(
+        color: isSelected
+            ? accent.withValues(alpha: 0.12)
+            : Colors.white.withValues(alpha: 0.04),
+        borderRadius: BorderRadius.circular(14),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(14),
+          child: Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(
+                color: isSelected ? accent : Colors.white12,
+                width: isSelected ? 1.5 : 1,
+              ),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Text(preset.label,
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 16,
+                            fontWeight: FontWeight.w600)),
+                    const SizedBox(width: 8),
+                    Text(preset.tagline,
+                        style: TextStyle(
+                            color: accent.withValues(alpha: 0.9),
+                            fontSize: 12,
+                            fontWeight: FontWeight.w500)),
+                    const Spacer(),
+                    if (isSelected)
+                      const Icon(Icons.check_circle, color: accent, size: 20),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                // Spec chips.
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 6,
+                  children: [
+                    _SpecChip(icon: Icons.crop_free, label: resolutionLabel),
+                    _SpecChip(icon: Icons.data_usage, label: bitrateLabel),
+                    _SpecChip(icon: Icons.refresh, label: '$refreshRate Hz'),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Text(preset.description,
+                    style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.6),
+                        fontSize: 13,
+                        height: 1.35)),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Small grey explanatory caption shown under a custom setting row.
+class _HelpText extends StatelessWidget {
+  final String text;
+  const _HelpText(this.text);
+
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
+        child: Text(
+          text,
+          style: TextStyle(
+            color: Colors.white.withValues(alpha: 0.4),
+            fontSize: 12,
+            height: 1.4,
+          ),
+        ),
+      );
+}
+
+class _SpecChip extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  const _SpecChip({required this.icon, required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 13, color: Colors.white70),
+          const SizedBox(width: 5),
+          Text(label,
+              style: const TextStyle(color: Colors.white70, fontSize: 12)),
+        ],
+      ),
+    );
+  }
+}
+
 class _PickerSheet extends StatelessWidget {
   final String title;
   final List<String> items;
@@ -398,12 +709,16 @@ class _PickerSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final bottomInset = MediaQuery.viewPaddingOf(context).bottom;
     return Container(
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.sizeOf(context).height * 0.85,
+      ),
       decoration: const BoxDecoration(
         color: Color(0xFF111827),
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
-      padding: const EdgeInsets.symmetric(vertical: 24),
+      padding: EdgeInsets.only(top: 24, bottom: 8 + bottomInset),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -414,18 +729,27 @@ class _PickerSheet extends StatelessWidget {
                 fontWeight: FontWeight.w600,
               )),
           const SizedBox(height: 16),
-          ...items.asMap().entries.map((e) => ListTile(
-                title: Text(e.value,
-                    style: const TextStyle(color: Colors.white)),
-                trailing: e.key == selected
-                    ? const Icon(Icons.check, color: Color(0xFF00C8FF))
-                    : null,
-                onTap: () {
-                  onSelected(e.key);
-                  Get.back();
-                },
-              )),
-          const SizedBox(height: 8),
+          // Scroll the list so long option sets never overflow the sheet.
+          Flexible(
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  ...items.asMap().entries.map((e) => ListTile(
+                        title: Text(e.value,
+                            style: const TextStyle(color: Colors.white)),
+                        trailing: e.key == selected
+                            ? const Icon(Icons.check, color: Color(0xFF00C8FF))
+                            : null,
+                        onTap: () {
+                          onSelected(e.key);
+                          Get.back();
+                        },
+                      )),
+                ],
+              ),
+            ),
+          ),
         ],
       ),
     );
