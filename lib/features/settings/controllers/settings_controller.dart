@@ -167,9 +167,13 @@ class SettingsController extends GetxController {
     }
   }
 
-  void togglePerformanceOverlay() =>
-      _settings.setShowPerformanceOverlay(!showPerformanceOverlay.value);
+  void togglePerformanceOverlay() {
+    _settings.setShowPerformanceOverlay(!showPerformanceOverlay.value);
+    _cm.sendUiFlags(); // push to the client (overlays render there)
+  }
 
-  void toggleHudOverlay() =>
-      _settings.setShowHudOverlay(!showHudOverlay.value);
+  void toggleHudOverlay() {
+    _settings.setShowHudOverlay(!showHudOverlay.value);
+    _cm.sendUiFlags();
+  }
 }

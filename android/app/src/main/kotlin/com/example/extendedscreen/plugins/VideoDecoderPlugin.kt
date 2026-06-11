@@ -81,9 +81,32 @@ object VideoDecoderPlugin : MethodChannel.MethodCallHandler {
     }
 
     /// Called from SurfaceViewPlugin when the SurfaceView's Surface is created.
+    /// On the first surface this configures the codec; on a later surface (the
+    /// SurfaceView is destroyed/recreated when the app is backgrounded then
+    /// resumed) the running codec is re-bound to the new surface so it doesn't
+    /// keep rendering to the abandoned one (which shows as a black screen).
+    @Synchronized
     fun setSurface(s: Surface) {
         surface = s
-        tryConfigure()
+        val codec = mediaCodec
+        if (configured && codec != null) {
+            try {
+                codec.setOutputSurface(s)
+                // Repaint immediately: ask the host for a fresh keyframe.
+                channel?.invokeMethod("onRequestIdr", null)
+            } catch (e: Exception) {
+                // setOutputSurface can fail if the codec isn't in a swappable
+                // state — fall back to a full reconfigure on the new surface.
+                // Keep the pending params so tryConfigure() can rebuild.
+                channel?.invokeMethod("onCodecError", e.message)
+                try { codec.release() } catch (_: Exception) {}
+                mediaCodec = null
+                configured = false
+                tryConfigure()
+            }
+        } else {
+            tryConfigure()
+        }
     }
 
     @Synchronized

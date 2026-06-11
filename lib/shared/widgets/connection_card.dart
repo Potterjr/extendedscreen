@@ -10,11 +10,15 @@ class ConnectionCard extends StatelessWidget {
   /// always shown while active.
   final bool canConnect;
 
+  /// Active codec label shown in the subtitle while connected (e.g. "H.265").
+  final String codecLabel;
+
   const ConnectionCard({
     super.key,
     required this.phase,
     required this.onTap,
     this.canConnect = true,
+    this.codecLabel = 'H.264',
   });
 
   @override
@@ -65,7 +69,7 @@ class ConnectionCard extends StatelessWidget {
                 const SizedBox(height: 2),
                 Text(
                   isActive
-                      ? 'USB-C  •  H.264'
+                      ? 'USB-C  •  $codecLabel'
                       : 'Plug tablet via USB-C cable',
                   style: TextStyle(
                     color: Colors.white.withValues(alpha: 0.4),

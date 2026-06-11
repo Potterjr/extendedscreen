@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
@@ -11,7 +12,7 @@ import 'package:extendedscreen/client/platform/video_decoder_channel.dart';
 import 'package:extendedscreen/shared/services/settings_service.dart';
 import 'package:extendedscreen/shared/services/logger_service.dart';
 
-class DisplayController extends GetxController {
+class DisplayController extends GetxController with WidgetsBindingObserver {
   final _cm = Get.find<BaseConnectionManager>();
   final _settings = Get.find<SettingsService>();
   final _log = Get.find<LoggerService>();
@@ -29,13 +30,27 @@ class DisplayController extends GetxController {
   @override
   void onReady() {
     super.onReady();
-    WakelockPlus.enable();
-    // Show navigation bar while keeping fullscreen video content.
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    WidgetsBinding.instance.addObserver(this);
+    _keepScreenOn();
     if (isAndroid) {
       _initDecoderAndSubscribe();
     }
     _startFpsCounter();
+  }
+
+  /// Keep the display awake and fullscreen while streaming. Re-asserted on
+  /// resume because Android can drop the wake lock / UI mode when the app is
+  /// backgrounded, which would let the screen dim or go black mid-stream.
+  void _keepScreenOn() {
+    WakelockPlus.enable();
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _keepScreenOn();
+    }
   }
 
   Future<void> _initDecoderAndSubscribe() async {
@@ -147,6 +162,7 @@ class DisplayController extends GetxController {
 
   @override
   void onClose() {
+    WidgetsBinding.instance.removeObserver(this);
     WakelockPlus.disable();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     _packetSub?.cancel();

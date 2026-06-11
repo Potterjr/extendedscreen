@@ -1,3 +1,4 @@
+import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
 import 'package:extendedscreen/app/routes/app_routes.dart';
 import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
@@ -23,14 +24,32 @@ class HomeController extends GetxController {
     // Populate the device picker as soon as the host screen opens.
     _connection.refreshDevices();
 
-    // Client (Android) is the viewer: when the link goes live, open the display
-    // to render frames. The host (Mac) is the source and stays on this screen.
+    // Client (Android): auto-open the display once the link is live. The home
+    // screen still shows the steps + Open View button (for when the user backs
+    // out and wants to re-open). The host stays on this screen as the source.
     if (!_connection.isHost) {
       ever<ConnectionPhase>(_connection.phase, (p) {
         if (p.isActive && Get.currentRoute == AppRoutes.home) {
           Get.toNamed(AppRoutes.display);
         }
       });
+      // Already streaming when home opens (resumed onto home while live) —
+      // `ever` won't fire without a change, so jump after the first frame.
+      if (_connection.phase.value.isActive) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (Get.currentRoute == AppRoutes.home) {
+            Get.toNamed(AppRoutes.display);
+          }
+        });
+      }
+    }
+  }
+
+  /// Client: open the display view manually (via the Open View button). Only
+  /// meaningful once the stream is live.
+  void onOpenView() {
+    if (_connection.phase.value.isActive) {
+      Get.toNamed(AppRoutes.display);
     }
   }
 
