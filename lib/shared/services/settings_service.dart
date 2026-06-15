@@ -129,13 +129,14 @@ class SettingsService extends GetxService {
   bool get isCustomPreset => encodePreset == EncodePreset.custom;
 
   // ─── Effective capture values (resolve custom vs fixed preset) ────────────
-  // Custom encodes at the chosen physical resolution with no HiDPI scaling.
+  // Custom treats its width/height as logical (points) and encodes at 2x HiDPI
+  // — same as Quality/Balanced — so text stays sharp on the native panel.
   int get captureWidth =>
       isCustomPreset ? customWidth : encodePreset.width;
   int get captureHeight =>
       isCustomPreset ? customHeight : encodePreset.height;
   double get captureScaleFactor =>
-      isCustomPreset ? 1.0 : encodePreset.scaleFactor;
+      isCustomPreset ? 2.0 : encodePreset.scaleFactor;
   int get captureBitrate =>
       isCustomPreset ? customBitrateMbps * 1000000 : encodePreset.bitrate;
 
