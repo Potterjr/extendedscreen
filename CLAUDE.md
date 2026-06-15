@@ -73,6 +73,18 @@ Binary framing: 4-byte magic `EXTD` + 1-byte type + 4-byte payload length + 8-by
 | `PermissionsPlugin.swift` | Checks/requests macOS permissions (Screen Recording, Accessibility) and exposes them to Dart via `MethodChannel`. |
 | `SocketSender.swift` | (legacy/alternative) NWConnection TCP sender; main path now goes through `SocketService` on the Dart side. |
 
+Plugins are registered in `MainFlutterWindow.swift` against the Flutter engine.
+
+### Native Android plugins (`android/app/src/main/kotlin/com/example/extendedscreen/plugins/`)
+
+| File | Purpose |
+|---|---|
+| `VideoDecoderPlugin.kt` | `MediaCodec` H.264/H.265 hardware decode. A separate **binary** MethodChannel carries raw NAL data (avoids `StandardMessageCodec` overhead on the hot path); calls back into Dart via `onRequestIdr`/`onCodecError`. Decodes onto the surface from `SurfaceViewPlugin`. |
+| `SurfaceViewPlugin.kt` | Registers a `PlatformView` (`DecoderSurfaceView`) so the decoder can render directly to an Android `SurfaceView` embedded in the Flutter widget tree (`DisplayView`). |
+| `PermissionsPlugin.kt` | Client-side permission MethodChannel (Android counterpart to the macOS `PermissionsPlugin`). |
+
+Plugins are registered in `MainActivity.kt`. The client is landscape-locked via the manifest plus `SystemChrome` in `main()`.
+
 ### Display modes
 
 - **Extend:** Creates a `CGVirtualDisplay` matching the tablet resolution; ScreenCaptureKit captures that virtual display exclusively.
