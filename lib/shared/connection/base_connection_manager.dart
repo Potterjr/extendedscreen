@@ -51,6 +51,19 @@ abstract class BaseConnectionManager extends GetxService
   /// on the client.
   final availableDevices = <DeviceModel>[].obs;
 
+  /// Reverse remote (Mac controls tablet), client only: the host has asked this
+  /// tablet to share its screen and we're waiting for the user to start it (the
+  /// MediaProjection consent must be triggered from the foreground). Drives the
+  /// "Start screen sharing" button on the client home screen.
+  final needsScreenShare = false.obs;
+
+  /// Reverse remote, client only: the tablet is actively capturing + streaming.
+  final isScreenSharing = false.obs;
+
+  /// Client only: begin screen sharing (shows the consent prompt, then captures
+  /// + streams). No-op on the host and in non-reverse modes.
+  Future<void> startScreenShare() async {}
+
   /// Raw packet stream for consumers (DisplayController reads FRAME_DATA here).
   Stream<Packet> get packetStream => socket.packetStream;
 

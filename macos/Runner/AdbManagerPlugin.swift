@@ -32,6 +32,17 @@ class AdbManagerPlugin: NSObject {
             }
             removeForward(serial: serial)
             result(nil)
+        case "shellInput":
+            guard let args = call.arguments as? [String: Any],
+                  let serial = args["serial"] as? String,
+                  let inputArgs = args["args"] as? [String] else {
+                result(FlutterError(code: "BAD_ARGS", message: nil, details: nil))
+                return
+            }
+            // Reverse remote: inject input on the tablet via `adb shell input …`.
+            // Fire-and-forget so a dropped tap never stalls the control loop.
+            adbRun(args: ["-s", serial, "shell", "input"] + inputArgs) { _, _ in }
+            result(nil)
         default:
             result(FlutterMethodNotImplemented)
         }

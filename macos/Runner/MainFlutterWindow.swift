@@ -15,6 +15,9 @@ class MainFlutterWindow: NSWindow {
     InputInjectPlugin.register(with: messenger)
     AdbManagerPlugin.register(with: messenger)
     PermissionsPlugin.register(with: messenger)
+    // Reverse-remote decoder needs a registrar for the texture registry.
+    RemoteVideoPlugin.register(
+      with: flutterViewController.registrar(forPlugin: "RemoteVideoPlugin"))
 
     super.awakeFromNib()
   }

@@ -32,6 +32,7 @@
 		AA001005AA001005AA001005 /* AdbManagerPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA001006AA001006AA001006 /* AdbManagerPlugin.swift */; };
 		BB001002BB001002BB001002 /* PermissionsPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB001001BB001001BB001001 /* PermissionsPlugin.swift */; };
 		AA001007AA001007AA001007 /* SocketSender.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA001008AA001008AA001008 /* SocketSender.swift */; };
+		AA001011AA001011AA001011 /* RemoteVideoPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA001012AA001012AA001012 /* RemoteVideoPlugin.swift */; };
 		6E2D579CA9C6DB29B3C0BBD9 /* Pods_Runner.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 5DB51058942DDD1241A59E66 /* Pods_Runner.framework */; };
 		C1EB18BB2B3148935F855BA4 /* Pods_RunnerTests.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8056F586FA3750CF91DDC91A /* Pods_RunnerTests.framework */; };
 /* End PBXBuildFile section */
@@ -84,6 +85,7 @@
 		AA001006AA001006AA001006 /* AdbManagerPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdbManagerPlugin.swift; sourceTree = "<group>"; };
 		BB001001BB001001BB001001 /* PermissionsPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermissionsPlugin.swift; sourceTree = "<group>"; };
 		AA001008AA001008AA001008 /* SocketSender.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SocketSender.swift; sourceTree = "<group>"; };
+		AA001012AA001012AA001012 /* RemoteVideoPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteVideoPlugin.swift; sourceTree = "<group>"; };
 		33CEB47222A05771004F2AC0 /* Flutter-Debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = "Flutter-Debug.xcconfig"; sourceTree = "<group>"; };
 		33CEB47422A05771004F2AC0 /* Flutter-Release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = "Flutter-Release.xcconfig"; sourceTree = "<group>"; };
 		33CEB47722A0578A004F2AC0 /* Flutter-Generated.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = "Flutter-Generated.xcconfig"; path = "ephemeral/Flutter-Generated.xcconfig"; sourceTree = "<group>"; };
@@ -192,6 +194,7 @@
 				AA001006AA001006AA001006 /* AdbManagerPlugin.swift */,
 					BB001001BB001001BB001001 /* PermissionsPlugin.swift */,
 				AA001008AA001008AA001008 /* SocketSender.swift */,
+				AA001012AA001012AA001012 /* RemoteVideoPlugin.swift */,
 				33E51913231747F40026EE4D /* DebugProfile.entitlements */,
 				33E51914231749380026EE4D /* Release.entitlements */,
 				33CC11242044D66E0003C045 /* Resources */,
@@ -460,6 +463,7 @@
 				AA001005AA001005AA001005 /* AdbManagerPlugin.swift in Sources */,
 					BB001002BB001002BB001002 /* PermissionsPlugin.swift in Sources */,
 				AA001007AA001007AA001007 /* SocketSender.swift in Sources */,
+				AA001011AA001011AA001011 /* RemoteVideoPlugin.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

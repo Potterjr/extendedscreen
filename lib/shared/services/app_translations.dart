@@ -28,6 +28,7 @@ class AppTranslations extends Translations {
     // ── Common ──────────────────────────────────────────────────────────
     'common_connect': 'Connect',
     'common_disconnect': 'Disconnect',
+    'common_reconnect': 'Reconnect',
     'common_connected': 'Connected',
     'common_open': 'Open',
     'common_refresh': 'Refresh',
@@ -47,9 +48,33 @@ class AppTranslations extends Translations {
     'phase_paused': 'Paused',
     'phase_error': 'Error',
 
+    // ── Launcher / session modes ────────────────────────────────────────
+    'launcher_choose': 'What would you like to do?',
+    'launcher_subtitle': 'Connect your tablet over USB-C, then pick a mode.',
+    'session_extended_label': 'Extended Screen',
+    'session_extended_desc': 'Use the tablet as a second monitor for your Mac.',
+    'session_remote_label': 'Remote Control',
+    'session_remote_desc':
+        'Control your Mac\'s desktop from the tablet, like a remote session.',
+    'remote_dir_title': 'Direction',
+    'remote_dir_tab_label': 'Tablet → Mac',
+    'remote_dir_tab_desc': 'Control the Mac from the tablet.',
+    'remote_dir_mac_label': 'Mac → Tablet',
+    'remote_dir_mac_desc': 'Control the tablet from the Mac.',
+    'remote_host_waiting':
+        'Waiting for the tablet…\nApprove the screen-capture prompt on the tablet.',
+
     // ── Home ────────────────────────────────────────────────────────────
     'home_open_view': 'Open View',
+    'home_open_remote': 'Open Remote View',
     'home_waiting_for_stream': 'Waiting for stream…',
+    'home_start_share': 'Start screen sharing',
+    'home_start_share_hint':
+        'The Mac wants to view and control this tablet. Tap to start, then '
+            'approve the screen-capture prompt.',
+    'home_sharing': 'Sharing your screen',
+    'home_sharing_hint':
+        'The Mac can now see and control this tablet. Disconnect to stop.',
 
     // ── Connection card ─────────────────────────────────────────────────
     'conn_card_active_subtitle': 'USB-C  •  @codec',
@@ -192,6 +217,7 @@ class AppTranslations extends Translations {
     // ── Common ──────────────────────────────────────────────────────────
     'common_connect': 'เชื่อมต่อ',
     'common_disconnect': 'ตัดการเชื่อมต่อ',
+    'common_reconnect': 'เชื่อมต่อใหม่',
     'common_connected': 'เชื่อมต่อแล้ว',
     'common_open': 'เปิด',
     'common_refresh': 'รีเฟรช',
@@ -211,9 +237,31 @@ class AppTranslations extends Translations {
     'phase_paused': 'หยุดชั่วคราว',
     'phase_error': 'เกิดข้อผิดพลาด',
 
+    // ── Launcher / session modes ────────────────────────────────────────
+    'launcher_choose': 'ต้องการทำอะไร?',
+    'launcher_subtitle': 'เชื่อมต่อแท็บเล็ตผ่าน USB-C แล้วเลือกโหมด',
+    'session_extended_label': 'จอเสริม',
+    'session_extended_desc': 'ใช้แท็บเล็ตเป็นจอที่สองของ Mac',
+    'session_remote_label': 'รีโมตคอนโทรล',
+    'session_remote_desc': 'ควบคุมหน้าจอ Mac จากแท็บเล็ต เหมือนการรีโมต',
+    'remote_dir_title': 'ทิศทาง',
+    'remote_dir_tab_label': 'แท็บเล็ต → Mac',
+    'remote_dir_tab_desc': 'คุม Mac จากแท็บเล็ต',
+    'remote_dir_mac_label': 'Mac → แท็บเล็ต',
+    'remote_dir_mac_desc': 'คุมแท็บเล็ตจาก Mac',
+    'remote_host_waiting': 'กำลังรอแท็บเล็ต…\nกดอนุญาตการบันทึกหน้าจอบนแท็บเล็ต',
+
     // ── Home ────────────────────────────────────────────────────────────
     'home_open_view': 'เปิดหน้าจอ',
+    'home_open_remote': 'เปิดหน้าควบคุมระยะไกล',
     'home_waiting_for_stream': 'กำลังรอสัญญาณสตรีม…',
+    'home_start_share': 'เริ่มแชร์หน้าจอ',
+    'home_start_share_hint':
+        'Mac ต้องการดูและควบคุมแท็บเล็ตเครื่องนี้ แตะเพื่อเริ่ม '
+            'แล้วกดอนุญาตการบันทึกหน้าจอ',
+    'home_sharing': 'กำลังแชร์หน้าจอ',
+    'home_sharing_hint':
+        'ตอนนี้ Mac เห็นและควบคุมแท็บเล็ตนี้ได้แล้ว ตัดการเชื่อมต่อเพื่อหยุด',
 
     // ── Connection card ─────────────────────────────────────────────────
     'conn_card_active_subtitle': 'USB-C  •  @codec',
