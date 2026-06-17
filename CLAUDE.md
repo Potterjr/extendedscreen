@@ -27,14 +27,23 @@ flutter test
 
 ## Architecture
 
-### Dual-role Flutter app
+### Dual-role Flutter app, organized by feature module
 
-The same Dart codebase runs on both sides of the link, but the role-specific code is split into separate folders (imports are `package:extendedscreen/...`):
+The same Dart codebase runs on both sides of the link. The tree is organized **by feature module first, then by role**, with a central shared backbone (imports are `package:extendedscreen/...`):
 
-- **`lib/shared/`** — used by both roles: `models/`, `protocol/`, `services/` (logger, settings, translations), `connection/` (`socket_service`, `connection_state`, and the abstract `BaseConnectionManager`), `platform/` (`permissions_channel`), and shared `widgets/`.
-- **`lib/host/`** — macOS only: `platform/` (`screen_capture_channel`, `input_inject_channel`), `connection/` (`adb_service`, `HostConnectionManager`).
-- **`lib/client/`** — Android only: `platform/` (`video_decoder_channel`), `connection/` (`ClientConnectionManager`).
-- **`lib/features/`** — shared UI shells (splash, home, display, settings) that depend on `BaseConnectionManager` and shared widgets.
+- **`lib/shared/`** — the cross-mode backbone used by both roles *and* both feature modules:
+  - `connection/` — `socket_service`, `connection_state`, the abstract `BaseConnectionManager`, plus the concrete `HostConnectionManager`, `ClientConnectionManager`, and `AdbService`. The two concrete managers each branch on `SessionMode` to drive *both* feature modules, so they live here rather than in a module.
+  - `models/`, `protocol/`, `services/` (logger, settings, translations), `platform/` (`permissions_channel`), shared `widgets/`.
+  - `features/` — mode-agnostic UI shells: `splash/`, `launcher/` (picks the `SessionMode`), `home/` (connection screen, both roles/modes), `settings/` (host control surface, mode-aware).
+- **`lib/modules/extended_screen/`** — the second-monitor streaming pipeline:
+  - `host/` — `screen_capture_channel`, `input_inject_channel` (macOS capture + input injection).
+  - `client/` — `video_decoder_channel` and the `display/` feature (Android decode + render). Also reused by the remote tab-controls-Mac direction.
+- **`lib/modules/remote_screen/`** — the remote-control additions:
+  - `host/` — `remote_video_channel` (macOS decodes the tablet stream) and the `remote_host/` feature (Mac-views-tablet UI).
+  - `client/` — `android_capture_channel` (Android captures + encodes its own screen).
+- **`lib/app/`** — app shell: `app.dart`, `theme/`, `routes/`, `bindings/initial_binding.dart`.
+
+Note: because the move was structure-only (no behavior rewrite), the shared connection managers import a couple of module-owned channels (e.g. `HostConnectionManager` → `remote_screen/.../remote_video_channel`; `ClientConnectionManager` → `remote_screen/.../android_capture_channel`). These are runtime `Get.find` dependencies whose imports are type-only — a deliberate, acyclic "shared depends on module" edge.
 
 Roles:
 
@@ -49,7 +58,7 @@ Roles:
 
 All user-facing strings are GetX translation keys resolved with `.tr` (or `.trParams({'name': value})` for `@name` interpolation) against `AppTranslations`, which holds `en` and `th` maps. **Never hard-code UI strings** — add a key to both locale maps. This applies to enum label extensions too (`ConnectionPhaseX.label`, `EncodePresetX.label/tagline/description`, permission item labels), which resolve the active locale at read time. `fallbackLocale` is `en`. The saved language (or device language: Thai if the system is Thai, else English) is resolved in `SettingsService.init()`; `SettingsService.setLocale()` persists the code and calls `Get.updateLocale()`.
 
-### Connection lifecycle (`lib/shared/connection/`, `lib/host/connection/`, `lib/client/connection/`)
+### Connection lifecycle (`lib/shared/connection/`)
 
 `BaseConnectionManager` owns the shared phase/latency observables, the packet loop with heartbeat handling, the reconnect timer, and input-send helpers. It exposes abstract `connect()`/`autoConnect()`/`changeMode()` hooks and overridable `onRolePacket()`/`onTeardown()` callbacks. `HostConnectionManager` and `ClientConnectionManager` implement the role specifics. The happy-path phase sequence is:
 `disconnected → detectingDevice → adbConnecting → portForwarding → handshaking → configuring → streaming`

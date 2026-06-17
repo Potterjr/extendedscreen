@@ -3,12 +3,15 @@ import 'dart:ui';
 import 'package:get/get.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
+import 'package:extendedscreen/shared/models/session_mode.dart';
 import 'package:extendedscreen/shared/services/app_translations.dart';
 
 class SettingsService extends GetxService {
   late SharedPreferences _prefs;
 
   static const _keyMode = 'display_mode';
+  static const _keySessionMode = 'session_mode';
+  static const _keyRemoteDirection = 'remote_direction';
   static const _keyBitrate = 'bitrate';
   static const _keyLastDevice = 'last_device';
   static const _keyLastDeviceName = 'last_device_name';
@@ -33,6 +36,12 @@ class SettingsService extends GetxService {
   final codecRx = CodecType.h264.obs;
   // Reactive UI language code ('en' / 'th'); drives the language picker.
   final localeCode = 'en'.obs;
+  // Active session mode (chosen on the launcher). Reactive so UI reflects it
+  // live; the host forces Mirror capture while in remote-control mode.
+  final sessionModeRx = SessionMode.extendedScreen.obs;
+  // Which side drives a remote-control session. Only meaningful when
+  // sessionMode == remoteControl.
+  final remoteDirectionRx = RemoteDirection.tabControlsMac.obs;
 
   // Native panel of the connected client device (physical px, landscape).
   // Fixed presets derive their capture resolution from these. The fallback is
@@ -56,7 +65,52 @@ class SettingsService extends GetxService {
     clientPanelWidth.value = _prefs.getInt(_keyPanelW) ?? clientPanelWidth.value;
     clientPanelHeight.value =
         _prefs.getInt(_keyPanelH) ?? clientPanelHeight.value;
+    sessionModeRx.value = _resolveSessionMode();
+    remoteDirectionRx.value = _resolveRemoteDirection();
   }
+
+  SessionMode _resolveSessionMode() {
+    final v = _prefs.getString(_keySessionMode);
+    return SessionMode.values.firstWhere(
+      (m) => m.name == v,
+      orElse: () => SessionMode.extendedScreen,
+    );
+  }
+
+  SessionMode get sessionMode => sessionModeRx.value;
+
+  Future<void> setSessionMode(SessionMode mode) async {
+    sessionModeRx.value = mode;
+    await _prefs.setString(_keySessionMode, mode.name);
+  }
+
+  RemoteDirection _resolveRemoteDirection() {
+    final v = _prefs.getString(_keyRemoteDirection);
+    return RemoteDirection.values.firstWhere(
+      (d) => d.name == v,
+      orElse: () => RemoteDirection.tabControlsMac,
+    );
+  }
+
+  RemoteDirection get remoteDirection => remoteDirectionRx.value;
+
+  Future<void> setRemoteDirection(RemoteDirection dir) async {
+    remoteDirectionRx.value = dir;
+    await _prefs.setString(_keyRemoteDirection, dir.name);
+  }
+
+  /// True when the active session streams Android → macOS (tablet captures, Mac
+  /// views): remote-control mode with the Mac-controls-tablet direction. Every
+  /// other mode streams macOS → Android.
+  bool get isReverseRemote =>
+      sessionMode == SessionMode.remoteControl && remoteDirection.isReverse;
+
+  /// Display mode the host should actually capture in: remote-control always
+  /// mirrors the real desktop; extended-screen honours the user's [displayMode].
+  DisplayMode get effectiveDisplayMode =>
+      sessionMode == SessionMode.remoteControl
+          ? DisplayMode.mirror
+          : displayMode;
 
   /// Host: record the client's native panel (from its HELLO). Landscape is
   /// enforced on the client, so width is always the long side.
