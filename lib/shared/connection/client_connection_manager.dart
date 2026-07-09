@@ -7,6 +7,7 @@ import 'package:extendedscreen/shared/connection/connection_state.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
 import 'package:extendedscreen/shared/models/packet_model.dart';
 import 'package:extendedscreen/shared/models/session_mode.dart';
+import 'package:extendedscreen/shared/platform/keepalive_channel.dart';
 import 'package:extendedscreen/modules/remote_screen/client/android_capture_channel.dart';
 
 /// CLIENT role (Android): dials into the adb-reverse tunnel, sends its desired
@@ -48,6 +49,12 @@ class ClientConnectionManager extends BaseConnectionManager {
 
       setPhase(ConnectionPhase.streaming);
       startHeartbeat();
+      // Hold the process at foreground priority so backgrounding the tablet
+      // (e.g. switching to a game) can't get us frozen + killed, dropping the
+      // socket + decoder. Started here — while in the foreground — so Android's
+      // background-FGS-start restriction doesn't reject it; it then survives the
+      // app going to background.
+      KeepAliveChannel.start();
       log.i('Client: connected to host, streaming');
     } catch (e) {
       // Expected to fail until the host is up; retry quietly.
@@ -141,6 +148,7 @@ class ClientConnectionManager extends BaseConnectionManager {
   @override
   Future<void> onTeardown() async {
     await _stopReverseCapture();
+    await KeepAliveChannel.stop();
     needsScreenShare.value = false;
     _pendingCodec = null;
   }
