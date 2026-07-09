@@ -7,6 +7,7 @@ import com.example.extendedscreen.plugins.VideoDecoderPlugin
 import com.example.extendedscreen.plugins.SurfaceViewPlugin
 import com.example.extendedscreen.plugins.PermissionsPlugin
 import com.example.extendedscreen.plugins.ScreenCapturePlugin
+import com.example.extendedscreen.plugins.ClientKeepAlivePlugin
 
 class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -15,6 +16,7 @@ class MainActivity : FlutterActivity() {
         SurfaceViewPlugin.register(flutterEngine, this)
         PermissionsPlugin.register(flutterEngine, this)
         ScreenCapturePlugin.register(flutterEngine, this)
+        ClientKeepAlivePlugin.register(flutterEngine, this)
     }
 
     // Route the MediaProjection consent result to the capture plugin.

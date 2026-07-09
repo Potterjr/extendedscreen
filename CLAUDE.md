@@ -80,6 +80,7 @@ Binary framing: 4-byte magic `EXTD` + 1-byte type + 4-byte payload length + 8-by
 | `InputInjectPlugin.swift` | Injects mouse/keyboard events via CGEvent APIs. Requires Accessibility permission. |
 | `AdbManagerPlugin.swift` | Wraps `adb` binary calls (`devices`, `reverse`, `forward --remove`). |
 | `PermissionsPlugin.swift` | Checks/requests macOS permissions (Screen Recording, Accessibility) and exposes them to Dart via `MethodChannel`. |
+| `RemoteVideoPlugin.swift` | Reverse-remote direction (Mac views tablet): VideoToolbox-decodes the H.264/H.265 Annex-B stream coming *from* the tablet and exposes decoded frames to Flutter as a `FlutterTexture` (channels `extended_screen/remote_video` + binary `extended_screen/remote_nal`). Mirror image of the Android `VideoDecoderPlugin`. |
 | `SocketSender.swift` | (legacy/alternative) NWConnection TCP sender; main path now goes through `SocketService` on the Dart side. |
 
 Plugins are registered in `MainFlutterWindow.swift` against the Flutter engine.
@@ -91,6 +92,8 @@ Plugins are registered in `MainFlutterWindow.swift` against the Flutter engine.
 | `VideoDecoderPlugin.kt` | `MediaCodec` H.264/H.265 hardware decode. A separate **binary** MethodChannel carries raw NAL data (avoids `StandardMessageCodec` overhead on the hot path); calls back into Dart via `onRequestIdr`/`onCodecError`. Decodes onto the surface from `SurfaceViewPlugin`. |
 | `SurfaceViewPlugin.kt` | Registers a `PlatformView` (`DecoderSurfaceView`) so the decoder can render directly to an Android `SurfaceView` embedded in the Flutter widget tree (`DisplayView`). |
 | `PermissionsPlugin.kt` | Client-side permission MethodChannel (Android counterpart to the macOS `PermissionsPlugin`). |
+| `ScreenCapturePlugin.kt` | Reverse-remote direction (Mac controls tablet): owns the MediaProjection consent flow and method/event channels for capturing *this* device's screen and streaming NAL units to the Mac. Counterpart to the macOS `ScreenCapturePlugin.swift`. |
+| `ScreenCaptureService.kt` | Foreground `Service` that does the heavy lifting for `ScreenCapturePlugin.kt` — MediaProjection + `MediaCodec` encoder + `VirtualDisplay` — so capture keeps running when the user switches apps. |
 
 Plugins are registered in `MainActivity.kt`. The client is landscape-locked via the manifest plus `SystemChrome` in `main()`.
 

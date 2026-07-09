@@ -16,6 +16,14 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
 
+    <!-- Client keep-alive: hold the process at foreground priority while the
+         extended-screen link is up, so Android won't freeze/kill it (and drop
+         the socket + decoder) when backgrounded. connectedDevice models the
+         USB-connected Mac and has no daily runtime cap; CHANGE_NETWORK_STATE
+         satisfies its runtime prerequisite. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"/>
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE"/>
+
     <application
         android:label="Extended Screen"
         android:name="${applicationName}"
@@ -50,6 +58,12 @@
             android:name=".plugins.ScreenCaptureService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection"/>
+
+        <!-- Client keep-alive foreground service (extended-screen decode link) -->
+        <service
+            android:name=".plugins.ClientKeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice"/>
     </application>
 
     <queries>
