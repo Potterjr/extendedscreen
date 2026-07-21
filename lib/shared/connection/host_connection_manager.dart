@@ -35,6 +35,10 @@ class HostConnectionManager extends BaseConnectionManager {
 
   StreamSubscription? _frameSub;
 
+  // Guards against overlapping capture rebuilds (the display-wake and
+  // system-wake notifications both fire on resume).
+  bool _restarting = false;
+
   // Completed when the client's HELLO arrives (it carries the panel size the
   // capture resolution is derived from).
   Completer<void>? _helloReceived;
@@ -141,6 +145,9 @@ class HostConnectionManager extends BaseConnectionManager {
   }
 
   Future<void> _startCapture() async {
+    // Let native wake/stream-stop callbacks rebuild the pipeline (see below).
+    _capture.onCaptureRestartNeeded = _restartCapture;
+
     final config = DisplayConfigModel.defaultConfig.copyWith(
       width: settings.captureWidth,
       height: settings.captureHeight,
@@ -205,6 +212,31 @@ class HostConnectionManager extends BaseConnectionManager {
         payload: nal,
       ));
     });
+  }
+
+  /// Rebuilds the capture pipeline after the native side reports it died — the
+  /// Mac woke from sleep (ScreenCaptureKit, the CGVirtualDisplay and the
+  /// VideoToolbox session are all invalidated by a sleep/wake cycle) or the
+  /// SCStream stopped with an error. The ADB-reverse socket survives sleep, so
+  /// the heartbeat/reconnect path never fires and nothing else would recover.
+  Future<void> _restartCapture() async {
+    if (_restarting) return;
+    if (!phase.value.isActive || settings.isReverseRemote) return;
+    _restarting = true;
+    try {
+      log.w('Host: rebuilding capture pipeline after wake/stream-stop');
+      await _frameSub?.cancel();
+      _frameSub = null;
+      await _capture.stopCapture();
+      await _capture.removeVirtualDisplay();
+      await _startCapture();
+      await _capture.requestIdr();
+      log.i('Host: capture pipeline rebuilt');
+    } catch (e, st) {
+      log.e('Host: capture restart failed', e, st);
+    } finally {
+      _restarting = false;
+    }
   }
 
   /// Reverse remote (Mac controls tablet): the tablet captures + encodes its own
@@ -284,6 +316,8 @@ class HostConnectionManager extends BaseConnectionManager {
 
   @override
   Future<void> onTeardown() async {
+    // Stop native wake callbacks from resurrecting capture after a disconnect.
+    _capture.onCaptureRestartNeeded = null;
     await _frameSub?.cancel();
     _frameSub = null;
     if (settings.isReverseRemote) {

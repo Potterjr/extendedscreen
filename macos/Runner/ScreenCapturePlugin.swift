@@ -36,6 +36,9 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
     private var virtualDisplayID: CGDirectDisplayID = 0
     private var forceKeyframe = true  // first encoded frame is always an IDR
     private var frameCount = 0
+    // True between a successful startCapture and stopCapture. Gates the wake
+    // handler so we only rebuild the pipeline when a session is actually live.
+    private var isCapturing = false
     private var targetFps = 60
     // Counts frames dispatched to encodeQueue but not yet returned.
     // If this grows beyond the threshold we skip the incoming frame to bound latency.
@@ -70,6 +73,39 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
 
         let frameCh = FlutterEventChannel(name: frameChannelName, binaryMessenger: messenger)
         frameCh.setStreamHandler(plugin)
+
+        plugin.observeSystemWake()
+    }
+
+    // MARK: - Sleep / Wake recovery
+
+    // A sleep/wake cycle invalidates ScreenCaptureKit, the CGVirtualDisplay and
+    // the VideoToolbox session, but the ADB-reverse socket (USB) survives — so
+    // the Dart heartbeat/reconnect never fires and the pipeline stays dead. On
+    // wake we ask Dart to rebuild the whole thing (Dart owns the orchestration:
+    // virtual display → SCK → encoder → control packets).
+    private func observeSystemWake() {
+        let nc = NSWorkspace.shared.notificationCenter
+        nc.addObserver(self, selector: #selector(systemDidWake),
+                       name: NSWorkspace.didWakeNotification, object: nil)
+        nc.addObserver(self, selector: #selector(systemDidWake),
+                       name: NSWorkspace.screensDidWakeNotification, object: nil)
+    }
+
+    @objc private func systemDidWake(_ note: Notification) {
+        guard isCapturing else { return }
+        NSLog("[ExtendedScreen] Wake (\(note.name.rawValue)) — scheduling capture restart")
+        // Give the GPU/displays a moment to come back before rebuilding. The
+        // display-wake and system-wake notifications both fire on resume; the
+        // Dart side coalesces the two rebuild requests.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            guard let self = self, self.isCapturing else { return }
+            self.channel?.invokeMethod("onCaptureNeedsRestart", arguments: nil)
+        }
+    }
+
+    deinit {
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 
     // MARK: - FlutterStreamHandler (frame EventChannel)
@@ -241,6 +277,7 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
                 self.stream?.startCapture { [weak self] err in
                     DispatchQueue.main.async {
                         if err == nil {
+                            self?.isCapturing = true
                             self?.startDisplayLink(displayID: targetDisplay.displayID)
                         }
                         result(err == nil ? nil : FlutterError(code: "START_FAILED", message: err?.localizedDescription, details: nil))
@@ -354,6 +391,7 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
     }
 
     private func stopCapture() {
+        isCapturing = false
         stopDisplayLink()  // cancel timer first so no new encodes fire during teardown
         stream?.stopCapture { _ in }
         stream = nil

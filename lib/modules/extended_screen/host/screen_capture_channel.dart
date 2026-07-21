@@ -9,6 +9,31 @@ class ScreenCaptureChannel extends GetxService {
   static const _frames = EventChannel('extended_screen/frames');
   final _log = Get.find<LoggerService>();
 
+  ScreenCaptureChannel() {
+    // Native → Dart callbacks: the SCStream dying (error) or the Mac waking from
+    // sleep both require rebuilding the whole capture pipeline. The ADB-reverse
+    // socket survives sleep, so nothing else would trigger a restart.
+    _channel.setMethodCallHandler(_handleNative);
+  }
+
+  /// Wired by [HostConnectionManager] to a full capture rebuild. Fired when the
+  /// native side reports the pipeline died (SCStream stopped) or the host woke
+  /// from sleep.
+  void Function()? onCaptureRestartNeeded;
+
+  Future<dynamic> _handleNative(MethodCall call) async {
+    switch (call.method) {
+      case 'onStreamStopped':
+      case 'onCaptureNeedsRestart':
+        _log.w('Native capture restart requested (${call.method})');
+        onCaptureRestartNeeded?.call();
+        break;
+      default:
+        break;
+    }
+    return null;
+  }
+
   /// Encoded H.264 NAL units streamed from the native VideoToolbox encoder.
   Stream<Uint8List> get frameStream => _frames
       .receiveBroadcastStream()
