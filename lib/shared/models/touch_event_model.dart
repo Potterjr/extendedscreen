@@ -41,6 +41,11 @@ class MouseEventModel {
   final MouseAction action;
   final double scrollDx;
   final double scrollDy;
+
+  /// Modifier-key bitmask applied to the injected event (matches [KeyEventModel]
+  /// / the native side: 0x01 ⌘, 0x02 ⇧, 0x04 ⌃, 0x08 ⌥). Used to send ⌘+scroll
+  /// for pinch-to-zoom.
+  final int modifiers;
   final int timestampUs;
 
   const MouseEventModel({
@@ -50,6 +55,7 @@ class MouseEventModel {
     required this.action,
     this.scrollDx = 0,
     this.scrollDy = 0,
+    this.modifiers = 0,
     required this.timestampUs,
   });
 }
