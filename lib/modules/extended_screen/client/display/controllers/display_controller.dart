@@ -8,6 +8,7 @@ import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
 import 'package:extendedscreen/shared/models/packet_model.dart';
 import 'package:extendedscreen/shared/models/touch_event_model.dart';
+import 'package:extendedscreen/modules/extended_screen/client/display/controllers/touch_gesture_recognizer.dart';
 import 'package:extendedscreen/modules/extended_screen/client/video_decoder_channel.dart';
 import 'package:extendedscreen/shared/services/settings_service.dart';
 import 'package:extendedscreen/shared/services/logger_service.dart';
@@ -110,56 +111,50 @@ class DisplayController extends GetxController with WidgetsBindingObserver {
     });
   }
 
-  void onPointerDown(double nx, double ny, int id, double pressure) {
-    _cm.sendTouch(TouchEventModel(
-      pointers: [
-        TouchPointerModel(
-          pointerId: id,
-          normalizedX: nx,
-          normalizedY: ny,
-          pressure: pressure,
-          majorAxis: 1.0,
-        )
-      ],
-      action: TouchAction.down,
+  // ─── Touch → Android-style gestures ────────────────────────────────────────
+  // Tap → click, one-finger swipe → natural scroll, long-press → drag. The
+  // recognizer converts raw pointer events into mouse actions on the host.
+  late final TouchGestureRecognizer _gestures = TouchGestureRecognizer(
+    onClick: (nx, ny) {
+      _sendMouse(MouseAction.down, nx, ny);
+      _sendMouse(MouseAction.up, nx, ny);
+    },
+    onMoveCursor: (nx, ny) => _sendMouse(MouseAction.move, nx, ny),
+    onScroll: (sdx, sdy) => _cm.sendMouse(MouseEventModel(
+      normalizedX: 0,
+      normalizedY: 0,
+      button: MouseButton.none,
+      action: MouseAction.scroll,
+      scrollDx: sdx,
+      scrollDy: sdy,
       timestampUs: DateTime.now().microsecondsSinceEpoch,
-      displayId: 0,
+    )),
+    onDragStart: (nx, ny) => _sendMouse(MouseAction.down, nx, ny),
+    onDragMove: (nx, ny) => _sendMouse(MouseAction.move, nx, ny),
+    onDragEnd: (nx, ny) => _sendMouse(MouseAction.up, nx, ny),
+    onLongPressEngaged: () => HapticFeedback.selectionClick(),
+  );
+
+  void _sendMouse(MouseAction action, double nx, double ny) {
+    _cm.sendMouse(MouseEventModel(
+      normalizedX: nx,
+      normalizedY: ny,
+      button: MouseButton.left,
+      action: action,
+      timestampUs: DateTime.now().microsecondsSinceEpoch,
     ));
   }
 
-  void onPointerMove(double nx, double ny, int id, double pressure) {
-    _cm.sendTouch(TouchEventModel(
-      pointers: [
-        TouchPointerModel(
-          pointerId: id,
-          normalizedX: nx,
-          normalizedY: ny,
-          pressure: pressure,
-          majorAxis: 1.0,
-        )
-      ],
-      action: TouchAction.move,
-      timestampUs: DateTime.now().microsecondsSinceEpoch,
-      displayId: 0,
-    ));
-  }
+  void onPointerDown(int id, Offset pos, Size size) =>
+      _gestures.down(id, pos, size);
 
-  void onPointerUp(double nx, double ny, int id) {
-    _cm.sendTouch(TouchEventModel(
-      pointers: [
-        TouchPointerModel(
-          pointerId: id,
-          normalizedX: nx,
-          normalizedY: ny,
-          pressure: 0,
-          majorAxis: 1.0,
-        )
-      ],
-      action: TouchAction.up,
-      timestampUs: DateTime.now().microsecondsSinceEpoch,
-      displayId: 0,
-    ));
-  }
+  void onPointerMove(int id, Offset pos, Size size) =>
+      _gestures.move(id, pos, size);
+
+  void onPointerUp(int id, Offset pos, Size size) =>
+      _gestures.up(id, pos, size);
+
+  void onPointerCancel(int id) => _gestures.cancel(id);
 
   void onDisconnect() {
     _cm.disconnect();
@@ -171,6 +166,7 @@ class DisplayController extends GetxController with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     WakelockPlus.disable();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    _gestures.dispose();
     _packetSub?.cancel();
     _fpsTimer?.cancel();
     if (isAndroid) {
