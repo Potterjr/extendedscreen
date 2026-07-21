@@ -55,6 +55,15 @@ class InputInjectPlugin: NSObject {
         let pt = CGPoint(x: x, y: y)
         let cgButton: CGMouseButton = buttonIdx == 2 ? .right : .left
 
+        // Modifier bitmask (0x01 ⌘, 0x02 ⇧, 0x04 ⌃, 0x08 ⌥) — used for
+        // ⌘+scroll pinch-to-zoom. Matches injectKey's mapping.
+        let mods = args["modifiers"] as? Int ?? 0
+        var flags = CGEventFlags()
+        if mods & 0x01 != 0 { flags.insert(.maskCommand)   }
+        if mods & 0x02 != 0 { flags.insert(.maskShift)     }
+        if mods & 0x04 != 0 { flags.insert(.maskControl)   }
+        if mods & 0x08 != 0 { flags.insert(.maskAlternate) }
+
         let eventType: CGEventType = switch (actionIdx, buttonIdx) {
             case (1, _): cgButton == .left ? .leftMouseDown  : .rightMouseDown
             case (2, _): cgButton == .left ? .leftMouseUp    : .rightMouseUp
@@ -65,11 +74,17 @@ class InputInjectPlugin: NSObject {
         if eventType == .scrollWheel {
             let sdx = Int32((args["scrollDx"] as? Double ?? 0) * 10)
             let sdy = Int32((args["scrollDy"] as? Double ?? 0) * 10)
-            CGEvent(scrollWheelEvent2Source: nil, units: .pixel,
-                    wheelCount: 2, wheel1: sdy, wheel2: sdx, wheel3: 0)?.post(tap: .cghidEventTap)
+            if let ev = CGEvent(scrollWheelEvent2Source: nil, units: .pixel,
+                    wheelCount: 2, wheel1: sdy, wheel2: sdx, wheel3: 0) {
+                if !flags.isEmpty { ev.flags = flags }
+                ev.post(tap: .cghidEventTap)
+            }
         } else {
-            CGEvent(mouseEventSource: nil, mouseType: eventType,
-                    mouseCursorPosition: pt, mouseButton: cgButton)?.post(tap: .cghidEventTap)
+            if let ev = CGEvent(mouseEventSource: nil, mouseType: eventType,
+                    mouseCursorPosition: pt, mouseButton: cgButton) {
+                if !flags.isEmpty { ev.flags = flags }
+                ev.post(tap: .cghidEventTap)
+            }
         }
     }
 

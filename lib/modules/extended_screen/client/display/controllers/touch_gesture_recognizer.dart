@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'package:flutter/widgets.dart';
 
-/// Turns raw single-finger pointer events coming from the tablet into
+/// Turns raw multi-touch pointer events coming from the tablet into
 /// Android-phone-style host actions on the macOS extended display:
 ///
 /// * **Tap** (down → up, no significant movement) → left click at that point.
@@ -12,14 +12,16 @@ import 'package:flutter/widgets.dart';
 ///   selecting text, dragging sliders, etc.
 /// * **Fling** (release while still moving fast) → inertial scrolling that
 ///   decays over ~0.6 s, like flick-scrolling on a phone.
+/// * **Pinch** (two fingers spread/close) → zoom in/out, emitted as ⌘+scroll
+///   centred on the pinch point (browsers, Maps, Preview, editors, …).
 ///
-/// Pure Dart — the owner wires the callbacks to the connection manager. Only
-/// the first active pointer is tracked; extra fingers are ignored.
+/// Pure Dart — the owner wires the callbacks to the connection manager.
 class TouchGestureRecognizer {
   TouchGestureRecognizer({
     required this.onClick,
     required this.onMoveCursor,
     required this.onScroll,
+    required this.onZoom,
     required this.onDragStart,
     required this.onDragMove,
     required this.onDragEnd,
@@ -29,12 +31,16 @@ class TouchGestureRecognizer {
   /// Tap detected — emit a click at the normalized point.
   final void Function(double nx, double ny) onClick;
 
-  /// Park the host cursor at a normalized point so the following scroll events
-  /// land on the window the finger is over (macOS scrolls under the cursor).
+  /// Park the host cursor at a normalized point so the following scroll/zoom
+  /// events land on the window under the finger (macOS scrolls/zooms there).
   final void Function(double nx, double ny) onMoveCursor;
 
   /// Scroll by the given wheel deltas (already sign- and gain-adjusted).
   final void Function(double scrollDx, double scrollDy) onScroll;
+
+  /// Zoom by the given amount, emitted by the owner as a ⌘+scroll. Positive =
+  /// zoom in (fingers spreading apart).
+  final void Function(double zoomDelta) onZoom;
 
   final void Function(double nx, double ny) onDragStart;
   final void Function(double nx, double ny) onDragMove;
@@ -59,6 +65,13 @@ class TouchGestureRecognizer {
   /// Mac's "Natural scrolling" system setting.
   static const double _directionSign = 1;
 
+  /// Pinch-distance px → ⌘+scroll wheel units. Controls zoom sensitivity.
+  static const double _zoomGain = 0.06;
+
+  /// Zoom direction. `1` = fingers spreading apart zooms in. Flip to `-1` if
+  /// pinch zoom feels inverted.
+  static const double _zoomSign = 1;
+
   static const double _velEma = 0.4; // weight of the newest velocity sample
   static const double _velMax = 0.6; // clamp (wheel units / ms)
   static const double _flingStart = 0.06; // min release speed to fling
@@ -67,83 +80,127 @@ class TouchGestureRecognizer {
   static const Duration _flingTick = Duration(milliseconds: 16);
 
   // ─── State ────────────────────────────────────────────────────────────────
-  int? _pointerId;
+  // Insertion-ordered (Dart Map) so "the first two fingers" are stable.
+  final Map<int, Offset> _pointers = {};
+  int? _primaryId;
   Size _view = Size.zero;
+
+  // Single-finger tracking.
   Offset _startPos = Offset.zero;
   Offset _lastPos = Offset.zero;
   int _lastMoveUs = 0;
   _Mode _mode = _Mode.idle;
   Timer? _longPressTimer;
 
+  // Pinch tracking.
+  double _lastDist = 0;
+
+  // Fling.
   Offset _vel = Offset.zero; // wheel units / ms
   Timer? _flingTimer;
 
   // ─── Pointer entry points ─────────────────────────────────────────────────
   void down(int id, Offset pos, Size view) {
     _cancelFling();
-    if (_pointerId != null) return; // already tracking a finger
-    _pointerId = id;
     _view = view;
-    _startPos = pos;
-    _lastPos = pos;
-    _lastMoveUs = _nowUs();
-    _vel = Offset.zero;
-    _mode = _Mode.undecided;
-    _longPressTimer = Timer(_longPress, () {
-      if (_mode == _Mode.undecided && _pointerId == id) {
-        _mode = _Mode.drag;
-        onLongPressEngaged();
-        onDragStart(_nx(_startPos), _ny(_startPos));
-      }
-    });
+    final wasEmpty = _pointers.isEmpty;
+    _pointers[id] = pos;
+
+    if (wasEmpty) {
+      _primaryId = id;
+      _startPos = pos;
+      _lastPos = pos;
+      _lastMoveUs = _nowUs();
+      _vel = Offset.zero;
+      _mode = _Mode.undecided;
+      _longPressTimer = Timer(_longPress, () {
+        if (_mode == _Mode.undecided && _primaryId == id) {
+          _mode = _Mode.drag;
+          onLongPressEngaged();
+          onDragStart(_nx(_startPos), _ny(_startPos));
+        }
+      });
+      return;
+    }
+
+    // A second finger during an in-progress single-finger swipe/tap → pinch.
+    // Drag / already-pinching / spent gestures ignore extra fingers.
+    if (_mode == _Mode.undecided || _mode == _Mode.scroll) {
+      if (_pointers.length >= 2) _beginPinch();
+    }
   }
 
   void move(int id, Offset pos, Size view) {
-    if (id != _pointerId) return;
+    if (!_pointers.containsKey(id)) return;
     _view = view;
+    _pointers[id] = pos;
     final now = _nowUs();
+
     switch (_mode) {
+      case _Mode.pinch:
+        _emitPinch();
       case _Mode.undecided:
-        if ((pos - _startPos).distance > _tapSlop) {
+        if (id == _primaryId && (pos - _startPos).distance > _tapSlop) {
           _longPressTimer?.cancel();
           _mode = _Mode.scroll;
-          // Park the cursor where the finger started so the scroll targets
-          // the right window.
           onMoveCursor(_nx(_startPos), _ny(_startPos));
           _emitScroll(pos, now);
         }
       case _Mode.scroll:
-        _emitScroll(pos, now);
+        if (id == _primaryId) _emitScroll(pos, now);
       case _Mode.drag:
-        onDragMove(_nx(pos), _ny(pos));
+        if (id == _primaryId) onDragMove(_nx(pos), _ny(pos));
+      case _Mode.spent:
       case _Mode.idle:
         break;
     }
-    _lastPos = pos;
-    _lastMoveUs = now;
+    if (id == _primaryId) {
+      _lastPos = pos;
+      _lastMoveUs = now;
+    }
   }
 
   void up(int id, Offset pos, Size view) {
-    if (id != _pointerId) return;
+    if (!_pointers.containsKey(id)) return;
+    final wasPrimary = id == _primaryId;
+    _pointers.remove(id);
     _longPressTimer?.cancel();
+
     switch (_mode) {
       case _Mode.undecided:
-        onClick(_nx(pos), _ny(pos)); // released without moving → tap
+        if (wasPrimary) onClick(_nx(pos), _ny(pos)); // released without moving
       case _Mode.scroll:
-        _maybeFling();
+        if (wasPrimary) _maybeFling();
       case _Mode.drag:
-        onDragEnd(_nx(pos), _ny(pos));
+        if (wasPrimary) onDragEnd(_nx(pos), _ny(pos));
+      case _Mode.pinch:
+      case _Mode.spent:
       case _Mode.idle:
         break;
     }
-    _reset();
+
+    // Any remaining fingers must lift before a new gesture can start, so
+    // lifting one finger of a pinch doesn't snap back into single-finger scroll.
+    if (_pointers.isEmpty) {
+      _reset();
+    } else {
+      _mode = _Mode.spent;
+    }
   }
 
   void cancel(int id) {
-    if (id != _pointerId) return;
+    if (!_pointers.containsKey(id)) return;
+    final wasPrimary = id == _primaryId;
+    _pointers.remove(id);
     _longPressTimer?.cancel();
-    if (_mode == _Mode.drag) onDragEnd(_nx(_lastPos), _ny(_lastPos));
-    _reset();
+    if (_mode == _Mode.drag && wasPrimary) {
+      onDragEnd(_nx(_lastPos), _ny(_lastPos));
+    }
+    if (_pointers.isEmpty) {
+      _reset();
+    } else {
+      _mode = _Mode.spent;
+    }
   }
 
   void dispose() {
@@ -151,7 +208,7 @@ class TouchGestureRecognizer {
     _cancelFling();
   }
 
-  // ─── Internals ────────────────────────────────────────────────────────────
+  // ─── Scroll ───────────────────────────────────────────────────────────────
   void _emitScroll(Offset pos, int now) {
     final d = pos - _lastPos;
     final sdx = _directionSign * d.dx * _scrollGain;
@@ -185,8 +242,42 @@ class TouchGestureRecognizer {
     _flingTimer = null;
   }
 
+  // ─── Pinch / zoom ─────────────────────────────────────────────────────────
+  void _beginPinch() {
+    _longPressTimer?.cancel();
+    _cancelFling();
+    _mode = _Mode.pinch;
+    final (a, b) = _firstTwo();
+    _lastDist = (a - b).distance;
+    final c = (a + b) / 2;
+    onMoveCursor(_nx(c), _ny(c));
+  }
+
+  void _emitPinch() {
+    if (_pointers.length < 2) return;
+    final (a, b) = _firstTwo();
+    final dist = (a - b).distance;
+    final delta = dist - _lastDist;
+    _lastDist = dist;
+    if (delta == 0) return;
+    final c = (a + b) / 2;
+    onMoveCursor(_nx(c), _ny(c)); // keep the zoom centred on the pinch point
+    onZoom(_zoomSign * delta * _zoomGain);
+  }
+
+  (Offset, Offset) _firstTwo() {
+    final it = _pointers.values.iterator;
+    it.moveNext();
+    final a = it.current;
+    it.moveNext();
+    final b = it.current;
+    return (a, b);
+  }
+
+  // ─── Helpers ──────────────────────────────────────────────────────────────
   void _reset() {
-    _pointerId = null;
+    _pointers.clear();
+    _primaryId = null;
     _mode = _Mode.idle;
   }
 
@@ -197,4 +288,4 @@ class TouchGestureRecognizer {
       _view.height <= 0 ? 0 : (p.dy / _view.height).clamp(0.0, 1.0);
 }
 
-enum _Mode { idle, undecided, scroll, drag }
+enum _Mode { idle, undecided, scroll, drag, pinch, spent }

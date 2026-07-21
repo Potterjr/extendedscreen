@@ -31,6 +31,7 @@ class PacketCodec {
     _writeFloat32(buf, e.normalizedY);
     _writeFloat32(buf, e.scrollDx);
     _writeFloat32(buf, e.scrollDy);
+    buf.addByte(e.modifiers & 0xFF);
     _writeInt64(buf, e.timestampUs);
     return buf.toBytes();
   }
@@ -136,10 +137,13 @@ class PacketCodec {
     final ny = d.getFloat32(o, Endian.big); o += 4;
     final sdx = d.getFloat32(o, Endian.big); o += 4;
     final sdy = d.getFloat32(o, Endian.big); o += 4;
+    // The modifiers byte was added later; tolerate older 26-byte frames.
+    final hasMods = data.length >= o + 1 + 8;
+    final mods = hasMods ? d.getUint8(o++) : 0;
     final ts = d.getInt64(o, Endian.big);
     return MouseEventModel(
       normalizedX: nx, normalizedY: ny, button: button, action: action,
-      scrollDx: sdx, scrollDy: sdy, timestampUs: ts);
+      scrollDx: sdx, scrollDy: sdy, modifiers: mods, timestampUs: ts);
   }
 
   static KeyEventModel? decodeKey(Uint8List data) {

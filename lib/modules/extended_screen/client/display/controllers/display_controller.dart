@@ -120,15 +120,9 @@ class DisplayController extends GetxController with WidgetsBindingObserver {
       _sendMouse(MouseAction.up, nx, ny);
     },
     onMoveCursor: (nx, ny) => _sendMouse(MouseAction.move, nx, ny),
-    onScroll: (sdx, sdy) => _cm.sendMouse(MouseEventModel(
-      normalizedX: 0,
-      normalizedY: 0,
-      button: MouseButton.none,
-      action: MouseAction.scroll,
-      scrollDx: sdx,
-      scrollDy: sdy,
-      timestampUs: DateTime.now().microsecondsSinceEpoch,
-    )),
+    onScroll: (sdx, sdy) => _sendScroll(sdx, sdy),
+    // Pinch-to-zoom → ⌘+scroll (0x01 = Command).
+    onZoom: (dz) => _sendScroll(0, dz, modifiers: 0x01),
     onDragStart: (nx, ny) => _sendMouse(MouseAction.down, nx, ny),
     onDragMove: (nx, ny) => _sendMouse(MouseAction.move, nx, ny),
     onDragEnd: (nx, ny) => _sendMouse(MouseAction.up, nx, ny),
@@ -141,6 +135,19 @@ class DisplayController extends GetxController with WidgetsBindingObserver {
       normalizedY: ny,
       button: MouseButton.left,
       action: action,
+      timestampUs: DateTime.now().microsecondsSinceEpoch,
+    ));
+  }
+
+  void _sendScroll(double sdx, double sdy, {int modifiers = 0}) {
+    _cm.sendMouse(MouseEventModel(
+      normalizedX: 0,
+      normalizedY: 0,
+      button: MouseButton.none,
+      action: MouseAction.scroll,
+      scrollDx: sdx,
+      scrollDy: sdy,
+      modifiers: modifiers,
       timestampUs: DateTime.now().microsecondsSinceEpoch,
     ));
   }

@@ -25,6 +25,7 @@ class InputInjectChannel extends GetxService {
       'normalizedY': e.normalizedY,
       'scrollDx': e.scrollDx,
       'scrollDy': e.scrollDy,
+      'modifiers': e.modifiers,
       'displayX': displayBounds['x'],
       'displayY': displayBounds['y'],
       'displayW': displayBounds['w'],
