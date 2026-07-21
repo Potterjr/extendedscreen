@@ -118,32 +118,13 @@ class _TouchOverlay extends StatelessWidget {
   Widget build(BuildContext context) {
     return Listener(
       behavior: HitTestBehavior.translucent,
-      onPointerDown: (e) {
-        final size = MediaQuery.sizeOf(context);
-        controller.onPointerDown(
-          e.localPosition.dx / size.width,
-          e.localPosition.dy / size.height,
-          e.pointer,
-          e.pressure,
-        );
-      },
-      onPointerMove: (e) {
-        final size = MediaQuery.sizeOf(context);
-        controller.onPointerMove(
-          e.localPosition.dx / size.width,
-          e.localPosition.dy / size.height,
-          e.pointer,
-          e.pressure,
-        );
-      },
-      onPointerUp: (e) {
-        final size = MediaQuery.sizeOf(context);
-        controller.onPointerUp(
-          e.localPosition.dx / size.width,
-          e.localPosition.dy / size.height,
-          e.pointer,
-        );
-      },
+      onPointerDown: (e) => controller.onPointerDown(
+          e.pointer, e.localPosition, MediaQuery.sizeOf(context)),
+      onPointerMove: (e) => controller.onPointerMove(
+          e.pointer, e.localPosition, MediaQuery.sizeOf(context)),
+      onPointerUp: (e) => controller.onPointerUp(
+          e.pointer, e.localPosition, MediaQuery.sizeOf(context)),
+      onPointerCancel: (e) => controller.onPointerCancel(e.pointer),
       child: const SizedBox.expand(),
     );
   }
