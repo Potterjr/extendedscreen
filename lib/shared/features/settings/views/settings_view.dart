@@ -53,15 +53,6 @@ class SettingsView extends GetView<SettingsController> {
                     enabled: !controller.isApplying.value,
                     onTap: () => _showPresetPicker(context),
                   )),
-              const Divider(height: 1, color: Colors.white12),
-              Obx(() => _ChoiceRow(
-                    label: 'settings_codec'.tr,
-                    value: controller.codec.value == CodecType.h265
-                        ? 'settings_codec_h265'.tr
-                        : 'settings_codec_h264'.tr,
-                    enabled: !controller.isApplying.value,
-                    onTap: () => _showCodecPicker(context),
-                  )),
               Obx(() => controller.isApplying.value
                   ? Padding(
                       padding: const EdgeInsets.only(
@@ -116,28 +107,13 @@ class SettingsView extends GetView<SettingsController> {
                       _SectionHeader('settings_section_custom'.tr),
                       _SettingsCard(children: [
                         Obx(() => _ChoiceRow(
-                              label: 'settings_resolution'.tr,
-                              value: controller.customResolutionLabel,
+                              label: 'settings_custom_values'.tr,
+                              value: '${controller.customResolutionLabel} · '
+                                  '${controller.customBitrateLabel} · '
+                                  '${controller.customRefreshRate.value} Hz',
                               enabled: !controller.isApplying.value,
-                              onTap: () => _showCustomResolutionPicker(context),
+                              onTap: () => _showCustomValuesSheet(context),
                             )),
-                        _HelpText('settings_help_resolution'.tr),
-                        const Divider(height: 1, color: Colors.white12),
-                        Obx(() => _ChoiceRow(
-                              label: 'settings_bitrate'.tr,
-                              value: controller.customBitrateLabel,
-                              enabled: !controller.isApplying.value,
-                              onTap: () => _showCustomBitratePicker(context),
-                            )),
-                        _HelpText('settings_help_bitrate'.tr),
-                        const Divider(height: 1, color: Colors.white12),
-                        Obx(() => _ChoiceRow(
-                              label: 'settings_refresh_rate'.tr,
-                              value: '${controller.customRefreshRate.value} Hz',
-                              enabled: !controller.isApplying.value,
-                              onTap: () => _showCustomRefreshPicker(context),
-                            )),
-                        _HelpText('settings_help_refresh'.tr),
                       ]),
                     ],
                   )
@@ -209,7 +185,7 @@ class SettingsView extends GetView<SettingsController> {
             );
           }),
           const SizedBox(height: 16),
-          _SectionHeader('settings_section_connection'.tr),
+          _SectionHeader('settings_section_info'.tr),
           _SettingsCard(children: [
             _InfoRow(label: 'settings_transport'.tr, value: 'USB-C / ADB'),
             const Divider(height: 1, color: Colors.white12),
@@ -221,10 +197,7 @@ class SettingsView extends GetView<SettingsController> {
                 )),
             const Divider(height: 1, color: Colors.white12),
             _InfoRow(label: 'settings_port'.tr, value: '7001'),
-          ]),
-          const SizedBox(height: 16),
-          _SectionHeader('settings_section_about'.tr),
-          _SettingsCard(children: [
+            const Divider(height: 1, color: Colors.white12),
             _InfoRow(label: 'settings_version'.tr, value: '1.0.0'),
             const Divider(height: 1, color: Colors.white12),
             Obx(() => _InfoRow(
@@ -240,13 +213,7 @@ class SettingsView extends GetView<SettingsController> {
 
   void _showPresetPicker(BuildContext context) {
     Get.bottomSheet(
-      _PresetPickerSheet(
-        selected: controller.encodePreset.value,
-        onSelected: controller.setEncodePreset,
-        customResolutionLabel: controller.customResolutionLabel,
-        customBitrateLabel: controller.customBitrateLabel,
-        customRefreshRate: controller.customRefreshRate.value,
-      ),
+      _PresetPickerSheet(controller: controller),
       isScrollControlled: true,
     );
   }
@@ -263,60 +230,14 @@ class SettingsView extends GetView<SettingsController> {
     );
   }
 
-  void _showCustomResolutionPicker(BuildContext context) {
-    final res = controller.customResolutions;
+  /// All three custom values (resolution, bitrate, refresh) in one sheet
+  /// instead of three chained ones — each control applies immediately, and
+  /// the controller's reconnect debounce collapses several quick changes into
+  /// a single reconnect.
+  void _showCustomValuesSheet(BuildContext context) {
     Get.bottomSheet(
-      _PickerSheet(
-        title: 'settings_resolution'.tr,
-        items: res.map((r) => '${r.w}×${r.h}').toList(),
-        selected: res.indexWhere((r) =>
-            r.w == controller.customWidth.value &&
-            r.h == controller.customHeight.value),
-        onSelected: (i) =>
-            controller.setCustomResolution(res[i].w, res[i].h),
-      ),
+      _CustomValuesSheet(controller: controller),
       isScrollControlled: true,
-    );
-  }
-
-  void _showCustomBitratePicker(BuildContext context) {
-    final opts = controller.customBitrateOptions;
-    Get.bottomSheet(
-      _PickerSheet(
-        title: 'settings_bitrate'.tr,
-        items: opts.map((b) => '$b Mbps').toList(),
-        selected: opts.indexOf(controller.customBitrateMbps.value),
-        onSelected: (i) => controller.setCustomBitrate(opts[i]),
-      ),
-      isScrollControlled: true,
-    );
-  }
-
-  void _showCustomRefreshPicker(BuildContext context) {
-    final opts = controller.customRefreshOptions;
-    Get.bottomSheet(
-      _PickerSheet(
-        title: 'settings_refresh_rate'.tr,
-        items: opts.map((r) => '$r Hz').toList(),
-        selected: opts.indexOf(controller.customRefreshRate.value),
-        onSelected: (i) => controller.setCustomRefreshRate(opts[i]),
-      ),
-      isScrollControlled: true,
-    );
-  }
-
-  void _showCodecPicker(BuildContext context) {
-    const codecs = CodecType.values;
-    Get.bottomSheet(
-      _PickerSheet(
-        title: 'settings_codec'.tr,
-        items: [
-          'codec_picker_h264'.tr,
-          'codec_picker_h265'.tr,
-        ],
-        selected: codecs.indexOf(controller.codec.value),
-        onSelected: (i) => controller.setCodec(codecs[i]),
-      ),
     );
   }
 }
@@ -492,21 +413,11 @@ class _InfoRow extends StatelessWidget {
 
 /// Rich picker for encode presets — each option spells out resolution, bitrate
 /// and refresh rate with a plain-language explanation, plus a legend that says
-/// what each number means.
+/// what each number means. The codec choice lives here too (one sheet instead
+/// of two, since both are "how good/heavy is the stream" decisions).
 class _PresetPickerSheet extends StatelessWidget {
-  final EncodePreset selected;
-  final ValueChanged<EncodePreset> onSelected;
-  final String customResolutionLabel;
-  final String customBitrateLabel;
-  final int customRefreshRate;
-
-  const _PresetPickerSheet({
-    required this.selected,
-    required this.onSelected,
-    required this.customResolutionLabel,
-    required this.customBitrateLabel,
-    required this.customRefreshRate,
-  });
+  final SettingsController controller;
+  const _PresetPickerSheet({required this.controller});
 
   @override
   Widget build(BuildContext context) {
@@ -540,36 +451,248 @@ class _PresetPickerSheet extends StatelessWidget {
                 color: Colors.white.withValues(alpha: 0.4), fontSize: 11),
           ),
           const SizedBox(height: 16),
+          Obx(() => _CodecToggle(
+                codec: controller.codec.value,
+                onChanged: controller.setCodec,
+              )),
+          const SizedBox(height: 14),
+          const Divider(height: 1, color: Colors.white12),
+          const SizedBox(height: 14),
           // Scroll the options so the sheet never overflows on small screens.
           Flexible(
             child: SingleChildScrollView(
+              child: Obx(() => Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      for (final p in EncodePreset.values)
+                        _PresetOption(
+                          preset: p,
+                          isSelected: p == controller.encodePreset.value,
+                          resolutionLabel: p == EncodePreset.custom
+                              ? controller.customResolutionLabel
+                              : p.resolutionLabel,
+                          bitrateLabel: p == EncodePreset.custom
+                              ? controller.customBitrateLabel
+                              : p.bitrateLabel,
+                          refreshRate: p == EncodePreset.custom
+                              ? controller.customRefreshRate.value
+                              : p.refreshRate,
+                          onTap: () {
+                            controller.setEncodePreset(p);
+                            Get.back();
+                          },
+                        ),
+                    ],
+                  )),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// H.264 / H.265 segmented toggle with a short caption explaining the
+/// trade-off, shown at the top of the encode-preset sheet.
+class _CodecToggle extends StatelessWidget {
+  final CodecType codec;
+  final ValueChanged<CodecType> onChanged;
+  const _CodecToggle({required this.codec, required this.onChanged});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Text('settings_codec'.tr,
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600)),
+            ),
+            SegmentedButton<CodecType>(
+              segments: [
+                ButtonSegment(
+                    value: CodecType.h264,
+                    label: Text('settings_codec_h264'.tr)),
+                ButtonSegment(
+                    value: CodecType.h265,
+                    label: Text('settings_codec_h265'.tr)),
+              ],
+              selected: {codec},
+              onSelectionChanged: (s) => onChanged(s.first),
+              style: SegmentedButton.styleFrom(
+                backgroundColor: const Color(0xFF0A0E1A),
+                selectedBackgroundColor: const Color(0xFF00C8FF),
+                selectedForegroundColor: Colors.black,
+                foregroundColor: Colors.white60,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 6),
+        Text(
+          codec == CodecType.h265
+              ? 'codec_picker_h265'.tr
+              : 'codec_picker_h264'.tr,
+          style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.4), fontSize: 11),
+        ),
+      ],
+    );
+  }
+}
+
+/// One sheet for all three custom values (resolution, bitrate, refresh) —
+/// each group is a row of selectable chips; picking one applies immediately
+/// (the controller's reconnect debounce collapses quick multi-field changes
+/// into a single reconnect instead of one per field).
+class _CustomValuesSheet extends StatelessWidget {
+  final SettingsController controller;
+  const _CustomValuesSheet({required this.controller});
+
+  @override
+  Widget build(BuildContext context) {
+    final bottomInset = MediaQuery.viewPaddingOf(context).bottom;
+    return Container(
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.sizeOf(context).height * 0.85,
+      ),
+      decoration: const BoxDecoration(
+        color: Color(0xFF111827),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      padding: EdgeInsets.fromLTRB(16, 20, 16, 16 + bottomInset),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Center(
+            child: Text('settings_section_custom'.tr,
+                style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 17,
+                    fontWeight: FontWeight.w600)),
+          ),
+          const SizedBox(height: 16),
+          Flexible(
+            child: SingleChildScrollView(
               child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  for (final p in EncodePreset.values)
-                    _PresetOption(
-                      preset: p,
-                      isSelected: p == selected,
-                      resolutionLabel: p == EncodePreset.custom
-                          ? customResolutionLabel
-                          : p.resolutionLabel,
-                      bitrateLabel: p == EncodePreset.custom
-                          ? customBitrateLabel
-                          : p.bitrateLabel,
-                      refreshRate: p == EncodePreset.custom
-                          ? customRefreshRate
-                          : p.refreshRate,
-                      onTap: () {
-                        onSelected(p);
-                        Get.back();
-                      },
-                    ),
+                  Text('settings_resolution'.tr,
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 8),
+                  Obx(() {
+                    final res = controller.customResolutions;
+                    return _ChipGroup(
+                      options: res.map((r) => '${r.w}×${r.h}').toList(),
+                      selected: res.indexWhere((r) =>
+                          r.w == controller.customWidth.value &&
+                          r.h == controller.customHeight.value),
+                      onSelected: (i) =>
+                          controller.setCustomResolution(res[i].w, res[i].h),
+                    );
+                  }),
+                  _HelpText('settings_help_resolution'.tr),
+                  const SizedBox(height: 12),
+                  Text('settings_bitrate'.tr,
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 8),
+                  Obx(() => _ChipGroup(
+                        options: controller.customBitrateOptions
+                            .map((b) => '$b Mbps')
+                            .toList(),
+                        selected: controller.customBitrateOptions
+                            .indexOf(controller.customBitrateMbps.value),
+                        onSelected: (i) => controller.setCustomBitrate(
+                            controller.customBitrateOptions[i]),
+                      )),
+                  _HelpText('settings_help_bitrate'.tr),
+                  const SizedBox(height: 12),
+                  Text('settings_refresh_rate'.tr,
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 8),
+                  Obx(() => _ChipGroup(
+                        options: controller.customRefreshOptions
+                            .map((r) => '$r Hz')
+                            .toList(),
+                        selected: controller.customRefreshOptions
+                            .indexOf(controller.customRefreshRate.value),
+                        onSelected: (i) => controller.setCustomRefreshRate(
+                            controller.customRefreshOptions[i]),
+                      )),
+                  _HelpText('settings_help_refresh'.tr),
                 ],
               ),
             ),
           ),
         ],
       ),
+    );
+  }
+}
+
+/// Row of compact selectable chips — used by the custom-values sheet so all
+/// three fields can be picked without leaving it.
+class _ChipGroup extends StatelessWidget {
+  final List<String> options;
+  final int selected;
+  final ValueChanged<int> onSelected;
+  const _ChipGroup(
+      {required this.options, required this.selected, required this.onSelected});
+
+  @override
+  Widget build(BuildContext context) {
+    const accent = Color(0xFF00C8FF);
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        for (int i = 0; i < options.length; i++)
+          Material(
+            color: i == selected
+                ? accent.withValues(alpha: 0.16)
+                : Colors.white.withValues(alpha: 0.06),
+            borderRadius: BorderRadius.circular(10),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(10),
+              onTap: () => onSelected(i),
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(
+                    color: i == selected ? accent : Colors.white12,
+                    width: i == selected ? 1.5 : 1,
+                  ),
+                ),
+                child: Text(
+                  options[i],
+                  style: TextStyle(
+                    color: i == selected ? Colors.white : Colors.white60,
+                    fontSize: 13,
+                    fontWeight:
+                        i == selected ? FontWeight.w600 : FontWeight.w400,
+                  ),
+                ),
+              ),
+            ),
+          ),
+      ],
     );
   }
 }

@@ -26,6 +26,11 @@ class DisplayController extends GetxController with WidgetsBindingObserver {
   Timer? _fpsTimer;
   int _fpsCounter = 0;
 
+  // Refresh rate the decoder + display mode were last set up for, and the
+  // watcher that re-inits when the host announces a different one (0xFB).
+  int? _decoderFps;
+  Worker? _refreshWorker;
+
   bool get isAndroid => defaultTargetPlatform == TargetPlatform.android;
 
   @override
@@ -35,6 +40,16 @@ class DisplayController extends GetxController with WidgetsBindingObserver {
     _keepScreenOn();
     if (isAndroid) {
       _initDecoderAndSubscribe();
+      // The host's rate (0xFB) can land after the display opens; the display
+      // mode and decoder operating rate must follow it, or a 120 Hz stream is
+      // shown on a 60 Hz screen and half its frames are discarded.
+      _refreshWorker = ever<int>(_cm.refreshRateHz, (hz) {
+        if (hz != _decoderFps) {
+          _packetSub?.cancel();
+          _packetSub = null;
+          _initDecoderAndSubscribe();
+        }
+      });
     }
     _startFpsCounter();
   }
@@ -63,10 +78,13 @@ class DisplayController extends GetxController with WidgetsBindingObserver {
     final config = DisplayConfigModel.defaultConfig.copyWith(
       width: (panel.longestSide / 2).round(),
       height: (panel.shortestSide / 2).round(),
-      refreshRate: _settings.refreshRate,
+      // The host's announced rate, not this device's own (unused, host-only)
+      // preset — that defaulted to 60 Hz regardless of what was streamed.
+      refreshRate: _cm.refreshRateHz.value,
       bitrate: _settings.bitrate,
       codec: _settings.codec,
     );
+    _decoderFps = config.refreshRate;
 
     // Release any previous codec/surface before creating a new one so the old
     // SurfaceView is abandoned cleanly instead of flooding logcat.
@@ -174,6 +192,7 @@ class DisplayController extends GetxController with WidgetsBindingObserver {
     WakelockPlus.disable();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     _gestures.dispose();
+    _refreshWorker?.dispose();
     _packetSub?.cancel();
     _fpsTimer?.cancel();
     if (isAndroid) {

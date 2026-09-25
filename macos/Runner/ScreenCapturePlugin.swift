@@ -40,6 +40,10 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
     // handler so we only rebuild the pipeline when a session is actually live.
     private var isCapturing = false
     private var targetFps = 60
+    // "Max" preset: the encode rate steps down from the tablet's top refresh
+    // rate when this Mac's encoder can't keep up (see adaptFrameRate).
+    private var adaptiveFps = false
+    private var overloadStreak = 0
     // Counts frames dispatched to encodeQueue but not yet returned.
     // If this grows beyond the threshold we skip the incoming frame to bound latency.
     private var pendingEncodeFrames: Int32 = 0
@@ -50,6 +54,10 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
     private var encodeTimer: DispatchSourceTimer?
     private var machThread: Thread?
     private var machThreadRunning = false
+    // Bumped on every start/stop so a timer thread still inside mach_wait_until
+    // exits even if capture restarts before it wakes (a stop→start within one
+    // interval used to leave two timer threads encoding in parallel).
+    private var timerGeneration = 0
     private var latestPixelBuffer: CVPixelBuffer?
     private var latestPTS: CMTime = .zero
     private let bufferLock = NSLock()
@@ -90,6 +98,19 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
                        name: NSWorkspace.didWakeNotification, object: nil)
         nc.addObserver(self, selector: #selector(systemDidWake),
                        name: NSWorkspace.screensDidWakeNotification, object: nil)
+
+        // Rearranging displays (or changing resolution/scaling) in System
+        // Settings → Displays doesn't invalidate the capture session, but it
+        // does move the virtual display's screen-space origin — which Dart
+        // caches to map tablet touch coordinates onto the real screen. Ask it
+        // to refetch the bounds so touch keeps landing in the right place.
+        NotificationCenter.default.addObserver(self, selector: #selector(screenParametersChanged),
+                       name: NSApplication.didChangeScreenParametersNotification, object: nil)
+    }
+
+    @objc private func screenParametersChanged(_ note: Notification) {
+        guard isCapturing else { return }
+        channel?.invokeMethod("onDisplayBoundsChanged", arguments: nil)
     }
 
     @objc private func systemDidWake(_ note: Notification) {
@@ -106,6 +127,7 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
 
     deinit {
         NSWorkspace.shared.notificationCenter.removeObserver(self)
+        NotificationCenter.default.removeObserver(self)
     }
 
     // MARK: - FlutterStreamHandler (frame EventChannel)
@@ -234,6 +256,8 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
         let br    = args["bitrate"]     as? Int ?? 20_000_000
         let codec = args["codec"]       as? String ?? "h264"
         targetFps = fps
+        adaptiveFps = args["adaptiveFps"] as? Bool ?? false
+        overloadStreak = 0
 
         setupEncoder(width: w, height: h, fps: fps, bitrate: br, codec: codec)
 
@@ -296,7 +320,9 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
         // Use a dedicated real-time Mach thread — mach_wait_until gives nanosecond-accurate
         // wakeups independent of GCD's ~60fps scheduler cap.
         machThreadRunning = true
-        let t = Thread { [weak self] in self?.machTimerLoop() }
+        timerGeneration += 1
+        let generation = timerGeneration
+        let t = Thread { [weak self] in self?.machTimerLoop(generation: generation) }
         t.qualityOfService = .userInteractive
         t.threadPriority = 1.0
         t.start()
@@ -305,26 +331,41 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
 
     private func stopDisplayLink() {
         machThreadRunning = false
+        timerGeneration += 1
         machThread = nil
         encodeTimer?.cancel()
         encodeTimer = nil
         bufferLock.lock(); latestPixelBuffer = nil; bufferLock.unlock()
     }
 
-    private func machTimerLoop() {
-        let intervalNs = UInt64(1_000_000_000) / UInt64(max(targetFps, 1))
+    private func machTimerLoop(generation: Int) {
         var info = mach_timebase_info_data_t()
         mach_timebase_info(&info)
-        // On Apple Silicon numer==denom==1, so intervalMach==intervalNs.
-        let intervalMach = intervalNs * UInt64(info.denom) / UInt64(info.numer)
-        NSLog("[ExtendedScreen] machTimerLoop: targetFps=\(targetFps) intervalNs=\(intervalNs) intervalMach=\(intervalMach) numer=\(info.numer) denom=\(info.denom)")
+        // Apple Silicon ticks at 24 MHz (numer/denom = 125/3); Intel is 1/1.
+        // Recomputed every tick so adaptFrameRate can change the rate live.
+        func currentInterval() -> UInt64 {
+            let intervalNs = UInt64(1_000_000_000) / UInt64(max(targetFps, 1))
+            return intervalNs * UInt64(info.denom) / UInt64(info.numer)
+        }
+        NSLog("[ExtendedScreen] machTimerLoop: targetFps=\(targetFps) adaptive=\(adaptiveFps) numer=\(info.numer) denom=\(info.denom)")
 
-        var next = mach_absolute_time() + intervalMach
+        var next = mach_absolute_time() + currentInterval()
         var loopCount: Int32 = 0
         var loopStart = mach_absolute_time()
-        while machThreadRunning {
-            mach_wait_until(next)
+        while machThreadRunning && generation == timerGeneration {
+            // mach_wait_until can return before the deadline when the wait is
+            // interrupted; ticking on every return let the loop run at ~139/s
+            // against a 120 target. Only tick once the deadline has passed.
+            while machThreadRunning && generation == timerGeneration
+                    && mach_absolute_time() < next {
+                mach_wait_until(next)
+            }
+            guard generation == timerGeneration else { break }
+            let intervalMach = currentInterval()
             next += intervalMach
+            // After a stall, resync instead of bursting to catch up.
+            let now = mach_absolute_time()
+            if next < now { next = now + intervalMach }
             OSAtomicIncrement32(&loopCount)
             // Log loop rate every ~1s independently of onDisplayLinkTick
             let elapsed = mach_absolute_time() - loopStart
@@ -347,8 +388,10 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
             let enc  = OSAtomicAdd32(0, &diagEncCount);  OSAtomicAnd32(0, &diagEncCount)
             let drp  = OSAtomicAdd32(0, &diagDropCount); OSAtomicAnd32(0, &diagDropCount)
             let tick = OSAtomicAdd32(0, &diagTickCount); OSAtomicAnd32(0, &diagTickCount)
-            NSLog("[ExtendedScreen] diag: tick=\(tick)/s  SCK=\(sck)/s  encoded=\(enc)/s  skipped=\(drp)/s  pending=\(OSAtomicAdd32(0, &pendingEncodeFrames))")
+            let pendingNow = OSAtomicAdd32(0, &pendingEncodeFrames)
+            NSLog("[ExtendedScreen] diag: tick=\(tick)/s  SCK=\(sck)/s  encoded=\(enc)/s  skipped=\(drp)/s  pending=\(pendingNow)")
             diagLastLog = now
+            if adaptiveFps { adaptFrameRate(skipped: drp, pending: pendingNow) }
         }
         guard let session = compressionSession else { return }
 
@@ -387,6 +430,28 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
             OSAtomicDecrement32(&self!.pendingEncodeFrames)
             guard status == noErr, let encoded = encodedBuffer else { return }
             self?.handleEncodedFrame(encoded)
+        }
+    }
+
+    /// "Max" preset: capture starts at the tablet's top refresh rate; when this
+    /// Mac's encoder can't sustain it (any skipped frame, or the queue within 3
+    /// of its cap, for 2 seconds running) step down one notch. Never steps back
+    /// up within a session — that would oscillate with the content's load; the
+    /// next connect starts from the top again.
+    private func adaptFrameRate(skipped: Int32, pending: Int32) {
+        let overloaded = skipped > 0 || pending >= Self.maxPendingEncodeFrames - 3
+        overloadStreak = overloaded ? overloadStreak + 1 : 0
+        guard overloadStreak >= 2,
+              let lower = [120, 90, 60, 30].first(where: { $0 < targetFps }) else { return }
+        overloadStreak = 0
+        targetFps = lower
+        if let s = compressionSession {
+            VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ExpectedFrameRate,
+                                 value: NSNumber(value: lower))
+        }
+        NSLog("[ExtendedScreen] adaptive: encoder can't keep up — stepping down to \(lower) fps")
+        DispatchQueue.main.async { [weak self] in
+            self?.channel?.invokeMethod("onFrameRateChanged", arguments: lower)
         }
     }
 

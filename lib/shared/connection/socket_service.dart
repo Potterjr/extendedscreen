@@ -140,7 +140,8 @@ class SocketService extends GetxService {
   void _onDone() {
     _log.w('Socket closed by remote');
     _notifyError(const SocketException('Connection closed'));
-    // Drop the peer but keep the server listening for reconnects.
+    // Drop the peer. The connection manager reacts to the error above by
+    // tearing the session down (server included) and re-binding cleanly.
     _sub?.cancel();
     _socket = null;
     _recvLen = 0;
@@ -156,6 +157,9 @@ class SocketService extends GetxService {
     await _server?.close();
     _socket = null;
     _server = null;
+    // Wake a connect() still parked in waitForClient() so it can see it was
+    // cancelled, instead of waiting forever on a server that's gone.
+    if (!(_clientReady?.isCompleted ?? true)) _clientReady!.complete();
     _clientReady = null;
     _recvLen = 0;
     _log.i('Socket disconnected');

@@ -15,10 +15,11 @@ class SplashController extends GetxController {
       cm.autoConnect();
     }
     Future.delayed(const Duration(seconds: 2), () {
-      // Host picks a session mode on the launcher first; the client doesn't
-      // choose (the host drives the mode) so it goes straight to the
-      // connection screen and auto-opens the display once live.
-      Get.offAllNamed(cm.isHost ? AppRoutes.launcher : AppRoutes.home);
+      // Both roles land straight on the connection screen — the host picks
+      // its session mode there (a compact selector, not a separate forced
+      // screen); the client doesn't choose (the host drives the mode) and
+      // auto-opens the display once live.
+      Get.offAllNamed(AppRoutes.home);
     });
   }
 }

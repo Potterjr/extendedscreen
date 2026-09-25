@@ -5,11 +5,14 @@ enum DisplayMode { extend, mirror }
 
 enum CodecType { h264, h265 }
 
-enum EncodePreset { quality, balanced, performance, custom }
+/// [max] is the default: native panel resolution at the tablet's top refresh
+/// rate, with the host encoder stepping the rate down if it can't keep up.
+enum EncodePreset { max, quality, balanced, performance, custom }
 
 extension EncodePresetX on EncodePreset {
   // Localized strings resolve against the active GetX locale at read time.
   String get label => switch (this) {
+        EncodePreset.max => 'preset_max_label'.tr,
         EncodePreset.quality => 'preset_quality_label'.tr,
         EncodePreset.balanced => 'preset_balanced_label'.tr,
         EncodePreset.performance => 'preset_performance_label'.tr,
@@ -21,6 +24,7 @@ extension EncodePresetX on EncodePreset {
 
   /// Short tagline shown next to the preset name.
   String get tagline => switch (this) {
+        EncodePreset.max => 'preset_max_tagline'.tr,
         EncodePreset.quality => 'preset_quality_tagline'.tr,
         EncodePreset.balanced => 'preset_balanced_tagline'.tr,
         EncodePreset.performance => 'preset_performance_tagline'.tr,
@@ -29,6 +33,7 @@ extension EncodePresetX on EncodePreset {
 
   /// Detailed, plain-language explanation of the trade-off.
   String get description => switch (this) {
+        EncodePreset.max => 'preset_max_desc'.tr,
         EncodePreset.quality => 'preset_quality_desc'.tr,
         EncodePreset.balanced => 'preset_balanced_desc'.tr,
         EncodePreset.performance => 'preset_performance_desc'.tr,
@@ -47,6 +52,13 @@ extension EncodePresetX on EncodePreset {
   // to whatever device is plugged in.
   static int get _panelW => Get.find<SettingsService>().clientPanelWidth.value;
   static int get _panelH => Get.find<SettingsService>().clientPanelHeight.value;
+  // Top refresh rate the connected client's panel supports (from its HELLO).
+  static int get _panelMaxHz =>
+      Get.find<SettingsService>().clientMaxRefreshHz.value;
+
+  // Quality's density (20 Mbps at native 60 Hz) in bits per pixel per frame,
+  // so Max scales its bitrate with whatever resolution × rate it lands on.
+  static const _qualityBitsPerPixel = 20000000 / (2960 * 1848 * 60);
 
   // Logical width/height passed to CGVirtualDisplay (panel ÷ 2 = HiDPI points).
   // For `custom` these are fallbacks — the live values come from SettingsService.
@@ -63,6 +75,7 @@ extension EncodePresetX on EncodePreset {
   // Performance uses 1.0x (no HiDPI): encodes at half the panel resolution
   // — 25% of Quality pixel count so VT can sustain 120fps throughput.
   double get scaleFactor => switch (this) {
+        EncodePreset.max => 2.0,
         EncodePreset.quality => 2.0,
         EncodePreset.balanced => 2.0,
         EncodePreset.performance => 1.0,
@@ -70,6 +83,9 @@ extension EncodePresetX on EncodePreset {
       };
 
   int get bitrate => switch (this) {
+        EncodePreset.max => (_qualityBitsPerPixel * _panelW * _panelH * _panelMaxHz)
+            .round()
+            .clamp(8000000, 50000000),
         EncodePreset.quality => 20000000,
         EncodePreset.balanced => 8000000,
         EncodePreset.performance => 12000000,
@@ -79,6 +95,7 @@ extension EncodePresetX on EncodePreset {
   // Refresh rate is tied to the preset (no separate frame-rate setting).
   // Performance trades resolution for a high 120Hz capture; the rest run 60Hz.
   int get refreshRate => switch (this) {
+        EncodePreset.max => _panelMaxHz,
         EncodePreset.quality => 60,
         EncodePreset.balanced => 60,
         EncodePreset.performance => 120,
@@ -94,6 +111,8 @@ class DisplayConfigModel {
   final DisplayMode mode;
   final CodecType codec;
   final int bitrate;
+  // Let the native encoder step [refreshRate] down if it can't keep up (Max).
+  final bool adaptiveFps;
 
   const DisplayConfigModel({
     required this.width,
@@ -103,6 +122,7 @@ class DisplayConfigModel {
     required this.mode,
     required this.codec,
     required this.bitrate,
+    this.adaptiveFps = false,
   });
 
   // Logical desktop @ 2x HiDPI → captures at the client's native panel
@@ -126,6 +146,7 @@ class DisplayConfigModel {
     DisplayMode? mode,
     CodecType? codec,
     int? bitrate,
+    bool? adaptiveFps,
   }) =>
       DisplayConfigModel(
         width: width ?? this.width,
@@ -135,6 +156,7 @@ class DisplayConfigModel {
         mode: mode ?? this.mode,
         codec: codec ?? this.codec,
         bitrate: bitrate ?? this.bitrate,
+        adaptiveFps: adaptiveFps ?? this.adaptiveFps,
       );
 
   Map<String, dynamic> toMap() => {
@@ -145,5 +167,6 @@ class DisplayConfigModel {
         'mode': mode.index,
         'codec': codec == CodecType.h265 ? 'h265' : 'h264',
         'bitrate': bitrate,
+        'adaptiveFps': adaptiveFps,
       };
 }

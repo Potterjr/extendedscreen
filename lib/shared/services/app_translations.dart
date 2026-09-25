@@ -28,6 +28,7 @@ class AppTranslations extends Translations {
     // ── Common ──────────────────────────────────────────────────────────
     'common_connect': 'Connect',
     'common_disconnect': 'Disconnect',
+    'common_cancel': 'Cancel',
     'common_reconnect': 'Reconnect',
     'common_connected': 'Connected',
     'common_open': 'Open',
@@ -47,10 +48,9 @@ class AppTranslations extends Translations {
     'phase_streaming': 'Streaming',
     'phase_paused': 'Paused',
     'phase_error': 'Error',
+    'error_waiting_for_host': 'Waiting for Mac host…',
 
-    // ── Launcher / session modes ────────────────────────────────────────
-    'launcher_choose': 'What would you like to do?',
-    'launcher_subtitle': 'Connect your tablet over USB-C, then pick a mode.',
+    // ── Session modes ───────────────────────────────────────────────────
     'session_extended_label': 'Extended Screen',
     'session_extended_desc': 'Use the tablet as a second monitor for your Mac.',
     'session_remote_label': 'Remote Control',
@@ -97,6 +97,12 @@ class AppTranslations extends Translations {
     // ── Latency chip ────────────────────────────────────────────────────
     'latency_value': '@ms ms latency',
 
+    // ── Battery chip (client) ───────────────────────────────────────────
+    'battery_charging_pct': 'Charging · @pct%',
+    'battery_not_charging_pct': 'Not charging · @pct%',
+    'battery_charging': 'Charging',
+    'battery_not_charging': 'Not charging',
+
     // ── Display view ────────────────────────────────────────────────────
     'display_reconnecting': 'Reconnecting…',
     'display_applying_settings': 'Applying new settings from the host',
@@ -109,8 +115,7 @@ class AppTranslations extends Translations {
     'settings_section_performance': 'Performance',
     'settings_section_custom': 'Custom',
     'settings_section_permissions': 'Permissions',
-    'settings_section_connection': 'Connection',
-    'settings_section_about': 'About',
+    'settings_section_info': 'Info',
 
     // ── Settings: language ──────────────────────────────────────────────
     'settings_language': 'Language',
@@ -135,6 +140,7 @@ class AppTranslations extends Translations {
     'settings_show_hud': 'Show HUD (fps / latency / disconnect)',
 
     // ── Settings: custom ────────────────────────────────────────────────
+    'settings_custom_values': 'Custom Values',
     'settings_resolution': 'Resolution',
     'settings_bitrate': 'Bitrate',
     'settings_refresh_rate': 'Refresh Rate',
@@ -188,6 +194,12 @@ class AppTranslations extends Translations {
     'codec_picker_h265': 'H.265 (HEVC)  —  better quality per bitrate',
 
     // ── Encode presets ──────────────────────────────────────────────────
+    'preset_max_label': 'Max',
+    'preset_max_tagline': 'Best your devices can do',
+    'preset_max_desc':
+        'Your tablet\'s full native resolution at its highest refresh rate. '
+            'If this Mac can\'t keep up, the frame rate is lowered '
+            'automatically so the picture stays smooth instead of lagging.',
     'preset_quality_label': 'Quality',
     'preset_balanced_label': 'Balanced',
     'preset_performance_label': 'Performance',
@@ -217,6 +229,7 @@ class AppTranslations extends Translations {
     // ── Common ──────────────────────────────────────────────────────────
     'common_connect': 'เชื่อมต่อ',
     'common_disconnect': 'ตัดการเชื่อมต่อ',
+    'common_cancel': 'ยกเลิก',
     'common_reconnect': 'เชื่อมต่อใหม่',
     'common_connected': 'เชื่อมต่อแล้ว',
     'common_open': 'เปิด',
@@ -236,10 +249,9 @@ class AppTranslations extends Translations {
     'phase_streaming': 'กำลังสตรีม',
     'phase_paused': 'หยุดชั่วคราว',
     'phase_error': 'เกิดข้อผิดพลาด',
+    'error_waiting_for_host': 'กำลังรอโฮสต์ Mac…',
 
-    // ── Launcher / session modes ────────────────────────────────────────
-    'launcher_choose': 'ต้องการทำอะไร?',
-    'launcher_subtitle': 'เชื่อมต่อแท็บเล็ตผ่าน USB-C แล้วเลือกโหมด',
+    // ── Session modes ───────────────────────────────────────────────────
     'session_extended_label': 'จอเสริม',
     'session_extended_desc': 'ใช้แท็บเล็ตเป็นจอที่สองของ Mac',
     'session_remote_label': 'รีโมตคอนโทรล',
@@ -284,6 +296,12 @@ class AppTranslations extends Translations {
     // ── Latency chip ────────────────────────────────────────────────────
     'latency_value': 'ดีเลย์ @ms มิลลิวินาที',
 
+    // ── Battery chip (client) ───────────────────────────────────────────
+    'battery_charging_pct': 'กำลังชาร์จ · @pct%',
+    'battery_not_charging_pct': 'ไม่ได้ชาร์จ · @pct%',
+    'battery_charging': 'กำลังชาร์จ',
+    'battery_not_charging': 'ไม่ได้ชาร์จ',
+
     // ── Display view ────────────────────────────────────────────────────
     'display_reconnecting': 'กำลังเชื่อมต่อใหม่…',
     'display_applying_settings': 'กำลังใช้การตั้งค่าใหม่จากโฮสต์',
@@ -296,8 +314,7 @@ class AppTranslations extends Translations {
     'settings_section_performance': 'ประสิทธิภาพ',
     'settings_section_custom': 'กำหนดเอง',
     'settings_section_permissions': 'สิทธิ์การเข้าถึง',
-    'settings_section_connection': 'การเชื่อมต่อ',
-    'settings_section_about': 'เกี่ยวกับ',
+    'settings_section_info': 'ข้อมูล',
 
     // ── Settings: language ──────────────────────────────────────────────
     'settings_language': 'ภาษา',
@@ -322,6 +339,7 @@ class AppTranslations extends Translations {
     'settings_show_hud': 'แสดง HUD (fps / ดีเลย์ / ตัดการเชื่อมต่อ)',
 
     // ── Settings: custom ────────────────────────────────────────────────
+    'settings_custom_values': 'ค่ากำหนดเอง',
     'settings_resolution': 'ความละเอียด',
     'settings_bitrate': 'บิตเรต',
     'settings_refresh_rate': 'อัตรารีเฟรช',
@@ -374,6 +392,12 @@ class AppTranslations extends Translations {
     'codec_picker_h265': 'H.265 (HEVC)  —  คุณภาพดีกว่าต่อบิตเรต',
 
     // ── Encode presets ──────────────────────────────────────────────────
+    'preset_max_label': 'สูงสุด',
+    'preset_max_tagline': 'เต็มสเปกอุปกรณ์',
+    'preset_max_desc':
+        'ความละเอียดเนทีฟเต็มจอของแท็บเล็ต ที่อัตรารีเฟรชสูงสุดที่รองรับ '
+            'หาก Mac ประมวลผลไม่ทัน ระบบจะลดเฟรมเรตให้อัตโนมัติ '
+            'เพื่อให้ภาพลื่นไหลแทนที่จะหน่วง',
     'preset_quality_label': 'คุณภาพ',
     'preset_balanced_label': 'สมดุล',
     'preset_performance_label': 'ประสิทธิภาพ',

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
@@ -111,6 +112,7 @@ class SettingsController extends GetxController {
 
   @override
   void onClose() {
+    _reconnectDebounce?.cancel();
     scrollController.dispose();
     super.onClose();
   }
@@ -206,15 +208,28 @@ class SettingsController extends GetxController {
     _reconnect();
   }
 
+  Timer? _reconnectDebounce;
+  bool _reconnecting = false;
+
   /// Every setting change persists the value, then restarts the connection so
-  /// the host's capture + encode pipeline picks it up. No-op (just saves) when
-  /// nothing is connected.
+  /// the host's capture + encode pipeline picks it up. Debounced so changing
+  /// several fields in one sheet visit (e.g. preset + codec, or the three
+  /// custom values) collapses into a single reconnect instead of one per
+  /// field. No-op (just saves) when nothing is connected.
   Future<void> _reconnect() async {
-    if (isApplying.value) return;
     isApplying.value = true;
+    _reconnectDebounce?.cancel();
+    _reconnectDebounce =
+        Timer(const Duration(milliseconds: 350), _doReconnect);
+  }
+
+  Future<void> _doReconnect() async {
+    if (_reconnecting) return;
+    _reconnecting = true;
     try {
       await _cm.reconnect();
     } finally {
+      _reconnecting = false;
       isApplying.value = false;
     }
   }

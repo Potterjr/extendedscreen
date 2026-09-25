@@ -28,6 +28,15 @@ class VideoDecoderChannel extends GetxService {
     });
   }
 
+  /// Top refresh rate this panel supports (Hz), for the HELLO.
+  Future<int> getMaxRefreshRate() async {
+    try {
+      return await _channel.invokeMethod<int>('getMaxRefreshRate') ?? 60;
+    } catch (_) {
+      return 60;
+    }
+  }
+
   Future<void> initialize(DisplayConfigModel config) async {
     await _channel.invokeMethod('initialize', {
       'width': config.width * 2,   // physical pixels (HiDPI 2x)

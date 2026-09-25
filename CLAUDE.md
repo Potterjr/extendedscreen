@@ -21,7 +21,7 @@ flutter build macos
 # Analyze / lint
 flutter analyze
 
-# Run tests (no test/ directory exists yet; flutter test fails until one is added)
+# Run tests (test/ exists but is empty; flutter test finds nothing until a test is added)
 flutter test
 ```
 
@@ -33,8 +33,8 @@ The same Dart codebase runs on both sides of the link. The tree is organized **b
 
 - **`lib/shared/`** — the cross-mode backbone used by both roles *and* both feature modules:
   - `connection/` — `socket_service`, `connection_state`, the abstract `BaseConnectionManager`, plus the concrete `HostConnectionManager`, `ClientConnectionManager`, and `AdbService`. The two concrete managers each branch on `SessionMode` to drive *both* feature modules, so they live here rather than in a module.
-  - `models/`, `protocol/`, `services/` (logger, settings, translations), `platform/` (`permissions_channel`), shared `widgets/`.
-  - `features/` — mode-agnostic UI shells: `splash/`, `launcher/` (picks the `SessionMode`), `home/` (connection screen, both roles/modes), `settings/` (host control surface, mode-aware).
+  - `models/`, `protocol/`, `services/` (logger, settings, translations), `platform/` (`permissions_channel`, `keepalive_channel`, `battery_channel`), shared `widgets/`.
+  - `features/` — mode-agnostic UI shells: `splash/`, `home/` (connection screen, both roles/modes — the host also picks the `SessionMode` here via an inline selector), `settings/` (host control surface, mode-aware).
 - **`lib/modules/extended_screen/`** — the second-monitor streaming pipeline:
   - `host/` — `screen_capture_channel`, `input_inject_channel` (macOS capture + input injection).
   - `client/` — `video_decoder_channel` and the `display/` feature (Android decode + render). Also reused by the remote tab-controls-Mac direction.
@@ -64,13 +64,13 @@ All user-facing strings are GetX translation keys resolved with `.tr` (or `.trPa
 `disconnected → detectingDevice → adbConnecting → portForwarding → handshaking → configuring → streaming`
 (plus `paused` and `error`; `isActive` covers streaming *and* paused).
 
-On error it schedules a 5-second reconnect automatically. `SocketService` owns the raw TCP socket; `AdbService` wraps `adb` CLI calls. The **macOS host is the sole settings/control surface**: display mode, encode preset and codec are editable only on the host (the client's Settings page is read-only). Every setting change persists the value and then calls `reconnect()` (full disconnect + reconnect to the same device) so the capture/encode pipeline restarts with the new value; the host announces the active codec to the client via a `0xFC` control packet so its decoder reinitializes.
+Every failure path (socket error/close, or a throwing connect attempt) goes through `BaseConnectionManager.handleLinkFailure()`: it stops that link's packet listener + heartbeat, runs the role's `onLinkLost()` (host: full `onTeardown()` — capture, virtual display, adb tunnel; client: nothing, so its keep-alive service survives for background reconnects), closes the socket (server included), then retries after `reconnectDelay` (client 5 s, host 1 s). Never retry by calling `connect()` on a live session — that stacked duplicate listeners/timers and a second server socket. `SocketService` owns the raw TCP socket; `AdbService` wraps `adb` CLI calls. The **macOS host is the sole settings/control surface**: display mode, encode preset and codec are editable only on the host (the client's Settings page is read-only). Every setting change persists the value and then calls `reconnect()` (full disconnect + reconnect to the same device) so the capture/encode pipeline restarts with the new value; the host announces the active codec to the client via a `0xFC` control packet so its decoder reinitializes.
 
 On the host, every connect attempt is gated by `HomeController._ensureHostPermissions()`: if Screen Recording or Accessibility is missing, it snackbars and navigates to Settings with `arguments: {'scrollTo': 'permissions'}` (the settings view scrolls to its Permissions section via a `GlobalKey`) instead of failing mid-handshake.
 
 ### Packet protocol (`lib/shared/protocol/packet_codec.dart`)
 
-Binary framing: 4-byte magic `EXTD` + 1-byte type + 4-byte payload length + 8-byte timestamp (µs) + payload. Packet types: `FRAME_DATA`, `TOUCH_EVENT`, `MOUSE_EVENT`, `KEY_EVENT`, `HEARTBEAT`, `CONTROL`. Control sub-commands: `0x01` (client HELLO: version + platform + native panel size as two uint16 BE, physical px landscape), `0xFF` (request IDR), `0xFE` (reload/resume decode), `0xFD+mode` (change display mode), `0xFC` (announce codec), `0xFB` (announce refresh rate), `0xFA` (sync overlay/HUD toggles). The host waits (3 s timeout) for the HELLO before starting capture and persists the reported panel via `SettingsService.setClientPanel()`.
+Binary framing: 4-byte magic `EXTD` + 1-byte type + 4-byte payload length + 8-byte timestamp (µs) + payload. Packet types: `FRAME_DATA`, `TOUCH_EVENT`, `MOUSE_EVENT`, `KEY_EVENT`, `HEARTBEAT`, `CONTROL`. Control sub-commands: `0x01` (client HELLO: version + platform + native panel size as two uint16 BE, physical px landscape + the panel's top refresh rate as one byte, Hz), `0xFF` (request IDR), `0xFE` (reload/resume decode), `0xFD+mode` (change display mode), `0xFC` (announce codec), `0xFB` (announce refresh rate), `0xFA` (sync overlay/HUD toggles). The host waits (3 s timeout) for the HELLO before starting capture and persists the reported panel via `SettingsService.setClientPanel()` / `setClientMaxRefresh()`. The client sets its decoder operating rate and display mode from the host's `0xFB`, not from its own (host-only) preset.
 
 ### Native macOS plugins (`macos/Runner/`)
 
@@ -94,6 +94,8 @@ Plugins are registered in `MainFlutterWindow.swift` against the Flutter engine.
 | `PermissionsPlugin.kt` | Client-side permission MethodChannel (Android counterpart to the macOS `PermissionsPlugin`). |
 | `ScreenCapturePlugin.kt` | Reverse-remote direction (Mac controls tablet): owns the MediaProjection consent flow and method/event channels for capturing *this* device's screen and streaming NAL units to the Mac. Counterpart to the macOS `ScreenCapturePlugin.swift`. |
 | `ScreenCaptureService.kt` | Foreground `Service` that does the heavy lifting for `ScreenCapturePlugin.kt` — MediaProjection + `MediaCodec` encoder + `VirtualDisplay` — so capture keeps running when the user switches apps. |
+| `ClientKeepAlivePlugin.kt` / `ClientKeepAliveService.kt` | Foreground `Service` (counterpart Dart channel: `lib/shared/platform/keepalive_channel.dart`) that keeps the Android client process alive in the background so the display/decode session survives app-switching. |
+| `BatteryStatusPlugin.kt` | Reads the tablet's own charging state via the sticky `ACTION_BATTERY_CHANGED` intent (counterpart Dart channel: `lib/shared/platform/battery_channel.dart`), polled by Home to show whether USB-C is actually charging, not just data-connected. |
 
 Plugins are registered in `MainActivity.kt`. The client is landscape-locked via the manifest plus `SystemChrome` in `main()`.
 
@@ -110,4 +112,4 @@ Persisted via `shared_preferences`: display mode, last paired device serial, enc
 
 ### Encode presets (`lib/shared/models/display_config_model.dart`)
 
-`EncodePreset` bundles resolution + scale factor + bitrate + refresh rate into four presets: `quality`, `balanced`, `performance`, and `custom` (user-adjustable values persisted in settings); there is no separate frame-rate setting. Fixed-preset resolutions are **relative to the connected client's panel** (read from `SettingsService.clientPanelWidth/Height`): logical size is always panel ÷ 2; `scaleFactor` 2.0 (quality/balanced) encodes at native panel resolution, 1.0 (performance) at half. The Swift `startCapture` multiplies logical × `scaleFactor` (clamped to even dims); `CGVirtualDisplay` is always created at logical × 2 (HiDPI). `HostConnectionManager._startCapture()` reads the active preset and applies the values to `DisplayConfigModel` at once.
+`EncodePreset` bundles resolution + scale factor + bitrate + refresh rate into five presets: `max` (the default), `quality`, `balanced`, `performance`, and `custom` (user-adjustable values persisted in settings); there is no separate frame-rate setting. `max` is native resolution at the client panel's top refresh rate (`clientMaxRefreshHz`, from the HELLO) with bitrate scaled at Quality's bits-per-pixel; it passes `adaptiveFps` to the Swift encoder, which steps the rate down (120→90→60→30, never back up within a session) when frames are skipped or the encode queue nears its cap, and reports each step via `onFrameRateChanged` so the host re-announces `0xFB`. In reverse remote (tablet encodes), `max` falls back to native @ 60 Hz / 20 Mbps. Fixed-preset resolutions are **relative to the connected client's panel** (read from `SettingsService.clientPanelWidth/Height`): logical size is always panel ÷ 2; `scaleFactor` 2.0 (quality/balanced) encodes at native panel resolution, 1.0 (performance) at half. Custom's width/height are the **physical encode resolution** (matching how the picker labels them): the desktop stays at panel ÷ 2 logical like the fixed presets, and `SettingsService.captureScaleFactor` becomes `customWidth ÷ (panel ÷ 2)`. The Swift `startCapture` multiplies logical × `scaleFactor` (clamped to even dims); `CGVirtualDisplay` is always created at logical × 2 (HiDPI). `HostConnectionManager._startCapture()` reads the active preset and applies the values to `DisplayConfigModel` at once.

@@ -19,6 +19,7 @@ class SettingsService extends GetxService {
   // from its HELLO and persisted so presets stay correct across launches.
   static const _keyPanelW = 'client_panel_w';
   static const _keyPanelH = 'client_panel_h';
+  static const _keyPanelMaxHz = 'client_panel_max_hz';
   static const _keyPerfOverlay = 'perf_overlay';
   static const _keyHudOverlay = 'hud_overlay';
   static const _keyEncodePreset = 'encode_preset';
@@ -36,7 +37,7 @@ class SettingsService extends GetxService {
   final codecRx = CodecType.h264.obs;
   // Reactive UI language code ('en' / 'th'); drives the language picker.
   final localeCode = 'en'.obs;
-  // Active session mode (chosen on the launcher). Reactive so UI reflects it
+  // Active session mode (chosen via the selector on Home). Reactive so UI reflects it
   // live; the host forces Mirror capture while in remote-control mode.
   final sessionModeRx = SessionMode.extendedScreen.obs;
   // Which side drives a remote-control session. Only meaningful when
@@ -48,6 +49,9 @@ class SettingsService extends GetxService {
   // only used until the first client HELLO reports the real panel.
   final clientPanelWidth = 2560.obs;
   final clientPanelHeight = 1600.obs;
+  // Top refresh rate the client's panel supports (Hz), also from its HELLO.
+  // 60 until a client that reports it has connected.
+  final clientMaxRefreshHz = 60.obs;
 
   // Injected at build time via --dart-define=DEVICE_SERIAL=R52XC02C9RT
   static const _buildSerial =
@@ -65,6 +69,8 @@ class SettingsService extends GetxService {
     clientPanelWidth.value = _prefs.getInt(_keyPanelW) ?? clientPanelWidth.value;
     clientPanelHeight.value =
         _prefs.getInt(_keyPanelH) ?? clientPanelHeight.value;
+    clientMaxRefreshHz.value =
+        _prefs.getInt(_keyPanelMaxHz) ?? clientMaxRefreshHz.value;
     sessionModeRx.value = _resolveSessionMode();
     remoteDirectionRx.value = _resolveRemoteDirection();
   }
@@ -121,6 +127,13 @@ class SettingsService extends GetxService {
     await _prefs.setInt(_keyPanelH, h);
   }
 
+  /// Host: record the client panel's top refresh rate (from its HELLO) — the
+  /// rate the Max preset starts at.
+  Future<void> setClientMaxRefresh(int hz) async {
+    clientMaxRefreshHz.value = hz;
+    await _prefs.setInt(_keyPanelMaxHz, hz);
+  }
+
   /// Saved language if present, otherwise follow the device language (Thai if
   /// the system is Thai, English for everything else).
   String _resolveInitialLocale() {
@@ -157,7 +170,7 @@ class SettingsService extends GetxService {
     final v = _prefs.getString(_keyEncodePreset);
     return EncodePreset.values.firstWhere(
       (e) => e.name == v,
-      orElse: () => EncodePreset.balanced,
+      orElse: () => EncodePreset.max,
     );
   }
 
@@ -183,14 +196,19 @@ class SettingsService extends GetxService {
   bool get isCustomPreset => encodePreset == EncodePreset.custom;
 
   // ─── Effective capture values (resolve custom vs fixed preset) ────────────
-  // Custom treats its width/height as logical (points) and encodes at 2x HiDPI
-  // — same as Quality/Balanced — so text stays sharp on the native panel.
+  // Custom's width/height are the *physical* encode resolution — that's how the
+  // picker labels them and what its help text describes. The desktop itself
+  // stays at the panel's logical size (panel ÷ 2, HiDPI) like every fixed
+  // preset; only the encode scale changes, so "half" really halves the pixels
+  // (it used to be doubled as logical points: 1480×924 encoded at 2960×1848).
+  int get _panelLogicalWidth => clientPanelWidth.value ~/ 2;
   int get captureWidth =>
-      isCustomPreset ? customWidth : encodePreset.width;
+      isCustomPreset ? _panelLogicalWidth : encodePreset.width;
   int get captureHeight =>
-      isCustomPreset ? customHeight : encodePreset.height;
-  double get captureScaleFactor =>
-      isCustomPreset ? 2.0 : encodePreset.scaleFactor;
+      isCustomPreset ? clientPanelHeight.value ~/ 2 : encodePreset.height;
+  double get captureScaleFactor => isCustomPreset
+      ? customWidth / _panelLogicalWidth
+      : encodePreset.scaleFactor;
   int get captureBitrate =>
       isCustomPreset ? customBitrateMbps * 1000000 : encodePreset.bitrate;
 

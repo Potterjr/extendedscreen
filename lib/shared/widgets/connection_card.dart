@@ -8,7 +8,8 @@ class ConnectionCard extends StatelessWidget {
 
   /// Whether to show the "Connect" action while disconnected. On the host this
   /// is false — connecting happens only by picking a device. "Disconnect" is
-  /// always shown while active.
+  /// always shown while active, and "Cancel" while connecting — plus, on the
+  /// host, while an automatic retry is pending after an error.
   final bool canConnect;
 
   /// Active codec label shown in the subtitle while connected (e.g. "H.265").
@@ -82,18 +83,31 @@ class ConnectionCard extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 12),
-          if (!isConnecting && (isActive || canConnect))
+          if (_action case final action?)
             TextButton(
               onPressed: onTap,
-              style: TextButton.styleFrom(
-                foregroundColor: isActive ? Colors.redAccent : const Color(0xFF00C8FF),
-              ),
-              child: Text(
-                  isActive ? 'common_disconnect'.tr : 'common_connect'.tr),
+              style: TextButton.styleFrom(foregroundColor: action.color),
+              child: Text(action.label),
             ),
         ],
       ),
     );
+  }
+
+  /// The one action this card offers for the current phase, if any. The host
+  /// in `error` gets Cancel rather than Connect: it retries on its own, so the
+  /// useful choice there is to stop retrying.
+  ({String label, Color color})? get _action {
+    if (phase.isActive) {
+      return (label: 'common_disconnect'.tr, color: Colors.redAccent);
+    }
+    if (phase.isConnecting || (phase == ConnectionPhase.error && !canConnect)) {
+      return (label: 'common_cancel'.tr, color: Colors.white70);
+    }
+    if (canConnect) {
+      return (label: 'common_connect'.tr, color: const Color(0xFF00C8FF));
+    }
+    return null;
   }
 
   Color _phaseColor(ConnectionPhase p) => switch (p) {
