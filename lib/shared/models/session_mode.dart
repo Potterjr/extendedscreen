@@ -1,6 +1,6 @@
 import 'package:get/get.dart';
 
-/// What the user is doing this session — chosen from the launcher.
+/// What the user is doing this session — chosen from the selector on Home.
 ///
 /// - [extendedScreen]: the tablet is a second monitor (Extend or Mirror, set in
 ///   Settings). The Mac captures a display and the tablet renders it.

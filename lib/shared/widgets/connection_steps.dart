@@ -2,174 +2,106 @@ import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:extendedscreen/shared/connection/connection_state.dart';
 
-enum _StepState { done, active, pending, error }
-
-/// Client-side progress checklist showing how far the connection has advanced
-/// toward being ready to display: connect → configure → ready.
+/// Client-side connection status: a single combined row (icon + phase label +
+/// short caption + progress bar) instead of a three-step checklist. The phase
+/// label already says exactly how far things have gotten, so a full
+/// checklist was more scrolling than the information was worth while waiting.
 class ConnectionSteps extends StatelessWidget {
   final ConnectionPhase phase;
   const ConnectionSteps({super.key, required this.phase});
 
-  static List<({String label, String detail})> get _steps => [
-        (
-          label: 'step_connect_label'.tr,
-          detail: 'step_connect_detail'.tr,
-        ),
-        (
-          label: 'step_configure_label'.tr,
-          detail: 'step_configure_detail'.tr,
-        ),
-        (
-          label: 'step_ready_label'.tr,
-          detail: 'step_ready_detail'.tr,
-        ),
-      ];
+  /// 0.0–1.0 progress toward streaming, for the bar under the status row.
+  double get _progress => switch (phase) {
+        ConnectionPhase.streaming || ConnectionPhase.paused => 1.0,
+        ConnectionPhase.configuring => 0.66,
+        ConnectionPhase.error || ConnectionPhase.disconnected => 0.0,
+        _ => 0.33, // detecting / adb connecting / port forwarding / handshaking
+      };
 
-  /// How many steps are fully completed for the current phase.
-  int get _completed {
-    switch (phase) {
-      case ConnectionPhase.streaming:
-      case ConnectionPhase.paused:
-        return 3;
-      case ConnectionPhase.configuring:
-        return 1;
-      default:
-        return 0; // handshaking / connecting / disconnected / error
-    }
-  }
-
-  _StepState _stateFor(int i, int completed) {
-    if (i < completed) return _StepState.done;
-    if (i > completed) return _StepState.pending;
-    // i == completed: the step currently in progress.
-    if (phase == ConnectionPhase.error) return _StepState.error;
-    if (phase.isConnecting || completed > 0) return _StepState.active;
-    return _StepState.pending; // disconnected, waiting to start
-  }
+  String get _caption => switch (phase) {
+        ConnectionPhase.streaming || ConnectionPhase.paused =>
+          'step_ready_detail'.tr,
+        ConnectionPhase.configuring => 'step_configure_detail'.tr,
+        ConnectionPhase.error => 'phase_error'.tr,
+        ConnectionPhase.disconnected => 'conn_card_plug_prompt'.tr,
+        _ => 'step_connect_detail'.tr,
+      };
 
   @override
   Widget build(BuildContext context) {
-    final completed = _completed;
-    final steps = _steps;
+    final isError = phase == ConnectionPhase.error;
+    final isDone = phase.isActive;
+    final isIdle = phase == ConnectionPhase.disconnected;
+    final color = isError
+        ? Colors.redAccent
+        : isDone
+            ? const Color(0xFF00E676)
+            : const Color(0xFF00C8FF);
+
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: const Color(0xFF111827),
         borderRadius: BorderRadius.circular(12),
       ),
       child: Column(
-        children: [
-          for (int i = 0; i < steps.length; i++)
-            _StepRow(
-              label: steps[i].label,
-              detail: steps[i].detail,
-              state: _stateFor(i, completed),
-              isLast: i == steps.length - 1,
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-class _StepRow extends StatelessWidget {
-  final String label;
-  final String detail;
-  final _StepState state;
-  final bool isLast;
-
-  const _StepRow({
-    required this.label,
-    required this.detail,
-    required this.state,
-    required this.isLast,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    const accent = Color(0xFF00C8FF);
-    final color = switch (state) {
-      _StepState.done => const Color(0xFF00E676),
-      _StepState.active => accent,
-      _StepState.error => Colors.redAccent,
-      _StepState.pending => Colors.white24,
-    };
-
-    return IntrinsicHeight(
-      child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Left rail: indicator + connector line.
-          Column(
+          Row(
             children: [
-              _Indicator(state: state, color: color),
-              if (!isLast)
-                Expanded(
-                  child: Container(
-                    width: 2,
-                    color: state == _StepState.done
-                        ? const Color(0xFF00E676).withValues(alpha: 0.5)
-                        : Colors.white12,
+              if (!isDone && !isError && !isIdle)
+                SizedBox(
+                  width: 20,
+                  height: 20,
+                  child:
+                      CircularProgressIndicator(strokeWidth: 2.5, color: color),
+                )
+              else
+                Icon(
+                  isError
+                      ? Icons.error
+                      : isDone
+                          ? Icons.check_circle
+                          : Icons.circle_outlined,
+                  color: color,
+                  size: 20,
+                ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  phase.label,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
                   ),
                 ),
+              ),
             ],
           ),
-          const SizedBox(width: 14),
+          const SizedBox(height: 6),
           Padding(
-            padding: EdgeInsets.only(top: 2, bottom: isLast ? 8 : 16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  label,
-                  style: TextStyle(
-                    color: state == _StepState.pending
-                        ? Colors.white38
-                        : Colors.white,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  detail,
-                  style: TextStyle(
-                    color: Colors.white.withValues(alpha: 0.4),
-                    fontSize: 12,
-                  ),
-                ),
-              ],
+            padding: const EdgeInsets.only(left: 32),
+            child: Text(
+              _caption,
+              style: TextStyle(
+                color: Colors.white.withValues(alpha: 0.45),
+                fontSize: 12,
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(4),
+            child: LinearProgressIndicator(
+              value: _progress,
+              minHeight: 4,
+              backgroundColor: Colors.white12,
+              valueColor: AlwaysStoppedAnimation(color),
             ),
           ),
         ],
       ),
     );
-  }
-}
-
-class _Indicator extends StatelessWidget {
-  final _StepState state;
-  final Color color;
-  const _Indicator({required this.state, required this.color});
-
-  @override
-  Widget build(BuildContext context) {
-    const size = 24.0;
-    if (state == _StepState.active) {
-      return const SizedBox(
-        width: size,
-        height: size,
-        child: Padding(
-          padding: EdgeInsets.all(3),
-          child: CircularProgressIndicator(strokeWidth: 2.5, color: Color(0xFF00C8FF)),
-        ),
-      );
-    }
-    final icon = switch (state) {
-      _StepState.done => Icons.check_circle,
-      _StepState.error => Icons.error,
-      _ => Icons.circle_outlined,
-    };
-    return Icon(icon, color: color, size: size);
   }
 }

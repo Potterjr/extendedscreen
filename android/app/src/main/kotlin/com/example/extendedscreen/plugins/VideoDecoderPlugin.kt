@@ -76,6 +76,9 @@ object VideoDecoderPlugin : MethodChannel.MethodCallHandler {
             "getDropCount" -> {
                 result.success(droppedNalCount.getAndSet(0))
             }
+            "getMaxRefreshRate" -> {
+                result.success(maxRefreshRate())
+            }
             else -> result.notImplemented()
         }
     }
@@ -196,15 +199,31 @@ object VideoDecoderPlugin : MethodChannel.MethodCallHandler {
         } catch (_: Exception) {}
     }
 
+    /// Top refresh rate this panel supports at its current resolution — sent in
+    /// the HELLO so the host's Max preset can target it (e.g. 120 on a 120 Hz
+    /// tablet even while the panel is idling at 60).
+    @Suppress("DEPRECATION")
+    private fun maxRefreshRate(): Int {
+        val act = activity ?: return 60
+        val display = (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) act.display
+            else act.windowManager.defaultDisplay) ?: return 60
+        return display.supportedModes
+            .filter { it.physicalWidth == display.mode.physicalWidth }
+            .maxOfOrNull { Math.round(it.refreshRate) } ?: 60
+    }
+
     private fun setDisplayRefreshRate(fps: Float) {
         val act = activity ?: return
         act.runOnUiThread {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 // API 30+: request exact display mode with target refresh rate
                 val display = act.display ?: return@runOnUiThread
+                // Modes report inexact rates (e.g. 120.00001), so compare with
+                // a tolerance — a strict `<= fps` rejected the 120 Hz mode and
+                // left the panel at 60 Hz while streaming 120 fps.
                 val targetMode = display.supportedModes
                     .filter { it.physicalWidth == display.mode.physicalWidth }
-                    .maxByOrNull { if (it.refreshRate <= fps) it.refreshRate else 0f }
+                    .maxByOrNull { if (it.refreshRate <= fps + 0.5f) it.refreshRate else 0f }
                 if (targetMode != null) {
                     val params = act.window.attributes
                     params.preferredDisplayModeId = targetMode.modeId

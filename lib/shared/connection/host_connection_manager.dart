@@ -25,6 +25,11 @@ class HostConnectionManager extends BaseConnectionManager {
   @override
   bool get isHost => true;
 
+  // The host is the server — once torn down there's nothing to wait for, so
+  // re-listen quickly and let the tablet's own retry find us.
+  @override
+  Duration get reconnectDelay => const Duration(seconds: 1);
+
   /// Texture id of the decoded tablet stream (reverse remote: Mac controls the
   /// tablet). Null unless a reverse-remote session is live; the remote-view
   /// widget renders a `Texture` from it.
@@ -73,23 +78,25 @@ class HostConnectionManager extends BaseConnectionManager {
   @override
   Future<void> connect({String? serial}) async {
     if (phase.value.isConnecting || phase.value.isActive) return;
+    final attempt = currentAttempt;
+    final seq = beginConnect();
+    Future<void> abandon(String serial) => _abandon(serial, seq);
     try {
       setPhase(ConnectionPhase.detectingDevice);
       final devices = await _adb.listDevices();
+      if (isCancelled(attempt)) return;
       availableDevices.value = devices;
       if (devices.isEmpty) throw Exception('No ADB device detected');
 
-      // Pick the explicitly requested device, else the last-used one, else first.
-      final preferred = serial ?? settings.lastDeviceSerial;
+      // Pick the explicitly requested device, else the one this session was
+      // already using (a link-failure retry), else the last-used one, else first.
+      final preferred =
+          serial ?? activeDevice.value?.serial ?? settings.lastDeviceSerial;
       final device = preferred != null
           ? (devices.firstWhereOrNull((d) => d.serial == preferred) ??
               devices.first)
           : devices.first;
       activeDevice.value = device;
-      await settings.setLastDevice(device.serial);
-      if (device.model != null && device.model!.isNotEmpty) {
-        await settings.setLastDeviceName(device.model!);
-      }
       log.i('Host: using device ${device.serial}');
 
       setPhase(ConnectionPhase.portForwarding);
@@ -99,13 +106,16 @@ class HostConnectionManager extends BaseConnectionManager {
         localPort: BaseConnectionManager.port,
         remotePort: BaseConnectionManager.port,
       );
+      if (isCancelled(attempt)) return abandon(device.serial);
       if (!forwarded) throw Exception('Port forwarding failed');
 
       setPhase(ConnectionPhase.handshaking);
       await socket.startServer(
           BaseConnectionManager.host, BaseConnectionManager.port);
+      if (isCancelled(attempt)) return abandon(device.serial);
       log.i('Host: waiting for tablet to connect…');
       await socket.waitForClient();
+      if (isCancelled(attempt)) return abandon(device.serial);
 
       _helloReceived = Completer<void>();
       startPacketLoop();
@@ -119,6 +129,7 @@ class HostConnectionManager extends BaseConnectionManager {
         log.w('Host: no HELLO from client — using last-known panel '
             '${settings.clientPanelWidth.value}×${settings.clientPanelHeight.value}');
       }
+      if (isCancelled(attempt)) return abandon(device.serial);
 
       // Start the media pipeline. Reverse-remote (Mac controls tablet) decodes
       // the tablet's stream; every other mode captures + encodes the Mac. Both
@@ -132,21 +143,51 @@ class HostConnectionManager extends BaseConnectionManager {
       } catch (e, st) {
         log.e('Host: media pipeline not started (permission?)', e, st);
       }
+      if (isCancelled(attempt)) return abandon(device.serial);
 
       setPhase(ConnectionPhase.streaming);
       startHeartbeat();
+      // Remember the device only once the link is actually live — saving it on
+      // every attempt let a failed retry (e.g. falling back to an emulator
+      // while the tablet was unplugged) overwrite the real last-used device.
+      await settings.setLastDevice(device.serial);
+      if (device.model != null && device.model!.isNotEmpty) {
+        await settings.setLastDeviceName(device.model!);
+      }
       log.i('Host: link live (streaming)');
     } catch (e, st) {
+      if (isCancelled(attempt)) return; // cancelled mid-attempt: no retry
       log.e('Host connection failed', e, st);
       errorMessage.value = e.toString();
-      setPhase(ConnectionPhase.error);
-      scheduleReconnect();
+      await handleLinkFailure();
     }
   }
+
+  /// Cancel landed while this attempt was mid-await: disconnect() already tore
+  /// down what existed then, so undo whatever the attempt set up since (tunnel,
+  /// server, capture). Every step is safe to repeat — but skip it entirely if
+  /// the user already started a newer attempt, which now owns those resources.
+  Future<void> _abandon(String serial, int seq) async {
+    log.i('Host: connect attempt cancelled');
+    if (!isLatestConnect(seq)) return;
+    await onTeardown();
+    await _adb.removeForward(serial: serial);
+    await socket.disconnect();
+  }
+
+  /// A lost link invalidates the whole session (capture, virtual display,
+  /// adb tunnel), so rebuild from scratch rather than resume a half-alive one.
+  @override
+  Future<void> onLinkLost() => onTeardown();
 
   Future<void> _startCapture() async {
     // Let native wake/stream-stop callbacks rebuild the pipeline (see below).
     _capture.onCaptureRestartNeeded = _restartCapture;
+    // Display rearrangement doesn't need a rebuild — just fresh bounds.
+    _capture.onDisplayBoundsChanged = _refreshDisplayBounds;
+    // Max preset: the encoder stepped its rate down — tell the tablet so its
+    // display mode + HUD follow (same 0xFB it gets at stream start).
+    _capture.onFrameRateChanged = _announceRefreshRate;
 
     final config = DisplayConfigModel.defaultConfig.copyWith(
       width: settings.captureWidth,
@@ -158,6 +199,7 @@ class HostConnectionManager extends BaseConnectionManager {
       // honours the user's Extend/Mirror choice.
       mode: settings.effectiveDisplayMode,
       codec: settings.codec,
+      adaptiveFps: settings.encodePreset == EncodePreset.max,
     );
 
     await _capture.requestPermission();
@@ -192,14 +234,8 @@ class HostConnectionManager extends BaseConnectionManager {
       payload: Uint8List.fromList([0xFC, config.codec == CodecType.h265 ? 1 : 0]),
     ));
 
-    // Tell the client the capture refresh rate so its HUD shows the real value.
-    // 0xFB + refreshRate (Hz, single byte).
-    refreshRateHz.value = config.refreshRate;
-    socket.send(Packet(
-      type: PacketType.control,
-      timestampUs: DateTime.now().microsecondsSinceEpoch,
-      payload: Uint8List.fromList([0xFB, config.refreshRate.clamp(0, 255)]),
-    ));
+    // Tell the client the capture refresh rate so its display mode + HUD match.
+    _announceRefreshRate(config.refreshRate);
 
     // Sync the overlay/HUD toggles so a fresh client matches the host.
     sendUiFlags();
@@ -212,6 +248,16 @@ class HostConnectionManager extends BaseConnectionManager {
         payload: nal,
       ));
     });
+  }
+
+  /// 0xFB + refreshRate (Hz, single byte): the rate the host is encoding at.
+  void _announceRefreshRate(int hz) {
+    refreshRateHz.value = hz;
+    socket.send(Packet(
+      type: PacketType.control,
+      timestampUs: DateTime.now().microsecondsSinceEpoch,
+      payload: Uint8List.fromList([0xFB, hz.clamp(0, 255)]),
+    ));
   }
 
   /// Rebuilds the capture pipeline after the native side reports it died — the
@@ -239,6 +285,20 @@ class HostConnectionManager extends BaseConnectionManager {
     }
   }
 
+  /// Re-fetches the virtual/main display's screen-space bounds after the
+  /// native side reports the display arrangement changed (e.g. the virtual
+  /// display was dragged to a different position in System Settings →
+  /// Displays). Touch/mouse injection maps normalized coordinates through
+  /// these bounds, so a stale cache sends input to the display's old position.
+  Future<void> _refreshDisplayBounds() async {
+    if (!phase.value.isActive || settings.isReverseRemote) return;
+    final bounds = await _capture.getDisplayBounds();
+    if ((bounds['w'] ?? 0) > 0 && (bounds['h'] ?? 0) > 0) {
+      _displayBounds = bounds;
+      log.i('Display bounds refreshed: $_displayBounds');
+    }
+  }
+
   /// Reverse remote (Mac controls tablet): the tablet captures + encodes its own
   /// screen, so the host decodes the incoming stream into a Flutter texture and
   /// injects input back via `adb shell input`. No ScreenCaptureKit here.
@@ -254,7 +314,14 @@ class HostConnectionManager extends BaseConnectionManager {
       height: settings.clientPanelHeight.value,
     );
     remoteTextureId.value = texId;
-    refreshRateHz.value = settings.refreshRate;
+
+    // Here the *tablet's* encoder does the work, and Max's native @ 120 Hz is
+    // beyond it (its HEVC encoder manages well under 120 fps at 4K), so Max
+    // falls back to Quality's native @ 60 Hz / 20 Mbps in this direction.
+    final isMax = settings.encodePreset == EncodePreset.max;
+    final fps = isMax ? 60 : settings.refreshRate;
+    final bitrate = isMax ? 20000000 : settings.captureBitrate;
+    refreshRateHz.value = fps;
 
     // Instruct the client to begin capturing + encoding.
     // 0xF8 + codec + fps + bitrate(Mbps).
@@ -264,8 +331,8 @@ class HostConnectionManager extends BaseConnectionManager {
       payload: Uint8List.fromList([
         0xF8,
         settings.codec == CodecType.h265 ? 1 : 0,
-        settings.refreshRate.clamp(0, 255),
-        (settings.captureBitrate ~/ 1000000).clamp(1, 255),
+        fps.clamp(0, 255),
+        (bitrate ~/ 1000000).clamp(1, 255),
       ]),
     ));
     log.i('Host: reverse remote — decoding tablet stream (texture $texId)');
@@ -318,6 +385,8 @@ class HostConnectionManager extends BaseConnectionManager {
   Future<void> onTeardown() async {
     // Stop native wake callbacks from resurrecting capture after a disconnect.
     _capture.onCaptureRestartNeeded = null;
+    _capture.onDisplayBoundsChanged = null;
+    _capture.onFrameRateChanged = null;
     await _frameSub?.cancel();
     _frameSub = null;
     if (settings.isReverseRemote) {
@@ -375,8 +444,8 @@ class HostConnectionManager extends BaseConnectionManager {
   }
 
   /// Parse the client HELLO: [version, platform, panelW hi, panelW lo,
-  /// panelH hi, panelH lo]. Older clients send only the first two bytes —
-  /// then the last-known panel is kept.
+  /// panelH hi, panelH lo, panel max refresh Hz]. Older clients send fewer
+  /// bytes — then the last-known values are kept.
   void _onHello(Uint8List p) {
     if (p.length >= 6) {
       final w = (p[2] << 8) | p[3];
@@ -385,6 +454,10 @@ class HostConnectionManager extends BaseConnectionManager {
         settings.setClientPanel(w, h);
         log.i('Host: client panel $w×$h');
       }
+    }
+    if (p.length >= 7 && p[6] >= 24) {
+      settings.setClientMaxRefresh(p[6]);
+      log.i('Host: client panel max refresh ${p[6]} Hz');
     }
     if (!(_helloReceived?.isCompleted ?? true)) _helloReceived!.complete();
   }

@@ -21,12 +21,33 @@ class ScreenCaptureChannel extends GetxService {
   /// from sleep.
   void Function()? onCaptureRestartNeeded;
 
+  /// Wired by [HostConnectionManager] to refresh the cached display bounds
+  /// used for touch-coordinate mapping. Fired when the native side reports the
+  /// display arrangement changed (e.g. the virtual display was repositioned in
+  /// System Settings) — cheaper than [onCaptureRestartNeeded] since the
+  /// capture session itself is unaffected, only its screen-space position.
+  void Function()? onDisplayBoundsChanged;
+
+  /// Wired by [HostConnectionManager] so the client learns the new rate (0xFB)
+  /// when the "Max" preset's adaptive encoder steps its frame rate down.
+  void Function(int fps)? onFrameRateChanged;
+
   Future<dynamic> _handleNative(MethodCall call) async {
     switch (call.method) {
       case 'onStreamStopped':
       case 'onCaptureNeedsRestart':
         _log.w('Native capture restart requested (${call.method})');
         onCaptureRestartNeeded?.call();
+        break;
+      case 'onDisplayBoundsChanged':
+        onDisplayBoundsChanged?.call();
+        break;
+      case 'onFrameRateChanged':
+        final fps = call.arguments;
+        if (fps is int) {
+          _log.w('Adaptive encoder stepped down to $fps fps');
+          onFrameRateChanged?.call(fps);
+        }
         break;
       default:
         break;

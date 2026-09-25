@@ -12,6 +12,7 @@ import 'package:extendedscreen/modules/remote_screen/host/remote_video_channel.d
 import 'package:extendedscreen/shared/connection/client_connection_manager.dart';
 import 'package:extendedscreen/modules/extended_screen/client/video_decoder_channel.dart';
 import 'package:extendedscreen/modules/remote_screen/client/android_capture_channel.dart';
+import 'package:extendedscreen/shared/platform/battery_channel.dart';
 
 class InitialBinding extends Bindings {
   @override
@@ -41,6 +42,7 @@ class InitialBinding extends Bindings {
       // capturer, then the client connection manager.
       Get.put(VideoDecoderChannel(), permanent: true);
       Get.put(AndroidCaptureChannel(), permanent: true);
+      Get.put(BatteryChannel(), permanent: true);
       Get.put<BaseConnectionManager>(ClientConnectionManager(), permanent: true);
     }
   }

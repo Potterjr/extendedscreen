@@ -5,16 +5,31 @@ import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
 import 'package:extendedscreen/shared/connection/connection_state.dart';
 import 'package:extendedscreen/shared/models/device_model.dart';
 import 'package:extendedscreen/shared/models/session_mode.dart';
+import 'package:extendedscreen/shared/platform/battery_channel.dart';
 import 'package:extendedscreen/shared/platform/permissions_channel.dart';
 import 'package:extendedscreen/shared/services/settings_service.dart';
 
-class HomeController extends GetxController {
+class HomeController extends GetxController with WidgetsBindingObserver {
   final _connection = Get.find<BaseConnectionManager>();
   final _settings = Get.find<SettingsService>();
   final _perms = PermissionsChannel();
 
+  /// Client only — [BatteryChannel] is registered just on Android, so this
+  /// must only be read behind an `!isHost` guard.
+  Rxn<BatteryStatus> get batteryStatus => Get.find<BatteryChannel>().status;
+
   /// macOS host permissions that must be granted before capture can start.
   static const _requiredHostPermissions = ['screen_recording', 'accessibility'];
+
+  /// Host: permission keys still missing, checked on load and on app resume
+  /// (so returning from System Settings clears it automatically). Drives the
+  /// inline banner on Home instead of a forced trip to the Settings screen.
+  final missingPermissions = <String>[].obs;
+
+  /// Host: which session to run this connection as. Exposed here (instead of a
+  /// dedicated launcher screen) so switching modes is a single tap on Home.
+  Rx<SessionMode> get sessionMode => _settings.sessionModeRx;
+  void onSelectSessionMode(SessionMode mode) => _settings.setSessionMode(mode);
 
   ConnectionPhase get phase => _connection.phase.value;
   DeviceModel? get device => _connection.activeDevice.value;
@@ -51,6 +66,13 @@ class HomeController extends GetxController {
     super.onInit();
     // Populate the device picker as soon as the host screen opens.
     _connection.refreshDevices();
+
+    if (isHost) {
+      // Recheck permissions on resume — covers returning from System Settings
+      // after granting Screen Recording / Accessibility from the inline banner.
+      WidgetsBinding.instance.addObserver(this);
+      _checkHostPermissions();
+    }
 
     // Client (Android): auto-open the display once the link is live. The home
     // screen still shows the steps + Open View button (for when the user backs
@@ -95,6 +117,47 @@ class HomeController extends GetxController {
     }
   }
 
+  @override
+  void onClose() {
+    if (isHost) WidgetsBinding.instance.removeObserver(this);
+    super.onClose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _checkHostPermissions();
+  }
+
+  Future<void> _checkHostPermissions() async {
+    final status = await _perms.checkPermissions();
+    missingPermissions.value = _requiredHostPermissions
+        .where((key) => !(status[key] ?? false))
+        .toList();
+    if (missingPermissions.isEmpty) _maybeAutoConnect();
+  }
+
+  /// Host: connect without waiting for a tap when there's nothing to choose —
+  /// exactly one physical device (emulators are ignored whenever a real device
+  /// is present, and only count when they're all there is). Anything more
+  /// ambiguous falls through to the picker. Deliberately not keyed off the
+  /// saved last-used serial: that's persisted on every connect *attempt*, so a
+  /// reconnect-timer fallback can leave it pointing at the wrong device, and
+  /// a wrong pick strands the host mid-handshake with no picker visible.
+  Future<void> _maybeAutoConnect() async {
+    if (_userStopped ||
+        _connection.phase.value != ConnectionPhase.disconnected) {
+      return;
+    }
+    await _connection.refreshDevices();
+    final devices = _connection.availableDevices;
+    final physical =
+        devices.where((d) => !d.serial.startsWith('emulator-')).toList();
+    final candidates = physical.isNotEmpty ? physical : devices;
+    if (candidates.length == 1) await _connect(serial: candidates.first.serial);
+  }
+
+  void onGrantPermission(String key) => _perms.openPermission(key);
+
   /// Client: open the display view manually (via the Open View button). Only
   /// meaningful once the stream is live.
   void onOpenView() {
@@ -105,8 +168,21 @@ class HomeController extends GetxController {
 
   Future<void> refreshDevices() => _connection.refreshDevices();
 
+  // Set when the user explicitly disconnects/cancels. Suppresses auto-connect
+  // (which also re-runs whenever the app regains focus) until they connect
+  // again themselves — otherwise a Cancel was undone by the next focus.
+  bool _userStopped = false;
+
+  /// The card's single action: Disconnect while live, Cancel while connecting
+  /// (or, on the host, while a retry is pending), else Connect. Matches
+  /// ConnectionCard's choice of label.
   void onConnectTap() {
-    if (_connection.phase.value.isActive) {
+    final p = _connection.phase.value;
+    final stops = p.isActive ||
+        p.isConnecting ||
+        (isHost && p == ConnectionPhase.error);
+    if (stops) {
+      _userStopped = true;
       _connection.disconnect();
     } else {
       _connect();
@@ -124,6 +200,7 @@ class HomeController extends GetxController {
   /// missing, bounce to Settings (scrolled to Permissions) instead of failing
   /// mid-handshake.
   Future<void> _connect({String? serial}) async {
+    _userStopped = false;
     if (isHost && !await _ensureHostPermissions()) return;
     await _connection.connect(serial: serial);
   }

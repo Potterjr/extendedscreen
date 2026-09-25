@@ -4,6 +4,7 @@ import 'package:get/get.dart';
 import 'package:extendedscreen/modules/extended_screen/client/display/controllers/display_controller.dart';
 import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
 import 'package:extendedscreen/shared/connection/connection_state.dart';
+import 'package:extendedscreen/shared/platform/battery_channel.dart';
 import 'package:extendedscreen/shared/services/settings_service.dart';
 
 class DisplayView extends GetView<DisplayController> {
@@ -193,6 +194,28 @@ class _HudOverlay extends StatelessWidget {
                 );
               }),
               const SizedBox(width: 8),
+              // The display auto-opens on connect and covers Home, so charging
+              // has to be visible here too — this is where the tablet is used.
+              if (Get.isRegistered<BatteryChannel>())
+                Obx(() {
+                  final battery = Get.find<BatteryChannel>().status.value;
+                  if (battery == null) return const SizedBox.shrink();
+                  return Padding(
+                    padding: const EdgeInsets.only(right: 8),
+                    child: _StatChip(
+                      icon: battery.isCharging
+                          ? Icons.battery_charging_full
+                          : Icons.battery_std,
+                      label: battery.level >= 0
+                          ? '${battery.level}%'
+                          : (battery.isCharging
+                              ? 'battery_charging'.tr
+                              : 'battery_not_charging'.tr),
+                      color:
+                          battery.isCharging ? const Color(0xFF00E676) : null,
+                    ),
+                  );
+                }),
               TextButton(
                 onPressed: controller.onDisconnect,
                 style: TextButton.styleFrom(

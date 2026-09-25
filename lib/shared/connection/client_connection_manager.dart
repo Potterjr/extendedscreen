@@ -9,6 +9,7 @@ import 'package:extendedscreen/shared/models/packet_model.dart';
 import 'package:extendedscreen/shared/models/session_mode.dart';
 import 'package:extendedscreen/shared/platform/keepalive_channel.dart';
 import 'package:extendedscreen/modules/remote_screen/client/android_capture_channel.dart';
+import 'package:extendedscreen/modules/extended_screen/client/video_decoder_channel.dart';
 
 /// CLIENT role (Android): dials into the adb-reverse tunnel, sends its desired
 /// config in the HELLO, then decodes + renders frames (in DisplayController)
@@ -37,13 +38,23 @@ class ClientConnectionManager extends BaseConnectionManager {
   @override
   Future<void> connect({String? serial}) async {
     if (phase.value.isConnecting || phase.value.isActive) return;
+    final attempt = currentAttempt;
+    final seq = beginConnect();
+    // Cancelled mid-await: drop the socket this attempt opened — unless a newer
+    // attempt has started since and the socket is now its.
+    Future<void> abandon() async {
+      if (isLatestConnect(seq)) await socket.disconnect();
+    }
     try {
       setPhase(ConnectionPhase.handshaking);
       // Connects through the adb-reverse tunnel set up by the host.
       await socket.connect(BaseConnectionManager.host, BaseConnectionManager.port);
+      if (isCancelled(attempt)) return abandon();
 
       setPhase(ConnectionPhase.configuring);
-      _sendHandshake();
+      _maxRefreshHz ??= await Get.find<VideoDecoderChannel>().getMaxRefreshRate();
+      if (isCancelled(attempt)) return abandon();
+      _sendHandshake(_maxRefreshHz!);
 
       startPacketLoop();
 
@@ -57,19 +68,25 @@ class ClientConnectionManager extends BaseConnectionManager {
       KeepAliveChannel.start();
       log.i('Client: connected to host, streaming');
     } catch (e) {
+      if (isCancelled(attempt)) return; // cancelled mid-attempt: no retry
       // Expected to fail until the host is up; retry quietly.
       log.w('Client connect failed (${e.runtimeType}); retrying…');
-      errorMessage.value = 'Waiting for Mac host…';
-      setPhase(ConnectionPhase.error);
-      scheduleReconnect();
+      errorMessage.value = 'error_waiting_for_host'.tr;
+      // Keep the keep-alive service running (default onLinkLost is a no-op) so
+      // the retry still works while the app is in the background.
+      await handleLinkFailure();
     }
   }
 
-  void _sendHandshake() {
+  // This panel's top refresh rate — fixed per device, so queried once.
+  int? _maxRefreshHz;
+
+  void _sendHandshake(int maxRefreshHz) {
     // HELLO: version byte + platform byte (0x02 = Android client) + native
-    // panel size (uint16 BE width, uint16 BE height, physical px, landscape).
-    // The host derives its capture/virtual-display resolution from this, so
-    // any connected device gets a pixel-matched stream.
+    // panel size (uint16 BE width, uint16 BE height, physical px, landscape)
+    // + the panel's top refresh rate (Hz). The host derives its capture
+    // resolution and the Max preset's rate from these, so any connected
+    // device gets a pixel- and refresh-matched stream.
     final panel = _nativePanelSize();
     socket.send(Packet(
       type: PacketType.control,
@@ -79,6 +96,7 @@ class ClientConnectionManager extends BaseConnectionManager {
         0x02,
         (panel.w >> 8) & 0xFF, panel.w & 0xFF,
         (panel.h >> 8) & 0xFF, panel.h & 0xFF,
+        maxRefreshHz.clamp(0, 255),
       ]),
     ));
   }

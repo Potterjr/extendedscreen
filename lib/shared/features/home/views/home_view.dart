@@ -6,6 +6,7 @@ import 'package:extendedscreen/shared/connection/connection_state.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
 import 'package:extendedscreen/shared/models/session_mode.dart';
 import 'package:extendedscreen/shared/services/settings_service.dart';
+import 'package:extendedscreen/shared/widgets/battery_chip.dart';
 import 'package:extendedscreen/shared/widgets/connection_card.dart';
 import 'package:extendedscreen/shared/widgets/connection_steps.dart';
 import 'package:extendedscreen/shared/widgets/device_info_card.dart';
@@ -22,10 +23,10 @@ class HomeView extends GetView<HomeController> {
 
     return Scaffold(
       appBar: AppBar(
-        // On the host show the chosen session mode (the launcher feeds into
-        // this screen) — wrapped in Obx so it reacts to mode changes. The
-        // client always shows the static app name, so it must NOT be in an Obx
-        // (a builder that reads no observable trips GetX's "improper use").
+        // On the host show the chosen session mode (picked via the selector
+        // below) — wrapped in Obx so it reacts to mode changes. The client
+        // always shows the static app name, so it must NOT be in an Obx (a
+        // builder that reads no observable trips GetX's "improper use").
         title: controller.isHost
             ? Obx(() => Text(
                   settings.sessionModeRx.value.label,
@@ -48,6 +49,14 @@ class HomeView extends GetView<HomeController> {
           return ListView(
             padding: const EdgeInsets.all(20),
             children: [
+              if (controller.isHost &&
+                  controller.missingPermissions.isNotEmpty) ...[
+                _PermissionBanner(
+                  onGrant: () => controller
+                      .onGrantPermission(controller.missingPermissions.first),
+                ),
+                const SizedBox(height: 16),
+              ],
               ConnectionCard(
                 phase: phase,
                 onTap: controller.onConnectTap,
@@ -62,6 +71,8 @@ class HomeView extends GetView<HomeController> {
               if (controller.isHost &&
                   !phase.isActive &&
                   !phase.isConnecting) ...[
+                _SessionModeSelector(controller: controller),
+                const SizedBox(height: 16),
                 // Remote-control only: choose which side drives the session.
                 if (controller.isRemoteControl) ...[
                   _DirectionSelector(controller: controller),
@@ -77,8 +88,29 @@ class HomeView extends GetView<HomeController> {
               // Client: show connection progress and an Open View button that
               // unlocks once the stream is ready.
               if (!controller.isHost) ...[
-                ConnectionSteps(phase: phase),
-                const SizedBox(height: 20),
+                // Charging is the same USB-C cable as the data link but isn't
+                // implied by it — show it plainly instead of leaving it silent.
+                Obx(() {
+                  final status = controller.batteryStatus.value;
+                  if (status == null) return const SizedBox.shrink();
+                  return Padding(
+                    padding: const EdgeInsets.only(bottom: 16),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: BatteryChip(
+                        isCharging: status.isCharging,
+                        level: status.level,
+                      ),
+                    ),
+                  );
+                }),
+                // Only while actively connecting — the ConnectionCard above
+                // already states disconnected/error/streaming on its own, so
+                // showing this too in those phases just duplicates it.
+                if (phase.isConnecting) ...[
+                  ConnectionSteps(phase: phase),
+                  const SizedBox(height: 20),
+                ],
                 // Reverse remote (Mac controls this tablet): the tablet is the
                 // capture source, so offer a screen-share button instead of the
                 // "open view" button (there is no incoming video to open).
@@ -278,6 +310,125 @@ class _DirectionSelector extends StatelessWidget {
           );
         }),
       ],
+    );
+  }
+}
+
+/// Host, idle: compact segmented control for which session to run — replaces
+/// the old dedicated Launcher screen so switching modes is one tap on Home
+/// instead of a forced screen on every launch.
+class _SessionModeSelector extends StatelessWidget {
+  final HomeController controller;
+  const _SessionModeSelector({required this.controller});
+
+  @override
+  Widget build(BuildContext context) {
+    return Obx(() {
+      final active = controller.sessionMode.value;
+      return Row(
+        children: SessionMode.values.map((mode) {
+          final selected = mode == active;
+          return Expanded(
+            child: Padding(
+              padding: EdgeInsets.only(
+                  right: mode == SessionMode.values.first ? 8 : 0),
+              child: Material(
+                color: selected
+                    ? const Color(0xFF00C8FF).withValues(alpha: 0.16)
+                    : Colors.white.withValues(alpha: 0.04),
+                borderRadius: BorderRadius.circular(12),
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(12),
+                  onTap: () => controller.onSelectSessionMode(mode),
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: selected
+                            ? const Color(0xFF00C8FF)
+                            : Colors.white.withValues(alpha: 0.08),
+                      ),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          mode.label,
+                          style: TextStyle(
+                            color: selected ? Colors.white : Colors.white70,
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          mode.description,
+                          style: const TextStyle(
+                              color: Colors.white54, fontSize: 11),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+        }).toList(),
+      );
+    });
+  }
+}
+
+/// Host: inline "grant permissions" prompt shown directly on Home when Screen
+/// Recording / Accessibility is missing. Replaces the old fail → snackbar →
+/// navigate-to-Settings-and-back detour — the user grants without leaving
+/// Home, and the banner clears itself on app resume once granted.
+class _PermissionBanner extends StatelessWidget {
+  final VoidCallback onGrant;
+  const _PermissionBanner({required this.onGrant});
+
+  @override
+  Widget build(BuildContext context) {
+    const amber = Color(0xFFFFB300);
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: amber.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: amber.withValues(alpha: 0.3)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.lock_outline, color: amber, size: 20),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'perm_required_title'.tr,
+                  style: const TextStyle(
+                      color: amber, fontWeight: FontWeight.w600, fontSize: 14),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  'perm_required_msg'.tr,
+                  style: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.6), fontSize: 12),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          TextButton(
+            onPressed: onGrant,
+            style: TextButton.styleFrom(foregroundColor: amber),
+            child: Text('common_open'.tr),
+          ),
+        ],
+      ),
     );
   }
 }
