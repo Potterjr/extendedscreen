@@ -47,6 +47,14 @@ class VideoDecoderChannel extends GetxService {
     _log.i('VideoDecoder initialized ${config.width * 2}x${config.height * 2} @${config.refreshRate}fps');
   }
 
+  /// Follow a host stream-rate change (0xFB) with the panel's display mode,
+  /// leaving the running decoder alone.
+  Future<void> setRefreshRate(int fps) async {
+    try {
+      await _channel.invokeMethod('setRefreshRate', {'fps': fps});
+    } catch (_) {}
+  }
+
   /// Feed a raw NAL unit to MediaCodec via binary channel (no JSON overhead).
   Future<void> feedNal(List<int> nalBytes) async {
     final nal = nalBytes is Uint8List ? nalBytes : Uint8List.fromList(nalBytes);

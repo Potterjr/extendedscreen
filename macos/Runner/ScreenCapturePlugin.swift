@@ -4,6 +4,19 @@ import ScreenCaptureKit
 import VideoToolbox
 import CoreMedia
 import CoreGraphics
+import os
+
+// Capture/encode diagnostics. NSLog's interpolated text shows only as
+// "<private>" in the unified log, so these go out as public os_log entries —
+// readable without a debugger, e.g.
+//   log stream --predicate 'subsystem == "com.example.extendedscreen"'
+// — and are echoed to stderr for the `flutter run` console.
+private let captureLog = OSLog(subsystem: "com.example.extendedscreen", category: "capture")
+
+private func esLog(_ message: String) {
+    os_log("%{public}@", log: captureLog, type: .default, message)
+    FileHandle.standardError.write(Data((message + "\n").utf8))
+}
 
 // Registers a stub on older macOS and the real implementation on 12.3+
 class ScreenCapturePlugin: NSObject {
@@ -41,9 +54,25 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
     private var isCapturing = false
     private var targetFps = 60
     // "Max" preset: the encode rate steps down from the tablet's top refresh
-    // rate when this Mac's encoder can't keep up (see adaptFrameRate).
+    // rate when this Mac's encoder can't keep up, and back up once it
+    // recovers (see adaptFrameRate).
     private var adaptiveFps = false
+    private var maxFps = 60
     private var overloadStreak = 0
+    // Sum of the timer's ticks/s over the current overload streak — while the
+    // encoder is saturated that's its real throughput (see adaptFrameRate).
+    private var overloadTickSum = 0.0
+    private var healthyStreak = 0
+    // 45 sits between 30 and 60 because a 60 fps H.264 session at a tablet's
+    // native resolution is right at the limit on some Macs (M3 Pro: ~50–60).
+    private static let adaptiveRates = [30, 45, 60, 90, 120]
+    // Seconds of health required before trying the next rate up; doubles each
+    // time a step-up fails quickly so a rate that doesn't fit can't oscillate.
+    private var stepUpDelay = 10
+    private var lastStepUpAt: Date?
+    // Keeps macOS from App-Napping the (usually hidden) host while it streams:
+    // throttled timers/priority stalled encoding for seconds at a time.
+    private var captureActivity: NSObjectProtocol?
     // Counts frames dispatched to encodeQueue but not yet returned.
     // If this grows beyond the threshold we skip the incoming frame to bound latency.
     private var pendingEncodeFrames: Int32 = 0
@@ -59,7 +88,6 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
     // interval used to leave two timer threads encoding in parallel).
     private var timerGeneration = 0
     private var latestPixelBuffer: CVPixelBuffer?
-    private var latestPTS: CMTime = .zero
     private let bufferLock = NSLock()
 
     // Diagnostic counters.
@@ -115,7 +143,7 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
 
     @objc private func systemDidWake(_ note: Notification) {
         guard isCapturing else { return }
-        NSLog("[ExtendedScreen] Wake (\(note.name.rawValue)) — scheduling capture restart")
+        esLog("[ExtendedScreen] Wake (\(note.name.rawValue)) — scheduling capture restart")
         // Give the GPU/displays a moment to come back before rebuilding. The
         // display-wake and system-wake notifications both fire on resume; the
         // Dart side coalesces the two rebuild requests.
@@ -237,7 +265,7 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
             let ok = display.apply(settings)
             self.virtualDisplay = display
             self.virtualDisplayID = display.displayID
-            NSLog("[ExtendedScreen] Virtual display created id=\(display.displayID) applied=\(ok)")
+            esLog("[ExtendedScreen] Virtual display created id=\(display.displayID) applied=\(ok)")
             result(ok)
         }
     }
@@ -256,8 +284,18 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
         let br    = args["bitrate"]     as? Int ?? 20_000_000
         let codec = args["codec"]       as? String ?? "h264"
         targetFps = fps
+        maxFps = fps
         adaptiveFps = args["adaptiveFps"] as? Bool ?? false
         overloadStreak = 0
+        overloadTickSum = 0
+        healthyStreak = 0
+        stepUpDelay = 10
+        lastStepUpAt = nil
+        if captureActivity == nil {
+            captureActivity = ProcessInfo.processInfo.beginActivity(
+                options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical],
+                reason: "Streaming the screen to the tablet")
+        }
 
         setupEncoder(width: w, height: h, fps: fps, bitrate: br, codec: codec)
 
@@ -272,10 +310,10 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
             if self.virtualDisplayID != 0,
                let vd = content.displays.first(where: { $0.displayID == self.virtualDisplayID }) {
                 targetDisplay = vd
-                NSLog("[ExtendedScreen] Capturing virtual display \(self.virtualDisplayID)")
+                esLog("[ExtendedScreen] Capturing virtual display \(self.virtualDisplayID)")
             } else if let main = content.displays.first {
                 targetDisplay = main
-                NSLog("[ExtendedScreen] Capturing main display \(main.displayID)")
+                esLog("[ExtendedScreen] Capturing main display \(main.displayID)")
             } else {
                 DispatchQueue.main.async {
                     result(FlutterError(code: "NO_DISPLAY", message: "No display to capture", details: nil))
@@ -317,6 +355,11 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
 
     private func startDisplayLink(displayID: CGDirectDisplayID) {
         stopDisplayLink()
+        // Fresh diag window: a stale one (from before this capture) reads as
+        // ~0 ticks/s, which adaptFrameRate would average into the throughput.
+        diagLastLog = Date()
+        OSAtomicAnd32(0, &diagSckCount); OSAtomicAnd32(0, &diagEncCount)
+        OSAtomicAnd32(0, &diagDropCount); OSAtomicAnd32(0, &diagTickCount)
         // Use a dedicated real-time Mach thread — mach_wait_until gives nanosecond-accurate
         // wakeups independent of GCD's ~60fps scheduler cap.
         machThreadRunning = true
@@ -347,7 +390,7 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
             let intervalNs = UInt64(1_000_000_000) / UInt64(max(targetFps, 1))
             return intervalNs * UInt64(info.denom) / UInt64(info.numer)
         }
-        NSLog("[ExtendedScreen] machTimerLoop: targetFps=\(targetFps) adaptive=\(adaptiveFps) numer=\(info.numer) denom=\(info.denom)")
+        esLog("[ExtendedScreen] machTimerLoop: targetFps=\(targetFps) adaptive=\(adaptiveFps) numer=\(info.numer) denom=\(info.denom)")
 
         var next = mach_absolute_time() + currentInterval()
         var loopCount: Int32 = 0
@@ -371,7 +414,7 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
             let elapsed = mach_absolute_time() - loopStart
             let elapsedNs = elapsed * UInt64(info.numer) / UInt64(info.denom)
             if elapsedNs >= 1_000_000_000 {
-                NSLog("[ExtendedScreen] loopRate=\(loopCount)/s")
+                esLog("[ExtendedScreen] loopRate=\(loopCount)/s")
                 loopCount = 0
                 loopStart = mach_absolute_time()
             }
@@ -383,24 +426,35 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
         OSAtomicIncrement32(&diagTickCount)
         // Diagnostic log every 1s (happens regardless of encode)
         let now = Date()
-        if now.timeIntervalSince(diagLastLog) >= 1.0 {
+        let diagElapsed = now.timeIntervalSince(diagLastLog)
+        if diagElapsed >= 1.0 {
             let sck  = OSAtomicAdd32(0, &diagSckCount);  OSAtomicAnd32(0, &diagSckCount)
             let enc  = OSAtomicAdd32(0, &diagEncCount);  OSAtomicAnd32(0, &diagEncCount)
             let drp  = OSAtomicAdd32(0, &diagDropCount); OSAtomicAnd32(0, &diagDropCount)
             let tick = OSAtomicAdd32(0, &diagTickCount); OSAtomicAnd32(0, &diagTickCount)
             let pendingNow = OSAtomicAdd32(0, &pendingEncodeFrames)
-            NSLog("[ExtendedScreen] diag: tick=\(tick)/s  SCK=\(sck)/s  encoded=\(enc)/s  skipped=\(drp)/s  pending=\(pendingNow)")
+            esLog("[ExtendedScreen] diag: tick=\(tick)/s  SCK=\(sck)/s  encoded=\(enc)/s  skipped=\(drp)/s  pending=\(pendingNow)")
             diagLastLog = now
-            if adaptiveFps { adaptFrameRate(skipped: drp, pending: pendingNow) }
+            if adaptiveFps {
+                adaptFrameRate(ticksPerSec: Double(tick) / diagElapsed, skipped: drp, pending: pendingNow)
+            }
         }
         guard let session = compressionSession else { return }
 
         bufferLock.lock()
         let pixelBuffer = latestPixelBuffer
-        let pts = latestPTS
         bufferLock.unlock()
 
         guard let pb = pixelBuffer else { return }
+
+        // Stamp each encode with the host clock at submission, not the SCK
+        // frame's PTS. On an idle screen SCK stops delivering, so that PTS
+        // froze while this timer re-encoded the last frame, then leapt forward
+        // by the whole idle time on the next change. VT paces/provisions the
+        // hardware from these timestamps: an M3 Pro's HEVC session dropped
+        // from ~120 fps to ~18–40 fps after one such leap and never recovered
+        // — the "laggy after leaving it a while" bug.
+        let pts = CMClockGetTime(CMClockGetHostTimeClock())
 
         let pending = OSAtomicAdd32(0, &pendingEncodeFrames)
         if pending >= Self.maxPendingEncodeFrames {
@@ -433,30 +487,69 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
         }
     }
 
-    /// "Max" preset: capture starts at the tablet's top refresh rate; when this
-    /// Mac's encoder can't sustain it (any skipped frame, or the queue within 3
-    /// of its cap, for 2 seconds running) step down one notch. Never steps back
-    /// up within a session — that would oscillate with the content's load; the
-    /// next connect starts from the top again.
-    private func adaptFrameRate(skipped: Int32, pending: Int32) {
-        let overloaded = skipped > 0 || pending >= Self.maxPendingEncodeFrames - 3
-        overloadStreak = overloaded ? overloadStreak + 1 : 0
-        guard overloadStreak >= 2,
-              let lower = [120, 90, 60, 30].first(where: { $0 < targetFps }) else { return }
+    /// "Max" preset: capture starts at the tablet's top refresh rate, which can
+    /// be well past what this Mac encodes at the tablet's native resolution
+    /// (an M3 Pro's H.264 session saturates around 50 fps at 2960×1848; HEVC
+    /// manages ~2× that). A saturated VT session doesn't drop frames: once ~8
+    /// are in flight, EncodeFrame blocks the timer thread. So overload shows as
+    /// the queue pinned near that cap (every queued frame is a frame of added
+    /// latency) or the timer losing ticks to blocked encode calls — the skip
+    /// counter alone never trips. After 3 such seconds, drop straight to the
+    /// highest rate that fits in 95% of the throughput actually achieved, so
+    /// the queue drains; stepping one notch at a time spent seconds at ~190 ms
+    /// of latency per notch and fell from a marginal 60 all the way to 30.
+    /// After [stepUpDelay] healthy seconds, step back up one notch. A step-up
+    /// that fails within 30 s doubles the delay before the next try (capped
+    /// at 5 min), so a rate that really doesn't fit isn't retried in a loop.
+    private func adaptFrameRate(ticksPerSec: Double, skipped: Int32, pending: Int32) {
+        let overloaded = skipped > 0
+            || pending >= Self.maxPendingEncodeFrames - 3
+            || ticksPerSec < Double(targetFps) * 0.9
+        if overloaded {
+            overloadStreak += 1
+            overloadTickSum += ticksPerSec
+        } else {
+            overloadStreak = 0
+            overloadTickSum = 0
+        }
+        healthyStreak = !overloaded && pending <= 4 ? healthyStreak + 1 : 0
+
+        let rates = Set(Self.adaptiveRates + [maxFps]).filter { $0 <= maxFps }.sorted()
+        let achieved = overloadStreak > 0 ? overloadTickSum / Double(overloadStreak) : 0
+        let fits = rates.last(where: { $0 < targetFps && Double($0) <= achieved * 0.95 })
+        if overloadStreak >= 3, let lower = fits ?? rates.first(where: { $0 < targetFps }) {
+            if let up = lastStepUpAt, Date().timeIntervalSince(up) < 30 {
+                stepUpDelay = min(stepUpDelay * 2, 300)
+            }
+            setAdaptiveRate(lower, reason: String(format: "encoder can't keep up (%.0f fps achieved)", achieved))
+        } else if healthyStreak >= stepUpDelay,
+                  let higher = rates.first(where: { $0 > targetFps }) {
+            lastStepUpAt = Date()
+            setAdaptiveRate(higher, reason: "encoder recovered")
+        }
+    }
+
+    private func setAdaptiveRate(_ fps: Int, reason: String) {
         overloadStreak = 0
-        targetFps = lower
+        overloadTickSum = 0
+        healthyStreak = 0
+        targetFps = fps
         if let s = compressionSession {
             VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ExpectedFrameRate,
-                                 value: NSNumber(value: lower))
+                                 value: NSNumber(value: fps))
         }
-        NSLog("[ExtendedScreen] adaptive: encoder can't keep up — stepping down to \(lower) fps")
+        esLog("[ExtendedScreen] adaptive: \(reason) — now \(fps) fps (next step-up after \(stepUpDelay)s healthy)")
         DispatchQueue.main.async { [weak self] in
-            self?.channel?.invokeMethod("onFrameRateChanged", arguments: lower)
+            self?.channel?.invokeMethod("onFrameRateChanged", arguments: fps)
         }
     }
 
     private func stopCapture() {
         isCapturing = false
+        if let activity = captureActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            captureActivity = nil
+        }
         stopDisplayLink()  // cancel timer first so no new encodes fire during teardown
         stream?.stopCapture { _ in }
         stream = nil
@@ -477,16 +570,15 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
         if frameCount == 0 {
             let pw = CVPixelBufferGetWidth(pixelBuffer)
             let ph = CVPixelBufferGetHeight(pixelBuffer)
-            NSLog("[ExtendedScreen] First frame pixel size: \(pw)x\(ph)")
+            esLog("[ExtendedScreen] First frame pixel size: \(pw)x\(ph)")
         }
         frameCount += 1
         OSAtomicIncrement32(&diagSckCount)
 
-        // Store latest frame; CVDisplayLink tick drives the actual encode.
-        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        // Store latest frame; the timer tick drives the actual encode (and
+        // stamps it — see onDisplayLinkTick).
         bufferLock.lock()
         latestPixelBuffer = pixelBuffer
-        latestPTS = pts
         bufferLock.unlock()
     }
 
@@ -531,7 +623,7 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ExpectedFrameRate,    value: NSNumber(value: fps))
         VTCompressionSessionPrepareToEncodeFrames(s)
         compressionSession = s
-        NSLog("[ExtendedScreen] Encoder: \(isHEVC ? "HEVC" : "H264") \(width)x\(height) \(fps)fps \(bitrate/1000)kbps")
+        esLog("[ExtendedScreen] Encoder: \(isHEVC ? "HEVC" : "H264") \(width)x\(height) \(fps)fps \(bitrate/1000)kbps")
     }
 
     private static let startCode: [UInt8] = [0x00, 0x00, 0x00, 0x01]

@@ -185,8 +185,9 @@ class HostConnectionManager extends BaseConnectionManager {
     _capture.onCaptureRestartNeeded = _restartCapture;
     // Display rearrangement doesn't need a rebuild — just fresh bounds.
     _capture.onDisplayBoundsChanged = _refreshDisplayBounds;
-    // Max preset: the encoder stepped its rate down — tell the tablet so its
-    // display mode + HUD follow (same 0xFB it gets at stream start).
+    // Max preset: the encoder changed its rate (down under load, back up once
+    // it recovers) — tell the tablet so its display mode + HUD follow (same
+    // 0xFB it gets at stream start).
     _capture.onFrameRateChanged = _announceRefreshRate;
 
     final config = DisplayConfigModel.defaultConfig.copyWith(

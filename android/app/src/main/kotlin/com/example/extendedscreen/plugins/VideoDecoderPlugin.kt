@@ -65,6 +65,15 @@ object VideoDecoderPlugin : MethodChannel.MethodCallHandler {
                 tryConfigure()
                 result.success(null)
             }
+            // Host changed its stream rate (0xFB, e.g. the Max preset adapting):
+            // only the panel mode follows — the running codec is provisioned
+            // for the panel's top rate already, so it isn't rebuilt (a rebuild
+            // blanked the display and waited on a fresh IDR).
+            "setRefreshRate" -> {
+                pendingFps = call.argument<Int>("fps") ?: pendingFps
+                setDisplayRefreshRate(pendingFps.toFloat())
+                result.success(null)
+            }
             "requestIdr" -> {
                 channel?.invokeMethod("onRequestIdr", null)
                 result.success(null)
@@ -123,7 +132,9 @@ object VideoDecoderPlugin : MethodChannel.MethodCallHandler {
                 setInteger(MediaFormat.KEY_COLOR_FORMAT,
                     MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
                 setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 0)
-                setInteger(MediaFormat.KEY_OPERATING_RATE, pendingFps)
+                // The panel's top rate, not the current stream rate: the host
+                // may step back up mid-session without a reconfigure.
+                setInteger(MediaFormat.KEY_OPERATING_RATE, maxOf(pendingFps, maxRefreshRate()))
                 setInteger(MediaFormat.KEY_PRIORITY, 0) // real-time
                 if (android.os.Build.VERSION.SDK_INT >= 30) {
                     setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
@@ -218,12 +229,19 @@ object VideoDecoderPlugin : MethodChannel.MethodCallHandler {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 // API 30+: request exact display mode with target refresh rate
                 val display = act.display ?: return@runOnUiThread
-                // Modes report inexact rates (e.g. 120.00001), so compare with
-                // a tolerance — a strict `<= fps` rejected the 120 Hz mode and
-                // left the panel at 60 Hz while streaming 120 fps.
-                val targetMode = display.supportedModes
+                // Slowest mode that still shows every frame (e.g. 45 fps → 60 Hz,
+                // 90 → 120), never below 60 Hz: a 30 Hz panel adds a vsync of
+                // latency to every frame and to touch feedback. Picking the
+                // fastest mode *under* the stream rate dropped 90 fps to 60 Hz
+                // and a 30 fps stream took the whole panel down to 30 Hz.
+                // Modes report inexact rates (e.g. 120.00001) — hence the 0.5.
+                val want = maxOf(fps, 60f)
+                val modes = display.supportedModes
                     .filter { it.physicalWidth == display.mode.physicalWidth }
-                    .maxByOrNull { if (it.refreshRate <= fps + 0.5f) it.refreshRate else 0f }
+                val targetMode = modes
+                    .filter { it.refreshRate >= want - 0.5f }
+                    .minByOrNull { it.refreshRate }
+                    ?: modes.maxByOrNull { it.refreshRate }
                 if (targetMode != null) {
                     val params = act.window.attributes
                     params.preferredDisplayModeId = targetMode.modeId

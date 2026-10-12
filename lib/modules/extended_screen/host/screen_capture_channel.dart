@@ -29,7 +29,8 @@ class ScreenCaptureChannel extends GetxService {
   void Function()? onDisplayBoundsChanged;
 
   /// Wired by [HostConnectionManager] so the client learns the new rate (0xFB)
-  /// when the "Max" preset's adaptive encoder steps its frame rate down.
+  /// when the "Max" preset's adaptive encoder steps its frame rate down or
+  /// back up.
   void Function(int fps)? onFrameRateChanged;
 
   Future<dynamic> _handleNative(MethodCall call) async {
@@ -45,7 +46,7 @@ class ScreenCaptureChannel extends GetxService {
       case 'onFrameRateChanged':
         final fps = call.arguments;
         if (fps is int) {
-          _log.w('Adaptive encoder stepped down to $fps fps');
+          _log.w('Adaptive encoder rate → $fps fps');
           onFrameRateChanged?.call(fps);
         }
         break;

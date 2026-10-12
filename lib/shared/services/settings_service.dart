@@ -63,8 +63,11 @@ class SettingsService extends GetxService {
     _prefs = await SharedPreferences.getInstance();
     showPerformanceOverlay.value = _prefs.getBool(_keyPerfOverlay) ?? false;
     showHudOverlay.value = _prefs.getBool(_keyHudOverlay) ?? true;
-    codecRx.value =
-        _prefs.getString(_keyCodec) == 'h265' ? CodecType.h265 : CodecType.h264;
+    codecRx.value = switch (_prefs.getString(_keyCodec)) {
+      'h265' => CodecType.h265,
+      'h264' => CodecType.h264,
+      _ => defaultCodecFor(encodePreset),
+    };
     localeCode.value = _resolveInitialLocale();
     clientPanelWidth.value = _prefs.getInt(_keyPanelW) ?? clientPanelWidth.value;
     clientPanelHeight.value =
@@ -217,6 +220,12 @@ class SettingsService extends GetxService {
       isCustomPreset ? customRefreshRate : encodePreset.refreshRate;
 
   CodecType get codec => codecRx.value;
+
+  /// Codec used until the user picks one. Max defaults to H.265: at a tablet's
+  /// native resolution a Mac's H.264 session saturates far below the panel's
+  /// top rate (M3 Pro: ~50 fps at 2960×1848), while HEVC sustains ~2× that.
+  static CodecType defaultCodecFor(EncodePreset preset) =>
+      preset == EncodePreset.max ? CodecType.h265 : CodecType.h264;
 
   Future<void> setCodec(CodecType c) {
     codecRx.value = c;

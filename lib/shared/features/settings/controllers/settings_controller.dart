@@ -176,6 +176,13 @@ class SettingsController extends GetxController {
     if (encodePreset.value == preset) return;
     encodePreset.value = preset;
     _settings.setEncodePreset(preset);
+    // Choosing Max also switches to its default codec (H.265); the codec
+    // toggle can still override it afterwards. One reconnect covers both.
+    if (preset == EncodePreset.max) {
+      final c = SettingsService.defaultCodecFor(preset);
+      codec.value = c;
+      _settings.setCodec(c);
+    }
     _reconnect();
   }
 

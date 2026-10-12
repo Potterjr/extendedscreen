@@ -26,8 +26,8 @@ class DisplayController extends GetxController with WidgetsBindingObserver {
   Timer? _fpsTimer;
   int _fpsCounter = 0;
 
-  // Refresh rate the decoder + display mode were last set up for, and the
-  // watcher that re-inits when the host announces a different one (0xFB).
+  // Refresh rate the display mode was last set for, and the watcher that
+  // follows the host when it announces a different one (0xFB).
   int? _decoderFps;
   Worker? _refreshWorker;
 
@@ -40,14 +40,15 @@ class DisplayController extends GetxController with WidgetsBindingObserver {
     _keepScreenOn();
     if (isAndroid) {
       _initDecoderAndSubscribe();
-      // The host's rate (0xFB) can land after the display opens; the display
-      // mode and decoder operating rate must follow it, or a 120 Hz stream is
-      // shown on a 60 Hz screen and half its frames are discarded.
+      // The host's rate (0xFB) can land after the display opens, and the Max
+      // preset changes it mid-stream; the display mode must follow, or a
+      // 120 Hz stream is shown on a 60 Hz screen and half its frames are
+      // discarded. Only the mode changes — the decoder is provisioned for the
+      // panel's top rate, and rebuilding it on every step hitched the display.
       _refreshWorker = ever<int>(_cm.refreshRateHz, (hz) {
         if (hz != _decoderFps) {
-          _packetSub?.cancel();
-          _packetSub = null;
-          _initDecoderAndSubscribe();
+          _decoderFps = hz;
+          Get.find<VideoDecoderChannel>().setRefreshRate(hz);
         }
       });
     }
@@ -93,6 +94,13 @@ class DisplayController extends GetxController with WidgetsBindingObserver {
     decoder.onRequestIdr = _cm.requestIdr;
 
     await decoder.initialize(config);
+    // A 0xFB that landed during the awaits above was applied first and then
+    // overwritten by this init's older rate — reapply the latest.
+    final hz = _cm.refreshRateHz.value;
+    if (hz != config.refreshRate) {
+      _decoderFps = hz;
+      await decoder.setRefreshRate(hz);
+    }
     _log.i('Decoder ready, subscribing to frame stream');
 
     _packetSub = _cm.packetStream.listen(
