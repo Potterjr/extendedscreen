@@ -61,6 +61,7 @@ class SettingsController extends GetxController {
   final customRefreshOptions = const [30, 60, 90, 120];
   RxBool get showPerformanceOverlay => _settings.showPerformanceOverlay;
   RxBool get showHudOverlay => _settings.showHudOverlay;
+  RxBool get keepMacCursor => _settings.keepMacCursor;
 
   /// Active UI language code ('en' / 'th') and its setter for the picker.
   RxString get localeCode => _settings.localeCode;
@@ -250,4 +251,9 @@ class SettingsController extends GetxController {
     _settings.setShowHudOverlay(!showHudOverlay.value);
     _cm.sendUiFlags();
   }
+
+  /// Applies at once with no reconnect: InputInjectChannel watches the setting
+  /// and pushes it to the native injector.
+  void toggleKeepMacCursor() =>
+      _settings.setKeepMacCursor(!keepMacCursor.value);
 }

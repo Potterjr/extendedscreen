@@ -9,9 +9,12 @@ import 'package:flutter/widgets.dart';
 ///   under the finger. Natural direction: content follows the finger.
 /// * **Long-press then drag** (hold [_longPress] without moving, then drag) →
 ///   a real mouse drag (press → move → release), for moving windows,
-///   selecting text, dragging sliders, etc.
+///   selecting text, dragging sliders, etc. Extra fingers that touch down
+///   during a drag are ignored: the drag keeps following the first finger and
+///   releases when that finger lifts.
 /// * **Fling** (release while still moving fast) → inertial scrolling that
-///   decays over ~0.6 s, like flick-scrolling on a phone.
+///   decays over ~0.6 s, like flick-scrolling on a phone. A finger that rests
+///   for [_flingMaxIdle] before lifting doesn't fling.
 /// * **Pinch** (two fingers spread/close) → zoom in/out, emitted as ⌘+scroll
 ///   centred on the pinch point (browsers, Maps, Preview, editors, …).
 ///
@@ -26,7 +29,8 @@ class TouchGestureRecognizer {
     required this.onDragMove,
     required this.onDragEnd,
     required this.onLongPressEngaged,
-  });
+    int Function()? nowUs,
+  }) : _nowUs = nowUs ?? _wallClockUs;
 
   /// Tap detected — emit a click at the normalized point.
   final void Function(double nx, double ny) onClick;
@@ -44,10 +48,17 @@ class TouchGestureRecognizer {
 
   final void Function(double nx, double ny) onDragStart;
   final void Function(double nx, double ny) onDragMove;
+
+  /// Fired exactly once for each [onDragStart], including when the drag's
+  /// finger is cancelled or the recognizer is disposed mid-drag.
   final void Function(double nx, double ny) onDragEnd;
 
   /// Fired once when a long-press upgrades to drag mode — used for haptics.
   final VoidCallback onLongPressEngaged;
+
+  /// Current time in microseconds, used for scroll velocity. Defaults to the
+  /// wall clock; tests inject a fake one.
+  final int Function() _nowUs;
 
   // ─── Tunables ─────────────────────────────────────────────────────────────
   /// Finger travel (logical px) beyond which a press is treated as a swipe.
@@ -79,6 +90,11 @@ class TouchGestureRecognizer {
   static const double _flingFriction = 0.95; // per-tick decay (~60 Hz)
   static const Duration _flingTick = Duration(milliseconds: 16);
 
+  /// A finger that hasn't moved for this long before lifting has stopped, so
+  /// the velocity left over from its last move must not launch a fling. A
+  /// move after a pause this long restarts the velocity estimate.
+  static const Duration _flingMaxIdle = Duration(milliseconds: 100);
+
   // ─── State ────────────────────────────────────────────────────────────────
   // Insertion-ordered (Dart Map) so "the first two fingers" are stable.
   final Map<int, Offset> _pointers = {};
@@ -91,6 +107,10 @@ class TouchGestureRecognizer {
   int _lastMoveUs = 0;
   _Mode _mode = _Mode.idle;
   Timer? _longPressTimer;
+
+  // True between onDragStart and onDragEnd, i.e. while the host's mouse
+  // button is held down.
+  bool _dragOpen = false;
 
   // Pinch tracking.
   double _lastDist = 0;
@@ -117,6 +137,7 @@ class TouchGestureRecognizer {
         if (_mode == _Mode.undecided && _primaryId == id) {
           _mode = _Mode.drag;
           onLongPressEngaged();
+          _dragOpen = true;
           onDragStart(_nx(_startPos), _ny(_startPos));
         }
       });
@@ -172,20 +193,14 @@ class TouchGestureRecognizer {
       case _Mode.scroll:
         if (wasPrimary) _maybeFling();
       case _Mode.drag:
-        if (wasPrimary) onDragEnd(_nx(pos), _ny(pos));
+        if (wasPrimary) _endDrag(pos);
       case _Mode.pinch:
       case _Mode.spent:
       case _Mode.idle:
         break;
     }
 
-    // Any remaining fingers must lift before a new gesture can start, so
-    // lifting one finger of a pinch doesn't snap back into single-finger scroll.
-    if (_pointers.isEmpty) {
-      _reset();
-    } else {
-      _mode = _Mode.spent;
-    }
+    _afterPointerLeft(wasPrimary);
   }
 
   void cancel(int id) {
@@ -193,19 +208,36 @@ class TouchGestureRecognizer {
     final wasPrimary = id == _primaryId;
     _pointers.remove(id);
     _longPressTimer?.cancel();
-    if (_mode == _Mode.drag && wasPrimary) {
-      onDragEnd(_nx(_lastPos), _ny(_lastPos));
-    }
+    if (_mode == _Mode.drag && wasPrimary) _endDrag(_lastPos);
+    _afterPointerLeft(wasPrimary);
+  }
+
+  /// Releases a drag still held when the owner goes away mid-gesture.
+  void dispose() {
+    _longPressTimer?.cancel();
+    _cancelFling();
+    _reset();
+  }
+
+  // Any remaining fingers must lift before a new gesture can start, so
+  // lifting one finger of a pinch doesn't snap back into single-finger scroll.
+  // The exception is an extra finger leaving a drag: the drag belongs to the
+  // primary finger, which is still down and still dragging.
+  void _afterPointerLeft(bool wasPrimary) {
     if (_pointers.isEmpty) {
       _reset();
-    } else {
+    } else if (wasPrimary || _mode != _Mode.drag) {
       _mode = _Mode.spent;
     }
   }
 
-  void dispose() {
-    _longPressTimer?.cancel();
-    _cancelFling();
+  // ─── Drag ─────────────────────────────────────────────────────────────────
+  /// Sends the drag's mouse-up. Every path that ends a drag goes through
+  /// here, so the host gets exactly one release per [onDragStart].
+  void _endDrag(Offset pos) {
+    if (!_dragOpen) return;
+    _dragOpen = false;
+    onDragEnd(_nx(pos), _ny(pos));
   }
 
   // ─── Scroll ───────────────────────────────────────────────────────────────
@@ -218,13 +250,22 @@ class TouchGestureRecognizer {
     final dtMs = (now - _lastMoveUs) / 1000.0;
     if (dtMs > 0) {
       final sample = Offset(sdx / dtMs, sdy / dtMs);
-      _vel = _vel * (1 - _velEma) + sample * _velEma;
+      // After a pause the old velocity is stale, so the first move restarts
+      // the estimate instead of blending into it. Otherwise one lift-off
+      // micro-move after a rest would only shrink the stale speed a little
+      // and still pass the idle check in _maybeFling.
+      _vel = now - _lastMoveUs > _flingMaxIdle.inMicroseconds
+          ? sample
+          : _vel * (1 - _velEma) + sample * _velEma;
       final speed = _vel.distance;
       if (speed > _velMax) _vel = _vel * (_velMax / speed);
     }
   }
 
   void _maybeFling() {
+    // _vel only changes on a move, so after a pause it is stale: the finger
+    // stopped, then lifted.
+    if (_nowUs() - _lastMoveUs > _flingMaxIdle.inMicroseconds) return;
     if (_vel.distance < _flingStart) return;
     _flingTimer = Timer.periodic(_flingTick, (_) {
       _vel = _vel * _flingFriction;
@@ -276,12 +317,15 @@ class TouchGestureRecognizer {
 
   // ─── Helpers ──────────────────────────────────────────────────────────────
   void _reset() {
+    // Safety net: never leave the host's mouse button held down. A normal
+    // release already cleared _dragOpen, so this sends no second mouse-up.
+    _endDrag(_lastPos);
     _pointers.clear();
     _primaryId = null;
     _mode = _Mode.idle;
   }
 
-  int _nowUs() => DateTime.now().microsecondsSinceEpoch;
+  static int _wallClockUs() => DateTime.now().microsecondsSinceEpoch;
   double _nx(Offset p) =>
       _view.width <= 0 ? 0 : (p.dx / _view.width).clamp(0.0, 1.0);
   double _ny(Offset p) =>

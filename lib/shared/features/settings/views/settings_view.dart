@@ -45,6 +45,16 @@ class SettingsView extends GetView<SettingsController> {
                   )),
             ]),
             const SizedBox(height: 16),
+            _SectionHeader('settings_section_input'.tr),
+            _SettingsCard(children: [
+              Obx(() => _ToggleRow(
+                    label: 'settings_keep_mac_cursor'.tr,
+                    description: 'settings_keep_mac_cursor_desc'.tr,
+                    value: controller.keepMacCursor.value,
+                    onChanged: (_) => controller.toggleKeepMacCursor(),
+                  )),
+            ]),
+            const SizedBox(height: 16),
             _SectionHeader('settings_section_performance'.tr),
             _SettingsCard(children: [
               Obx(() => _ChoiceRow(
@@ -198,7 +208,7 @@ class SettingsView extends GetView<SettingsController> {
             const Divider(height: 1, color: Colors.white12),
             _InfoRow(label: 'settings_port'.tr, value: '7001'),
             const Divider(height: 1, color: Colors.white12),
-            _InfoRow(label: 'settings_version'.tr, value: '1.0.0'),
+            _InfoRow(label: 'settings_version'.tr, value: '1.1.0'),
             const Divider(height: 1, color: Colors.white12),
             Obx(() => _InfoRow(
                 label: 'settings_target_device'.tr,
@@ -363,9 +373,15 @@ class _ChoiceRow extends StatelessWidget {
 
 class _ToggleRow extends StatelessWidget {
   final String label;
+  final String? description;
   final bool value;
   final ValueChanged<bool> onChanged;
-  const _ToggleRow({required this.label, required this.value, required this.onChanged});
+  const _ToggleRow({
+    required this.label,
+    this.description,
+    required this.value,
+    required this.onChanged,
+  });
 
   @override
   Widget build(BuildContext context) => Padding(
@@ -373,8 +389,20 @@ class _ToggleRow extends StatelessWidget {
         child: Row(
           children: [
             Expanded(
-              child: Text(label,
-                  style: const TextStyle(color: Colors.white, fontSize: 15)),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(label,
+                      style: const TextStyle(color: Colors.white, fontSize: 15)),
+                  if (description != null) ...[
+                    const SizedBox(height: 2),
+                    Text(description!,
+                        style: TextStyle(
+                            color: Colors.white.withValues(alpha: 0.45),
+                            fontSize: 12)),
+                  ],
+                ],
+              ),
             ),
             Switch(
               value: value,

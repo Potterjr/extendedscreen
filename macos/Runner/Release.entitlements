@@ -2,13 +2,12 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>com.apple.security.app-sandbox</key>
-	<true/>
+	<!-- No App Sandbox, same as DebugProfile: the host execs the `adb` binary
+	     (for `adb reverse`) and posts CGEvents for input injection, neither of
+	     which a sandboxed app can do. -->
 	<key>com.apple.security.network.server</key>
 	<true/>
 	<key>com.apple.security.network.client</key>
-	<true/>
-	<key>com.apple.security.screen-capture</key>
 	<true/>
 </dict>
 </plist>

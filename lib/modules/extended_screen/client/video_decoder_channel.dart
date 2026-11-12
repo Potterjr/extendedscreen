@@ -37,6 +37,11 @@ class VideoDecoderChannel extends GetxService {
     }
   }
 
+  /// Configure the native decoder. A call while one is already configured
+  /// does not rebuild it: the running codec stays, but the new size, rate and
+  /// codec are stored anyway (the rate also sets the panel mode and the input
+  /// queue's cap; the codec drives keyframe detection), so always [dispose]
+  /// first when switching codec.
   Future<void> initialize(DisplayConfigModel config) async {
     await _channel.invokeMethod('initialize', {
       'width': config.width * 2,   // physical pixels (HiDPI 2x)

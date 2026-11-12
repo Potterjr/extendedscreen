@@ -19,8 +19,8 @@ import 'package:extendedscreen/shared/services/settings_service.dart';
 /// This base owns the bits that are identical on both sides: the connection
 /// phase + latency observables, the packet loop with heartbeat handling, the
 /// reconnect timer, and the input-send helpers. Role-specific behaviour is
-/// exposed through the abstract [connect]/[autoConnect]/[changeMode] hooks and
-/// the overridable [onRolePacket]/[onTeardown] callbacks.
+/// exposed through the abstract [connect]/[autoConnect] hooks and the
+/// overridable [onRolePacket]/[onTeardown]/[onLinkLost] callbacks.
 abstract class BaseConnectionManager extends GetxService
     with WidgetsBindingObserver {
   @protected
@@ -80,8 +80,9 @@ abstract class BaseConnectionManager extends GetxService
   int _lastPingTs = 0; // timestamp of the most-recently sent ping
   DateTime _lastReceived = DateTime.now(); // any packet from the peer
 
-  // True from a link failure until its retry fires — guards against handling
-  // the same loss twice (a socket error is often followed by a close).
+  // True from a link failure until its retry fires (or a manual connect() in
+  // the meantime starts one early, see [beginConnect]) — guards against
+  // handling the same loss twice (a socket error is often followed by a close).
   bool _recovering = false;
 
   // Bumped by disconnect(). A connect() already in flight (typically parked
@@ -97,8 +98,21 @@ abstract class BaseConnectionManager extends GetxService
   // tell whether a newer one has since taken over the shared socket/capture
   // (then it must leave them alone rather than "clean up" the new session).
   int _connectSeq = 0;
+
+  /// Called by each connect() right after its phase guard, so only from
+  /// `disconnected` or `error`. In `error`, [handleLinkFailure] has finished
+  /// and armed its retry; a connect() now (the user tapping Connect on the
+  /// tablet, or picking a device on the Mac) is that retry, run early. So drop
+  /// the pending timer, and clear [_recovering] so this attempt's own failure
+  /// is handled and arms the next retry. Otherwise the guard swallowed it,
+  /// leaving the phase stuck at the attempt's connecting step with no retry.
+  /// For the retry timer's own connect() both are no-ops.
   @protected
-  int beginConnect() => ++_connectSeq;
+  int beginConnect() {
+    _reconnectTimer?.cancel();
+    _recovering = false;
+    return ++_connectSeq;
+  }
   @protected
   bool isLatestConnect(int seq) => seq == _connectSeq;
 
@@ -183,7 +197,9 @@ abstract class BaseConnectionManager extends GetxService
   }
 
   /// Role-specific cleanup run during [disconnect] (host stops capture and
-  /// removes the adb-reverse tunnel; client releases nothing extra here).
+  /// removes the adb-reverse tunnel; client stops its keep-alive service and
+  /// any reverse-remote screen capture). The host also runs it on link loss
+  /// and when abandoning a cancelled connect attempt.
   @protected
   Future<void> onTeardown() async {}
 
@@ -211,7 +227,7 @@ abstract class BaseConnectionManager extends GetxService
   }
 
   /// Role hook run by [handleLinkFailure] before the retry. Unlike
-  /// [onTeardown] it must leave [activeDevice] set so the retry targets it.
+  /// [disconnect] it must leave [activeDevice] set so the retry targets it.
   @protected
   Future<void> onLinkLost() async {}
 
@@ -232,7 +248,10 @@ abstract class BaseConnectionManager extends GetxService
     socket.send(PacketCodec.wrapKey(event));
   }
 
-  /// Client → host: ask for a fresh keyframe so the decoder can start cleanly.
+  /// Decoder side → encoder side: ask for a fresh keyframe so the decoder can
+  /// start cleanly. Client → host normally; in reverse remote the host wires
+  /// it as its decoder's IDR callback (host → client), though the native macOS
+  /// decoder does not fire that callback yet.
   void requestIdr() {
     if (!phase.value.isActive) return;
     socket.send(Packet(
@@ -277,9 +296,10 @@ abstract class BaseConnectionManager extends GetxService
     onRolePacket(packet);
   }
 
-  /// Role-specific packet handling (host injects input / adopts config; client
-  /// reacts to codec + reload control packets). FRAME_DATA on the client is
-  /// consumed by DisplayController via [packetStream].
+  /// Role-specific packet handling (host injects input / records the client's
+  /// HELLO panel info; client reacts to the host's control packets, e.g.
+  /// session mode, codec, refresh rate). FRAME_DATA on the client is consumed
+  /// by DisplayController via [packetStream].
   @protected
   void onRolePacket(Packet packet) {}
 

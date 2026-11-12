@@ -4,16 +4,25 @@ import 'package:extendedscreen/shared/models/device_model.dart';
 
 /// Host-only picker: lists detected ADB clients so the user chooses which
 /// Android device to stream to (instead of auto-picking the first one).
+///
+/// Plain widget over a snapshot: [devices] must be a plain list read inside the
+/// caller's `Obx`, not the `RxList` itself, or a list change doesn't rebuild
+/// the card.
 class DevicePickerCard extends StatelessWidget {
   final List<DeviceModel> devices;
   final ValueChanged<DeviceModel> onSelect;
   final VoidCallback onRefresh;
+
+  /// A manual refresh is running: the refresh button shows a spinner and is
+  /// disabled until it finishes.
+  final bool refreshing;
 
   const DevicePickerCard({
     super.key,
     required this.devices,
     required this.onSelect,
     required this.onRefresh,
+    this.refreshing = false,
   });
 
   @override
@@ -39,10 +48,18 @@ class DevicePickerCard extends StatelessWidget {
               ),
               const Spacer(),
               IconButton(
-                icon: const Icon(Icons.refresh, size: 18),
+                icon: refreshing
+                    ? SizedBox.square(
+                        dimension: 18,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white.withValues(alpha: 0.6),
+                        ),
+                      )
+                    : const Icon(Icons.refresh, size: 18),
                 color: Colors.white.withValues(alpha: 0.6),
                 tooltip: 'device_refresh_tooltip'.tr,
-                onPressed: onRefresh,
+                onPressed: refreshing ? null : onRefresh,
                 visualDensity: VisualDensity.compact,
               ),
             ],

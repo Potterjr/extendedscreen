@@ -86,8 +86,8 @@ class SocketService extends GetxService {
     try {
       _socket?.add(packet.serialize());
     } catch (_) {
-      // Socket may be closed/reset; ConnectionManager will reconnect via the
-      // onError/onDone callbacks already wired to the stream.
+      // Socket may be closed/reset; BaseConnectionManager will reconnect via
+      // the onError/onDone callbacks already wired to the stream.
     }
   }
 
@@ -118,7 +118,8 @@ class SocketService extends GetxService {
 
       final type = PacketType.fromByte(view.getUint8(4));
       final ts = view.getInt64(9, Endian.big);
-      // One copy: extract payload so the ring buffer can be compacted freely.
+      // Two copies (sublist, then fromList): extract payload so the flat
+      // receive buffer can be compacted freely.
       final payload = Uint8List.fromList(
           _recv.sublist(_recv.offsetInBytes + offset + Packet.headerSize,
               _recv.offsetInBytes + offset + totalLen));

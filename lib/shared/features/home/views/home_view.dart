@@ -79,7 +79,12 @@ class HomeView extends GetView<HomeController> {
                   const SizedBox(height: 16),
                 ],
                 DevicePickerCard(
-                  devices: cm.availableDevices,
+                  // Snapshot the list here, inside the Obx builder, so GetX
+                  // subscribes to it. Passing the RxList itself registers
+                  // nothing (the card reads it in its own build, outside this
+                  // builder), which left the picker stale after a refresh.
+                  devices: cm.availableDevices.toList(),
+                  refreshing: controller.refreshingDevices.value,
                   onSelect: controller.onSelectDevice,
                   onRefresh: controller.refreshDevices,
                 ),

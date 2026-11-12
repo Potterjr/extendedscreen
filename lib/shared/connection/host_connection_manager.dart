@@ -14,8 +14,10 @@ import 'package:extendedscreen/shared/connection/adb_service.dart';
 
 /// HOST role (macOS): runs `adb reverse`, a TCP server, captures + encodes the
 /// screen via ScreenCaptureKit/VideoToolbox, and injects the touch/mouse/key
-/// events received from the tablet. The Android client is the control surface,
-/// so the host adopts the config carried in the client's HELLO before capture.
+/// events received from the tablet. Stream settings are edited only on the
+/// host; the client's HELLO reports its native panel size and top refresh
+/// rate, which the host waits for (3 s timeout) before sizing and starting
+/// capture.
 class HostConnectionManager extends BaseConnectionManager {
   final _adb = Get.find<AdbService>();
   ScreenCaptureChannel get _capture => Get.find<ScreenCaptureChannel>();
@@ -48,8 +50,10 @@ class HostConnectionManager extends BaseConnectionManager {
   // capture resolution is derived from).
   Completer<void>? _helloReceived;
 
-  /// The host never connects automatically — it only loads the device list; the
-  /// user must pick a client from the picker to connect.
+  /// This entry point (splash) never connects on the host — it only loads the
+  /// device list. Home then connects on its own when permissions are granted
+  /// and exactly one candidate device is detected; otherwise the user picks a
+  /// client from the picker.
   @override
   Future<void> autoConnect() async {
     await refreshDevices();
@@ -207,11 +211,15 @@ class HostConnectionManager extends BaseConnectionManager {
     await _input.requestAccessibility();
 
     if (config.mode == DisplayMode.extend) {
-      await _capture.createVirtualDisplay(config);
+      if (!await _capture.createVirtualDisplay(config)) {
+        log.w('Host: virtual display settings not applied — capture falls '
+            'back to the main display if it never appears');
+      }
     }
     await _capture.startCapture(config);
 
-    // Fetch actual display bounds so touch injection lands on the right screen.
+    // Fetch the captured display's bounds so touch injection lands on the
+    // screen the tablet shows.
     _displayBounds = await _capture.getDisplayBounds();
     if ((_displayBounds['w'] ?? 0) <= 0 || (_displayBounds['h'] ?? 0) <= 0) {
       // Bounds query failed — fall back to the logical size we configured.
@@ -265,7 +273,9 @@ class HostConnectionManager extends BaseConnectionManager {
   /// Mac woke from sleep (ScreenCaptureKit, the CGVirtualDisplay and the
   /// VideoToolbox session are all invalidated by a sleep/wake cycle) or the
   /// SCStream stopped with an error. The ADB-reverse socket survives sleep, so
-  /// the heartbeat/reconnect path never fires and nothing else would recover.
+  /// nothing else would recover — unless the link sat silent past the
+  /// heartbeat's 6 s timeout, in which case the reconnect path rebuilds the
+  /// whole session instead.
   Future<void> _restartCapture() async {
     if (_restarting) return;
     if (!phase.value.isActive || settings.isReverseRemote) return;
@@ -385,9 +395,14 @@ class HostConnectionManager extends BaseConnectionManager {
   @override
   Future<void> onTeardown() async {
     // Stop native wake callbacks from resurrecting capture after a disconnect.
+    // Cleared before the first await, so a callback landing mid-teardown is
+    // ignored rather than restarting capture behind it.
     _capture.onCaptureRestartNeeded = null;
     _capture.onDisplayBoundsChanged = null;
     _capture.onFrameRateChanged = null;
+    // A drag cut off by the link dropping never gets its up: release the
+    // button, or every later injected move would post as a drag.
+    await _input.releaseAll();
     await _frameSub?.cancel();
     _frameSub = null;
     if (settings.isReverseRemote) {

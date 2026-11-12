@@ -25,7 +25,11 @@ android {
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
-        targetSdk = flutter.targetSdkVersion
+        // Pinned rather than flutter.targetSdkVersion: the manifest's
+        // PROPERTY_COMPAT_ALLOW_RESTRICTED_RESIZABILITY opt-out (which keeps the
+        // landscape lock on Android 16+ tablets) stops working once the app
+        // targets 37, so a Flutter upgrade must not raise this silently.
+        targetSdk = 36
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }

@@ -42,7 +42,11 @@ class HomeController extends GetxController with WidgetsBindingObserver {
   String get errorMessage => _connection.errorMessage.value;
 
   bool get isHost => _connection.isHost;
-  RxList<DeviceModel> get availableDevices => _connection.availableDevices;
+
+  /// Host: a manual device-list refresh (the picker's refresh button) is
+  /// running. Lets the picker show it is working: when the list comes back
+  /// unchanged, nothing else on screen would move.
+  final refreshingDevices = false.obs;
 
   /// Remote-control direction picker (host, while idle in remote-control mode).
   bool get isRemoteControl =>
@@ -59,7 +63,8 @@ class HomeController extends GetxController with WidgetsBindingObserver {
   /// it while a reverse-remote session is still live.
   void onOpenRemoteView() => Get.toNamed(AppRoutes.remoteHost);
 
-  RxBool get isConnecting => _connection.phase.value.isConnecting.obs;
+  /// Navigation workers registered in [onInit], disposed in [onClose].
+  final _workers = <Worker>[];
 
   @override
   void onInit() {
@@ -83,18 +88,19 @@ class HomeController extends GetxController with WidgetsBindingObserver {
     // on home, and if the mode is learned (via 0xF9) after the view opened, we
     // pop back.
     if (!_connection.isHost) {
-      ever<ConnectionPhase>(_connection.phase, (p) {
+      _workers.add(ever<ConnectionPhase>(_connection.phase, (p) {
         if (p.isActive &&
             !_settings.isReverseRemote &&
             Get.currentRoute == AppRoutes.home) {
           Get.toNamed(AppRoutes.display);
         }
-      });
-      everAll([_settings.sessionModeRx, _settings.remoteDirectionRx], (_) {
+      }));
+      _workers.add(
+          everAll([_settings.sessionModeRx, _settings.remoteDirectionRx], (_) {
         if (_settings.isReverseRemote && Get.currentRoute == AppRoutes.display) {
           Get.back();
         }
-      });
+      }));
       // Already streaming when home opens (resumed onto home while live) —
       // `ever` won't fire without a change, so jump after the first frame.
       if (_connection.phase.value.isActive && !_settings.isReverseRemote) {
@@ -107,19 +113,24 @@ class HomeController extends GetxController with WidgetsBindingObserver {
     } else {
       // Host: in reverse remote (Mac controls tablet) the Mac is the viewer —
       // open the remote view once the tablet stream is live.
-      ever<ConnectionPhase>(_connection.phase, (p) {
+      _workers.add(ever<ConnectionPhase>(_connection.phase, (p) {
         if (p.isActive &&
             _settings.isReverseRemote &&
             Get.currentRoute == AppRoutes.home) {
           Get.toNamed(AppRoutes.remoteHost);
         }
-      });
+      }));
     }
   }
 
   @override
   void onClose() {
     if (isHost) WidgetsBinding.instance.removeObserver(this);
+    // The phase/mode observables belong to permanent services and outlive this
+    // controller; dispose the workers so a closed Home stops reacting to them.
+    for (final worker in _workers) {
+      worker.dispose();
+    }
     super.onClose();
   }
 
@@ -166,7 +177,22 @@ class HomeController extends GetxController with WidgetsBindingObserver {
     }
   }
 
-  Future<void> refreshDevices() => _connection.refreshDevices();
+  /// Host: the picker's refresh button. Repeated taps while one is running are
+  /// ignored.
+  Future<void> refreshDevices() async {
+    if (refreshingDevices.value) return;
+    refreshingDevices.value = true;
+    try {
+      // Keep the spinner up briefly: `adb devices` often answers within a
+      // frame or two, too fast to read as feedback.
+      await Future.wait([
+        _connection.refreshDevices(),
+        Future<void>.delayed(const Duration(milliseconds: 300)),
+      ]);
+    } finally {
+      refreshingDevices.value = false;
+    }
+  }
 
   // Set when the user explicitly disconnects/cancels. Suppresses auto-connect
   // (which also re-runs whenever the app regains focus) until they connect

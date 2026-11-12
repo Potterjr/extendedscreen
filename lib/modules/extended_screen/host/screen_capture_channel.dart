@@ -88,13 +88,17 @@ class ScreenCaptureChannel extends GetxService {
     } catch (_) {}
   }
 
-  Future<void> createVirtualDisplay(DisplayConfigModel config) async {
-    await _channel.invokeMethod('createVirtualDisplay', {
-      'width': config.width,
-      'height': config.height,
-      'refreshRate': config.refreshRate,
-      'scaleFactor': config.scaleFactor,
-    });
+  /// Returns false when the virtual display's mode settings weren't applied;
+  /// capture then falls back to the main display if the display never shows
+  /// up in ScreenCaptureKit.
+  Future<bool> createVirtualDisplay(DisplayConfigModel config) async {
+    return await _channel.invokeMethod<bool>('createVirtualDisplay', {
+          'width': config.width,
+          'height': config.height,
+          'refreshRate': config.refreshRate,
+          'scaleFactor': config.scaleFactor,
+        }) ??
+        false;
   }
 
   Future<void> removeVirtualDisplay() async {
@@ -103,8 +107,10 @@ class ScreenCaptureChannel extends GetxService {
     } catch (_) {}
   }
 
-  /// Returns the actual screen-space bounds of the virtual display (extend mode)
-  /// or the main display (mirror mode). Used to map tablet touch coords correctly.
+  /// Returns the screen-space bounds of the display being captured: the
+  /// virtual display (extend mode), or the main display (mirror mode, or
+  /// extend when the virtual display never appeared and capture fell back).
+  /// Used to map tablet touch coords correctly.
   Future<Map<String, double>> getDisplayBounds() async {
     try {
       final r = await _channel.invokeMethod<Map>('getVirtualDisplayBounds');

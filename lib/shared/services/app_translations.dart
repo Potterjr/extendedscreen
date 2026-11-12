@@ -33,6 +33,7 @@ class AppTranslations extends Translations {
     'common_connected': 'Connected',
     'common_open': 'Open',
     'common_refresh': 'Refresh',
+    'common_back': 'Back',
 
     // ── App / brand ─────────────────────────────────────────────────────
     'app_name': 'Extended Screen',
@@ -105,13 +106,18 @@ class AppTranslations extends Translations {
 
     // ── Display view ────────────────────────────────────────────────────
     'display_reconnecting': 'Reconnecting…',
-    'display_applying_settings': 'Applying new settings from the host',
+    'display_reconnect_hint':
+        'Waiting for the Mac. This happens after a settings change on the '
+            'Mac, or if the cable was unplugged, the Mac went to sleep or the '
+            'Mac app was quit.',
+    'display_show_controls': 'Show controls',
     'display_surface_android_only': 'Display surface\n(Android only)',
 
     // ── Settings: sections ──────────────────────────────────────────────
     'settings_title': 'Settings',
     'settings_section_general': 'General',
     'settings_section_display': 'Display',
+    'settings_section_input': 'Touch',
     'settings_section_performance': 'Performance',
     'settings_section_custom': 'Custom',
     'settings_section_permissions': 'Permissions',
@@ -137,7 +143,12 @@ class AppTranslations extends Translations {
     'settings_perf_reconnect_note':
         'Changing performance settings reconnects the link.',
     'settings_performance_overlay': 'Performance Overlay',
-    'settings_show_hud': 'Show HUD (fps / latency / disconnect)',
+    'settings_show_hud': 'Show HUD (fps / latency / battery)',
+    'settings_keep_mac_cursor': 'Keep the Mac cursor in place',
+    'settings_keep_mac_cursor_desc':
+        'Taps and drags on the tablet borrow the cursor and give it back as '
+            'your finger lifts; scrolling leaves it alone. Turn off to leave '
+            'it where you touched.',
 
     // ── Settings: custom ────────────────────────────────────────────────
     'settings_custom_values': 'Custom Values',
@@ -234,6 +245,7 @@ class AppTranslations extends Translations {
     'common_connected': 'เชื่อมต่อแล้ว',
     'common_open': 'เปิด',
     'common_refresh': 'รีเฟรช',
+    'common_back': 'กลับ',
 
     // ── App / brand ─────────────────────────────────────────────────────
     'app_name': 'Extended Screen',
@@ -304,13 +316,17 @@ class AppTranslations extends Translations {
 
     // ── Display view ────────────────────────────────────────────────────
     'display_reconnecting': 'กำลังเชื่อมต่อใหม่…',
-    'display_applying_settings': 'กำลังใช้การตั้งค่าใหม่จากโฮสต์',
+    'display_reconnect_hint':
+        'กำลังรอ Mac อยู่ อาจเป็นเพราะเพิ่งเปลี่ยนการตั้งค่าบน Mac '
+            'ถอดสายออก Mac เข้าสู่โหมดพักเครื่อง หรือออกจากแอปบน Mac',
+    'display_show_controls': 'แสดงแถบควบคุม',
     'display_surface_android_only': 'พื้นที่แสดงผล\n(เฉพาะ Android)',
 
     // ── Settings: sections ──────────────────────────────────────────────
     'settings_title': 'การตั้งค่า',
     'settings_section_general': 'ทั่วไป',
     'settings_section_display': 'การแสดงผล',
+    'settings_section_input': 'การสัมผัส',
     'settings_section_performance': 'ประสิทธิภาพ',
     'settings_section_custom': 'กำหนดเอง',
     'settings_section_permissions': 'สิทธิ์การเข้าถึง',
@@ -336,7 +352,11 @@ class AppTranslations extends Translations {
     'settings_perf_reconnect_note':
         'การเปลี่ยนการตั้งค่าประสิทธิภาพจะเชื่อมต่อลิงก์ใหม่',
     'settings_performance_overlay': 'โอเวอร์เลย์ประสิทธิภาพ',
-    'settings_show_hud': 'แสดง HUD (fps / ดีเลย์ / ตัดการเชื่อมต่อ)',
+    'settings_show_hud': 'แสดง HUD (fps / ดีเลย์ / แบตเตอรี่)',
+    'settings_keep_mac_cursor': 'คงเคอร์เซอร์ของ Mac ไว้ที่เดิม',
+    'settings_keep_mac_cursor_desc':
+        'การแตะและลากบนแท็บเล็ตจะยืมเคอร์เซอร์ไปชั่วคราว แล้วคืนที่เดิมเมื่อยกนิ้ว '
+            'ส่วนการเลื่อนจะไม่ขยับเคอร์เซอร์เลย ปิดไว้ถ้าอยากให้เคอร์เซอร์อยู่ตรงจุดที่แตะ',
 
     // ── Settings: custom ────────────────────────────────────────────────
     'settings_custom_values': 'ค่ากำหนดเอง',

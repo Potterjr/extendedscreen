@@ -8,6 +8,7 @@ import com.example.extendedscreen.plugins.SurfaceViewPlugin
 import com.example.extendedscreen.plugins.PermissionsPlugin
 import com.example.extendedscreen.plugins.ScreenCapturePlugin
 import com.example.extendedscreen.plugins.ClientKeepAlivePlugin
+import com.example.extendedscreen.plugins.ClientKeepAliveService
 import com.example.extendedscreen.plugins.BatteryStatusPlugin
 
 class MainActivity : FlutterActivity() {
@@ -26,5 +27,25 @@ class MainActivity : FlutterActivity() {
         if (!ScreenCapturePlugin.handleActivityResult(requestCode, resultCode, data)) {
             super.onActivityResult(requestCode, resultCode, data)
         }
+    }
+
+    // There is no cached engine, so FlutterActivity destroys its engine, and
+    // with it the Dart side's socket, heartbeat and reconnect loop, every time
+    // this activity is destroyed: swiped away from Recents, Back on Home
+    // finishing it, or relaunched for a configuration change. A foreground
+    // service left running after that only holds up a process that can no
+    // longer reconnect: the keep-alive notification stayed while the tablet
+    // never came back, and a reverse-remote capture kept encoding frames
+    // nobody reads.
+    override fun onDestroy() {
+        // Always: the next engine starts with no share running and must not
+        // reuse the consent token (single-use on Android 14+), so a capture
+        // can't be handed over.
+        ScreenCapturePlugin.onHostDestroyed(this)
+        // A configuration change relaunches the activity at once and the new
+        // engine's connect calls KeepAliveChannel.start() again, so the
+        // keep-alive stays up across it.
+        if (!isChangingConfigurations) ClientKeepAliveService.stop(this)
+        super.onDestroy()
     }
 }

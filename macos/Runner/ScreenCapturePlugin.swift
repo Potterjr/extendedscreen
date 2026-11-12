@@ -18,6 +18,47 @@ private func esLog(_ message: String) {
     FileHandle.standardError.write(Data((message + "\n").utf8))
 }
 
+/// Where the captured display's picture sits inside the encoded frame,
+/// normalised to the frame (0…1). The frame is always panel-shaped, so a
+/// display of another shape (Mirror from a notched MacBook or a 16:9 monitor
+/// onto a 16:10 tablet) is scaled to fit with bars along two edges. The tablet
+/// reports touches over the whole frame, and InputInjectPlugin maps them
+/// through this rect onto the display. Written on the capture queue from each
+/// frame's SCStreamFrameInfo and read on the main thread, hence the lock.
+/// Until the current capture's first frame arrives it is the whole frame.
+final class CaptureContentRect {
+    static let shared = CaptureContentRect()
+
+    private let lock = NSLock()
+    private var rect: CGRect?  // nil: not measured yet, use the whole frame
+
+    /// Back to the whole frame: a capture is starting or has stopped.
+    func reset() {
+        lock.lock(); rect = nil; lock.unlock()
+    }
+
+    /// Stores the rect measured from a frame. Returns true when it differs
+    /// from the stored one, so the caller logs only changes.
+    func update(_ newRect: CGRect) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if rect == newRect { return false }
+        rect = newRect
+        return true
+    }
+
+    /// Maps a point normalised over the whole frame to one normalised over the
+    /// display's picture. A point on a bar clamps to the picture's nearest edge.
+    func map(x nx: Double, y ny: Double) -> (Double, Double) {
+        lock.lock(); let current = rect; lock.unlock()
+        var x = nx, y = ny
+        if let r = current, r.width > 0, r.height > 0 {
+            x = (nx - Double(r.minX)) / Double(r.width)
+            y = (ny - Double(r.minY)) / Double(r.height)
+        }
+        return (min(max(x, 0), 1), min(max(y, 0), 1))
+    }
+}
+
 // Registers a stub on older macOS and the real implementation on 12.3+
 class ScreenCapturePlugin: NSObject {
     static func register(with messenger: FlutterBinaryMessenger) {
@@ -47,6 +88,19 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
     // stored as AnyObject to compile at 10.15 deployment target.
     private var virtualDisplay: AnyObject?
     private var virtualDisplayID: CGDirectDisplayID = 0
+    // The display the running capture shows (0 when not capturing): the
+    // virtual display in Extend, the main display in Mirror or when Extend
+    // had to fall back. getVirtualDisplayBounds reports this display, so touch
+    // input maps onto the picture the tablet actually shows. Main thread only.
+    private var capturedDisplayID: CGDirectDisplayID = 0
+    // Bumped on every start/stop (main thread) so a start still waiting on
+    // ScreenCaptureKit (up to ~1.5 s while it polls for a new virtual
+    // display) can't bring a stream up after stopCapture.
+    private var captureGeneration = 0
+    // A just-created virtual display can take a moment to show up in
+    // ScreenCaptureKit's list: re-poll this many times, this far apart.
+    private static let virtualDisplayLookupRetries = 6
+    private static let virtualDisplayLookupDelay = 0.25
     private var forceKeyframe = true  // first encoded frame is always an IDR
     private var frameCount = 0
     // True between a successful startCapture and stopCapture. Gates the wake
@@ -197,7 +251,11 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
             virtualDisplayID = 0
             result(nil)
         case "getVirtualDisplayBounds":
-            let displayID = virtualDisplayID != 0 ? virtualDisplayID : CGMainDisplayID()
+            // The display being captured, so input lands on what the tablet
+            // shows. Before a capture is running: the virtual display if one
+            // exists, else the main display.
+            let displayID = capturedDisplayID != 0 ? capturedDisplayID
+                : (virtualDisplayID != 0 ? virtualDisplayID : CGMainDisplayID())
             let rect = CGDisplayBounds(displayID)
             result([
                 "x": rect.origin.x,
@@ -299,28 +357,31 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
 
         setupEncoder(width: w, height: h, fps: fps, bitrate: br, codec: codec)
 
-        SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { [weak self] content, error in
-            guard let self = self, let content = content, error == nil else {
-                DispatchQueue.main.async { result(FlutterError(code: "SCK_ERROR", message: error?.localizedDescription, details: nil)) }
+        captureGeneration += 1
+        let generation = captureGeneration
+        capturedDisplayID = 0
+        CaptureContentRect.shared.reset()
+
+        // Called back on the main thread, where the stream is set up so the
+        // generation check can't race stopCapture.
+        findCaptureDisplay(virtualID: virtualDisplayID, generation: generation, attempt: 0) { [weak self] display, error in
+            guard let self = self, generation == self.captureGeneration else {
+                result(FlutterError(code: "CANCELLED", message: "Capture stopped before it started", details: nil))
                 return
             }
-            // Target the virtual display (Extend mode) if one was created;
-            // otherwise fall back to the main display (Mirror mode).
-            let targetDisplay: SCDisplay
-            if self.virtualDisplayID != 0,
-               let vd = content.displays.first(where: { $0.displayID == self.virtualDisplayID }) {
-                targetDisplay = vd
-                esLog("[ExtendedScreen] Capturing virtual display \(self.virtualDisplayID)")
-            } else if let main = content.displays.first {
-                targetDisplay = main
-                esLog("[ExtendedScreen] Capturing main display \(main.displayID)")
-            } else {
-                DispatchQueue.main.async {
+            guard let targetDisplay = display else {
+                if let error = error {
+                    result(FlutterError(code: "SCK_ERROR", message: error.localizedDescription, details: nil))
+                } else {
                     result(FlutterError(code: "NO_DISPLAY", message: "No display to capture", details: nil))
                 }
                 return
             }
 
+            // Panel-sized output even when the display has another shape:
+            // ScreenCaptureKit keeps the display's aspect ratio and adds bars,
+            // and the frames' content rect (see trackContentRect) tells input
+            // mapping where the picture is.
             let config = SCStreamConfiguration()
             config.width  = w
             config.height = h
@@ -332,23 +393,95 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
             }
 
             let filter = SCContentFilter(display: targetDisplay, excludingWindows: [])
-            self.stream = SCStream(filter: filter, configuration: config, delegate: self)
+            let newStream = SCStream(filter: filter, configuration: config, delegate: self)
+            self.stream = newStream
 
             do {
-                try self.stream?.addStreamOutput(self, type: .screen, sampleHandlerQueue: self.captureQueue)
-                self.stream?.startCapture { [weak self] err in
+                try newStream.addStreamOutput(self, type: .screen, sampleHandlerQueue: self.captureQueue)
+                newStream.startCapture { [weak self] err in
                     DispatchQueue.main.async {
+                        // stopCapture ran meanwhile. Its stop reached this
+                        // stream before the start finished, which ScreenCaptureKit
+                        // may reject, so stop it again here if it did come up;
+                        // either way don't mark it live or start the timer.
+                        guard let self = self, generation == self.captureGeneration else {
+                            if err == nil {
+                                if let self = self {
+                                    try? newStream.removeStreamOutput(self, type: .screen)
+                                }
+                                newStream.stopCapture { _ in }
+                            }
+                            result(FlutterError(code: "CANCELLED", message: "Capture stopped before it started", details: nil))
+                            return
+                        }
                         if err == nil {
-                            self?.isCapturing = true
-                            self?.startDisplayLink(displayID: targetDisplay.displayID)
+                            self.isCapturing = true
+                            self.capturedDisplayID = targetDisplay.displayID
+                            self.startDisplayLink(displayID: targetDisplay.displayID)
                         }
                         result(err == nil ? nil : FlutterError(code: "START_FAILED", message: err?.localizedDescription, details: nil))
                     }
                 }
             } catch {
-                DispatchQueue.main.async {
-                    result(FlutterError(code: "ADD_OUTPUT_FAILED", message: error.localizedDescription, details: nil))
+                result(FlutterError(code: "ADD_OUTPUT_FAILED", message: error.localizedDescription, details: nil))
+            }
+        }
+    }
+
+    /// Picks the display to capture and calls back on the main thread, with a
+    /// nil display if the lookup failed or capture was stopped meanwhile.
+    /// Extend (`virtualID` ≠ 0): the virtual display. A just-created one can
+    /// take a moment to appear in ScreenCaptureKit's list, so re-poll for
+    /// ~1.5 s before falling back to the main display (and releasing the
+    /// virtual display nothing would show). Mirror: the main
+    /// display (CGMainDisplayID, the one with the menu bar), rather than
+    /// whichever display ScreenCaptureKit happens to list first.
+    private func findCaptureDisplay(virtualID: CGDirectDisplayID, generation: Int, attempt: Int,
+                                    completion: @escaping (SCDisplay?, Error?) -> Void) {
+        SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { [weak self] content, error in
+            DispatchQueue.main.async {
+                guard let self = self, generation == self.captureGeneration else {
+                    completion(nil, nil)
+                    return
                 }
+                guard let content = content, error == nil else {
+                    completion(nil, error)
+                    return
+                }
+                if virtualID != 0 {
+                    if let vd = content.displays.first(where: { $0.displayID == virtualID }) {
+                        esLog("[ExtendedScreen] Capturing virtual display \(virtualID)")
+                        completion(vd, nil)
+                        return
+                    }
+                    if attempt < Self.virtualDisplayLookupRetries {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + Self.virtualDisplayLookupDelay) {
+                            self.findCaptureDisplay(virtualID: virtualID, generation: generation,
+                                                    attempt: attempt + 1, completion: completion)
+                        }
+                        return
+                    }
+                }
+                let mainID = CGMainDisplayID()
+                guard let main = content.displays.first(where: { $0.displayID == mainID })
+                        ?? content.displays.first else {
+                    completion(nil, nil)
+                    return
+                }
+                if virtualID != 0 {
+                    let waited = Double(Self.virtualDisplayLookupRetries) * Self.virtualDisplayLookupDelay
+                    esLog("[ExtendedScreen] WARNING: virtual display \(virtualID) still not in ScreenCaptureKit's display list after \(waited)s; falling back to display \(main.displayID). Extend is NOT active: the tablet mirrors that display, and the virtual display is released.")
+                    // Nothing shows the virtual display now, so drop it: left
+                    // attached, the cursor and windows could move onto a
+                    // screen neither the Mac nor the tablet displays.
+                    if self.virtualDisplayID == virtualID {
+                        self.virtualDisplay = nil
+                        self.virtualDisplayID = 0
+                    }
+                } else {
+                    esLog("[ExtendedScreen] Capturing main display \(main.displayID)")
+                }
+                completion(main, nil)
             }
         }
     }
@@ -546,6 +679,9 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
 
     private func stopCapture() {
         isCapturing = false
+        captureGeneration += 1  // a start still in flight now gives up
+        capturedDisplayID = 0
+        CaptureContentRect.shared.reset()
         if let activity = captureActivity {
             ProcessInfo.processInfo.endActivity(activity)
             captureActivity = nil
@@ -567,11 +703,12 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
         guard type == .screen,
               let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
+        let pw = CVPixelBufferGetWidth(pixelBuffer)
+        let ph = CVPixelBufferGetHeight(pixelBuffer)
         if frameCount == 0 {
-            let pw = CVPixelBufferGetWidth(pixelBuffer)
-            let ph = CVPixelBufferGetHeight(pixelBuffer)
             esLog("[ExtendedScreen] First frame pixel size: \(pw)x\(ph)")
         }
+        trackContentRect(sampleBuffer, pixelWidth: pw, pixelHeight: ph)
         frameCount += 1
         OSAtomicIncrement32(&diagSckCount)
 
@@ -580,6 +717,42 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
         bufferLock.lock()
         latestPixelBuffer = pixelBuffer
         bufferLock.unlock()
+    }
+
+    /// Publishes where the display's picture sits in this frame (see
+    /// CaptureContentRect). Per the SDK header, SCStreamFrameInfo.contentRect
+    /// is in points of the output surface and scaleFactor is the pixel-to-
+    /// point factor, so rect × scaleFactor is in the buffer's pixels. Should a
+    /// macOS release report pixels instead, the scaled rect overflows the
+    /// frame and the unscaled one is used. Runs on the capture queue.
+    private func trackContentRect(_ sampleBuffer: CMSampleBuffer, pixelWidth: Int, pixelHeight: Int) {
+        guard pixelWidth > 0, pixelHeight > 0,
+              let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false),
+              let info = (attachments as NSArray).firstObject as? NSDictionary,
+              let rectDict = info[SCStreamFrameInfo.contentRect.rawValue] as? NSDictionary,
+              let raw = CGRect(dictionaryRepresentation: rectDict as CFDictionary),
+              raw.width > 0, raw.height > 0 else { return }
+        var scale = (info[SCStreamFrameInfo.scaleFactor.rawValue] as? NSNumber)?.doubleValue ?? 1
+        if !scale.isFinite || scale <= 0 { scale = 1 }
+        let fw = CGFloat(pixelWidth), fh = CGFloat(pixelHeight)
+        let tolerance: CGFloat = 0.01
+        let unit = CGRect(x: 0, y: 0, width: 1, height: 1)
+        for factor in [CGFloat(scale), 1] {
+            let r = CGRect(x: raw.minX * factor / fw, y: raw.minY * factor / fh,
+                           width: raw.width * factor / fw, height: raw.height * factor / fh)
+            guard r.minX >= -tolerance, r.minY >= -tolerance,
+                  r.maxX <= 1 + tolerance, r.maxY <= 1 + tolerance else { continue }
+            let normalized = r.intersection(unit)
+            guard !normalized.isNull, normalized.width > 0, normalized.height > 0 else { return }
+            if CaptureContentRect.shared.update(normalized) {
+                esLog(String(format: "[ExtendedScreen] Content rect in frame: x=%.4f y=%.4f w=%.4f h=%.4f (SCK %.1f,%.1f %.1fx%.1f pt, scaleFactor %.2f, frame %ldx%ld)",
+                             Double(normalized.minX), Double(normalized.minY),
+                             Double(normalized.width), Double(normalized.height),
+                             Double(raw.minX), Double(raw.minY), Double(raw.width), Double(raw.height),
+                             scale, pixelWidth, pixelHeight))
+            }
+            return
+        }
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {

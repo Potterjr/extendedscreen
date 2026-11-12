@@ -31,6 +31,19 @@ class DisplayController extends GetxController with WidgetsBindingObserver {
   int? _decoderFps;
   Worker? _refreshWorker;
 
+  // Codec the current decoder was built with, and the watcher that rebuilds
+  // it when the setting moves away from that. The host's codec (0xFC) is
+  // stored in settings by ClientConnectionManager, its only handler.
+  CodecType? _decoderCodec;
+  Worker? _codecWorker;
+
+  // Bumped by every decoder build. A build that finds it changed (or the
+  // controller closed) after one of its awaits has been superseded and stops,
+  // so overlapping builds can't leave the older codec running or subscribe a
+  // second frame listener, and a late one can't revive the decoder after
+  // onClose released it.
+  int _decoderGen = 0;
+
   bool get isAndroid => defaultTargetPlatform == TargetPlatform.android;
 
   @override
@@ -40,6 +53,13 @@ class DisplayController extends GetxController with WidgetsBindingObserver {
     _keepScreenOn();
     if (isAndroid) {
       _initDecoderAndSubscribe();
+      // On a fresh connect this view opens before the host announces its
+      // codec (0xFC), so the first build uses the codec persisted last time;
+      // rebuild once the announced one differs. The native decoder never
+      // switches codec on its own.
+      _codecWorker = ever<CodecType>(_settings.codecRx, (c) {
+        if (c != _decoderCodec) _initDecoderAndSubscribe();
+      });
       // The host's rate (0xFB) can land after the display opens, and the Max
       // preset changes it mid-stream; the display mode must follow, or a
       // 120 Hz stream is shown on a 60 Hz screen and half its frames are
@@ -71,7 +91,13 @@ class DisplayController extends GetxController with WidgetsBindingObserver {
   }
 
   Future<void> _initDecoderAndSubscribe() async {
+    final gen = ++_decoderGen;
+    bool superseded() => isClosed || gen != _decoderGen;
     final decoder = Get.find<VideoDecoderChannel>();
+    // Stop feeding the decoder being replaced; this build subscribes again
+    // once its own decoder is ready.
+    _packetSub?.cancel();
+    _packetSub = null;
     // Size the decoder hint to this device's own panel (landscape-locked, so
     // the long side is the width); the channel doubles logical → physical.
     final panel =
@@ -86,20 +112,35 @@ class DisplayController extends GetxController with WidgetsBindingObserver {
       codec: _settings.codec,
     );
     _decoderFps = config.refreshRate;
+    _decoderCodec = config.codec;
 
     // Release any previous codec/surface before creating a new one so the old
-    // SurfaceView is abandoned cleanly instead of flooding logcat.
+    // SurfaceView is abandoned cleanly instead of flooding logcat. This is
+    // also what lets a rebuild switch codec: the native decoder keeps its
+    // first configuration until it is disposed.
     await decoder.dispose();
+    // Checked before initialize: after onClose's dispose, an initialize would
+    // start a decoder that keeps running after the view is gone.
+    if (superseded()) return;
 
     decoder.onRequestIdr = _cm.requestIdr;
 
     await decoder.initialize(config);
+    if (superseded()) return;
+    // The codec worker starts a newer build when the setting changes, but
+    // re-check here too so a change it missed can't leave this decoder on the
+    // wrong codec.
+    if (_settings.codec != _decoderCodec) {
+      _initDecoderAndSubscribe();
+      return;
+    }
     // A 0xFB that landed during the awaits above was applied first and then
     // overwritten by this init's older rate — reapply the latest.
     final hz = _cm.refreshRateHz.value;
     if (hz != config.refreshRate) {
       _decoderFps = hz;
       await decoder.setRefreshRate(hz);
+      if (superseded()) return;
     }
     _log.i('Decoder ready, subscribing to frame stream');
 
@@ -109,17 +150,6 @@ class DisplayController extends GetxController with WidgetsBindingObserver {
           decoder.feedNal(packet.payload);
           _fpsCounter++;
           frameCount.value++;
-        } else if (packet.type == PacketType.control &&
-            packet.payload.length >= 2 &&
-            packet.payload[0] == 0xFC) {
-          // Host told us which codec it's using — reinitialize decoder.
-          final newCodec = packet.payload[1] == 1 ? CodecType.h265 : CodecType.h264;
-          if (newCodec != _settings.codec) {
-            _settings.setCodec(newCodec);
-            _packetSub?.cancel();
-            _packetSub = null;
-            _initDecoderAndSubscribe();
-          }
         }
       },
       onError: (_) {}, // BaseConnectionManager handles reconnect; ignore here.
@@ -201,6 +231,7 @@ class DisplayController extends GetxController with WidgetsBindingObserver {
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     _gestures.dispose();
     _refreshWorker?.dispose();
+    _codecWorker?.dispose();
     _packetSub?.cancel();
     _fpsTimer?.cancel();
     if (isAndroid) {

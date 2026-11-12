@@ -40,6 +40,16 @@
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
             android:hardwareAccelerated="true"
             android:windowSoftInputMode="adjustResize">
+            <!-- Android 16+ ignores screenOrientation (and SystemChrome's
+                 setRequestedOrientation) on large screens for apps targeting
+                 API 36, so a rotated tablet would squash the landscape stream
+                 into portrait. This opts back into the landscape lock. Apps
+                 targeting 37 can no longer opt out, hence targetSdk = 36 in
+                 build.gradle.kts. It does not stop split-screen or freeform
+                 windows. -->
+            <property
+                android:name="android.window.PROPERTY_COMPAT_ALLOW_RESTRICTED_RESIZABILITY"
+                android:value="true"/>
             <meta-data
                 android:name="io.flutter.embedding.android.NormalTheme"
                 android:resource="@style/NormalTheme"/>
@@ -53,16 +63,24 @@
             android:name="flutterEmbedding"
             android:value="2"/>
 
+        <!-- Both services only serve the Dart side, whose engine is destroyed
+             with MainActivity (not with the task: Back on Home finishes the
+             activity and can leave the task in Recents). MainActivity.onDestroy
+             stops them; stopWithTask also stops them when the task is removed
+             from Recents, in case onDestroy never runs. -->
+
         <!-- Reverse-remote screen capture (MediaProjection) foreground service -->
         <service
             android:name=".plugins.ScreenCaptureService"
             android:exported="false"
+            android:stopWithTask="true"
             android:foregroundServiceType="mediaProjection"/>
 
         <!-- Client keep-alive foreground service (extended-screen decode link) -->
         <service
             android:name=".plugins.ClientKeepAliveService"
             android:exported="false"
+            android:stopWithTask="true"
             android:foregroundServiceType="connectedDevice"/>
     </application>
 

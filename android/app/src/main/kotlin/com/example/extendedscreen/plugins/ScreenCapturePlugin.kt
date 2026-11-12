@@ -37,6 +37,10 @@ object ScreenCapturePlugin : MethodChannel.MethodCallHandler {
     private var projectionData: Intent? = null
     private var pendingProjectionResult: MethodChannel.Result? = null
 
+    // The activity whose engine was registered when consent was granted: the
+    // token and any capture started with it belong to that engine's session.
+    private var sessionOwner: Activity? = null
+
     fun register(engine: FlutterEngine, act: Activity) {
         activity = act
         methodChannel = MethodChannel(engine.dartExecutor.binaryMessenger, CHANNEL)
@@ -102,6 +106,7 @@ object ScreenCapturePlugin : MethodChannel.MethodCallHandler {
         if (resultCode == Activity.RESULT_OK && data != null) {
             projectionResultCode = resultCode
             projectionData = data
+            sessionOwner = activity
             pending?.success(true)
         } else {
             pending?.success(false)
@@ -133,6 +138,31 @@ object ScreenCapturePlugin : MethodChannel.MethodCallHandler {
         act.stopService(Intent(act, ScreenCaptureService::class.java))
         projectionData = null
         projectionResultCode = 0
+        sessionOwner = null
+    }
+
+    /**
+     * From MainActivity.onDestroy: [act]'s engine, and the Dart session that
+     * would have called [stopCapture], is being destroyed. Ends that session's
+     * capture and drops its consent token. Kept, the next share in this
+     * process would skip the consent prompt: on Android 14+ (we target 36) the
+     * token is single-use, so the service would then fail silently; on older
+     * versions it would quietly reuse a dead session's consent. Ownership is
+     * checked because a relaunched activity can register its engine before
+     * the old one's onDestroy runs.
+     */
+    fun onHostDestroyed(act: Activity) {
+        if (sessionOwner === act) {
+            act.stopService(Intent(act, ScreenCaptureService::class.java))
+            projectionData = null
+            projectionResultCode = 0
+            sessionOwner = null
+        }
+        if (activity === act) {
+            activity = null
+            eventSink = null
+            pendingProjectionResult = null
+        }
     }
 
     /** Called by the service for every encoded NAL unit. */

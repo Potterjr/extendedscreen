@@ -22,6 +22,7 @@ class SettingsService extends GetxService {
   static const _keyPanelMaxHz = 'client_panel_max_hz';
   static const _keyPerfOverlay = 'perf_overlay';
   static const _keyHudOverlay = 'hud_overlay';
+  static const _keyKeepMacCursor = 'keep_mac_cursor';
   static const _keyEncodePreset = 'encode_preset';
   static const _keyCodec = 'codec';
   static const _keyLocale = 'locale';
@@ -33,6 +34,9 @@ class SettingsService extends GetxService {
 
   final showPerformanceOverlay = false.obs;
   final showHudOverlay = true.obs;
+  // Host only: the tablet's touches borrow the Mac's single cursor and hand it
+  // back to where the user left it after each gesture (InputInjectPlugin).
+  final keepMacCursor = true.obs;
   // Reactive mirror of the active codec so UI (e.g. the home card) updates live.
   final codecRx = CodecType.h264.obs;
   // Reactive UI language code ('en' / 'th'); drives the language picker.
@@ -63,6 +67,7 @@ class SettingsService extends GetxService {
     _prefs = await SharedPreferences.getInstance();
     showPerformanceOverlay.value = _prefs.getBool(_keyPerfOverlay) ?? false;
     showHudOverlay.value = _prefs.getBool(_keyHudOverlay) ?? true;
+    keepMacCursor.value = _prefs.getBool(_keyKeepMacCursor) ?? true;
     codecRx.value = switch (_prefs.getString(_keyCodec)) {
       'h265' => CodecType.h265,
       'h264' => CodecType.h264,
@@ -254,5 +259,10 @@ class SettingsService extends GetxService {
   Future<void> setShowHudOverlay(bool v) {
     showHudOverlay.value = v;
     return _prefs.setBool(_keyHudOverlay, v);
+  }
+
+  Future<void> setKeepMacCursor(bool v) {
+    keepMacCursor.value = v;
+    return _prefs.setBool(_keyKeepMacCursor, v);
   }
 }

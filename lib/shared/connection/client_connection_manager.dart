@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:typed_data';
 import 'dart:ui';
+import 'package:flutter/widgets.dart' show WidgetsBinding;
 import 'package:get/get.dart';
 import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
 import 'package:extendedscreen/shared/connection/connection_state.dart';
@@ -11,10 +12,11 @@ import 'package:extendedscreen/shared/platform/keepalive_channel.dart';
 import 'package:extendedscreen/modules/remote_screen/client/android_capture_channel.dart';
 import 'package:extendedscreen/modules/extended_screen/client/video_decoder_channel.dart';
 
-/// CLIENT role (Android): dials into the adb-reverse tunnel, sends its desired
-/// config in the HELLO, then decodes + renders frames (in DisplayController)
-/// and forwards touch/keyboard input back to the host. The Android side is the
-/// control surface, so settings changes here drive the host via [reconnect].
+/// CLIENT role (Android): dials into the adb-reverse tunnel, reports its native
+/// panel size + top refresh rate in the HELLO, then decodes + renders frames
+/// (in DisplayController) and forwards touch input back to the host. The macOS
+/// host is the control surface: stream settings are edited only there, and the
+/// values this side needs arrive as control packets (see [onRolePacket]).
 class ClientConnectionManager extends BaseConnectionManager {
   @override
   bool get isHost => false;
@@ -103,8 +105,19 @@ class ClientConnectionManager extends BaseConnectionManager {
 
   /// Physical screen size in landscape orientation (the client is landscape-
   /// locked, but normalize anyway in case this runs before rotation applies).
+  /// Taken from the display, not the Flutter view: outside immersive mode on
+  /// Android 14 and earlier the view leaves out the navigation bar, so the
+  /// first HELLO after launch reported a shorter panel than later ones.
   ({int w, int h}) _nativePanelSize() {
-    final size = PlatformDispatcher.instance.views.first.physicalSize;
+    // Via the binding (the same dispatcher at runtime) so tests can set it.
+    final view = WidgetsBinding.instance.platformDispatcher.views.first;
+    var size = Size.zero;
+    try {
+      size = view.display.size;
+    } catch (_) {
+      // The engine hasn't reported this view's display; use the view below.
+    }
+    if (size.isEmpty) size = view.physicalSize;
     final long = size.longestSide.round();
     final short = size.shortestSide.round();
     return (w: long, h: short);
@@ -176,7 +189,8 @@ class ClientConnectionManager extends BaseConnectionManager {
     if (packet.type != PacketType.control || packet.payload.isEmpty) return;
     final p = packet.payload;
 
-    // 0xFE — Host → Tablet: capture restarted, request IDR to resume decode.
+    // 0xFE — Host → Tablet: reload, request IDR to resume decode. Legacy: the
+    // host no longer sends it (after a capture restart it forces its own IDR).
     if (p[0] == 0xFE) {
       requestIdr();
       return;
@@ -220,13 +234,19 @@ class ClientConnectionManager extends BaseConnectionManager {
       return;
     }
 
-    // 0xFC + codec_byte — Host → Tablet: codec changed, reinitialize decoder.
+    // 0xFC + codec_byte — Host → Tablet: the codec the host encodes with. This
+    // is its only handler: it just stores the codec. DisplayController builds
+    // its decoder from that setting and watches it, rebuilding whenever it
+    // differs from the codec the running decoder was built with — e.g. when
+    // the display opened (on `streaming`, before this arrives) with the codec
+    // persisted from an earlier session.
     if (p.length >= 2 && p[0] == 0xFC) {
       settings.setCodec(p[1] == 1 ? CodecType.h265 : CodecType.h264);
       return;
     }
 
-    // 0xFB + refreshRate — Host → Tablet: capture refresh rate (Hz) for the HUD.
+    // 0xFB + refreshRate — Host → Tablet: stream refresh rate (Hz). Shown in
+    // the HUD and followed by DisplayController, which sets the panel's mode.
     if (p.length >= 2 && p[0] == 0xFB) {
       refreshRateHz.value = p[1];
       return;
