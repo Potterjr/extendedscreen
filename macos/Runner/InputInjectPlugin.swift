@@ -363,9 +363,12 @@ class InputInjectPlugin: NSObject {
 
     /// The pointer position a physical mouse moves from can keep the scroll's
     /// anchor even though the move back right behind it shows the cursor at
-    /// home (on device, the next nudge of the Mac's mouse jumped the cursor
-    /// to the tablet's display). Once the scrolls stop, one more move to home,
-    /// which a tap's return shows does take, brings the two together.
+    /// home: on device, the next nudge of the Mac's mouse, seconds later,
+    /// jumped the cursor to the tablet's display. Another posted move to home
+    /// doesn't fix it (the cursor reads there already, so nothing moves), so
+    /// once the scrolls stop the cursor is warped there, which sets that
+    /// position directly. A warp holds back the user's own mouse for a moment
+    /// unless the mouse is associated with the cursor again right after.
     private func settleAfterScrolls(at home: CGPoint) {
         scrollSettleWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
@@ -377,7 +380,8 @@ class InputInjectPlugin: NSObject {
                   NSEvent.pressedMouseButtons == 0,
                   let now = CGEvent(source: nil)?.location,
                   Self.near(now, home, within: 1) else { return }
-            self.postMouse(.mouseMoved, at: home, button: .left, flags: [], clickState: nil)
+            CGWarpMouseCursorPosition(home)
+            CGAssociateMouseAndMouseCursorPosition(1)
         }
         scrollSettleWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.scrollSettleDelay, execute: work)

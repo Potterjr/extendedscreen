@@ -66,7 +66,7 @@ Disconnect on the tablet only drops the link. The Mac returns to *Handshaking* a
 
 There is no right-click and no keyboard input from the tablet yet.
 
-The Mac has only one cursor, and a click or a drag has to move it. With **Keep the Mac cursor in place** on (the default, under Settings → Touch on the Mac), a tap or a drag borrows the cursor and puts it back where you left it about a tenth of a second after the finger lifts, and scrolling and pinching put it straight back after each step, so at most it flickers for a few milliseconds. If you move the Mac's own mouse or trackpad, or press its button, while a tap or drag has the cursor, the cursor stays with you. Turn the setting off to leave the cursor where you last touched. With it on, hover effects (tooltips, menus that open on hover) don't stay up after a tap, because the cursor leaves.
+The Mac has only one cursor, and a click or a drag has to move it. With **Keep the Mac cursor in place** on (the default, under Settings → Touch on the Mac), a tap or a drag borrows the cursor and puts it back where you left it about a tenth of a second after the finger lifts, and scrolling and pinching put it straight back after each step, so at most it flickers for a few milliseconds. While you hold the Mac's own mouse or trackpad button, scrolling on the tablet is ignored so it can't pull your drag away. If you move the Mac's own mouse or trackpad, or press its button, while a tap or drag has the cursor, the cursor stays with you. Turn the setting off to leave the cursor where you last touched. With it on, hover effects (tooltips, menus that open on hover) don't stay up after a tap, because the cursor leaves.
 
 The bar at the top of the display (the HUD) has a Back button, the stream rate in Hz, received frames per second, round-trip latency, frames dropped per second, the tablet's battery and a Disconnect button. It shows for about 4 seconds when the display opens, then hides behind a small tab at the top centre. Tap the tab to bring it back; touching the bar keeps it up. While it is hidden you can tap the Mac's menu bar, except right under the tab. Settings → Show HUD on the Mac only hides the numbers: with it off, the tab opens a bar with just Back and Disconnect.
 
@@ -106,7 +106,7 @@ All stream settings are on the Mac, behind the gear icon. The tablet's Settings 
 | Codec | H.264, H.265 | A toggle at the top of the Encode Preset sheet (the Codec row under Info is read-only). Until you choose one or select Max, it is set when the Mac app starts: H.265 if the preset is Max, H.264 otherwise. Switching to another preset keeps the current codec. |
 | Performance Overlay | Off by default | Flutter's performance graphs, drawn on both devices. |
 | Show HUD | On by default | The numbers on the tablet's HUD bar. When off, the bar keeps only Back and Disconnect. |
-| Keep the Mac cursor in place | On by default | Under Touch. Taps and drags on the tablet give the Mac's cursor back as the finger lifts; scrolls and pinches don't take it (see *On the tablet*). |
+| Keep the Mac cursor in place | On by default | Under Touch. Taps and drags on the tablet give the Mac's cursor back as the finger lifts; scrolls and pinches hand it straight back (see *On the tablet*). |
 
 Changing the Mode, preset, codec or a custom value drops the link and reconnects to apply it. The two overlay switches and the cursor switch apply live.
 
