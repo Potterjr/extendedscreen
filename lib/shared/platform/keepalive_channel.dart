@@ -24,4 +24,15 @@ class KeepAliveChannel {
       await _channel.invokeMethod('stop');
     } catch (_) {}
   }
+
+  /// While [enabled], Android keeps Wi-Fi out of power saving (a low-latency
+  /// Wi-Fi lock, honoured only while the app is in the foreground with the
+  /// screen on). A dozing radio holds each arriving frame until it wakes, so
+  /// a Wi-Fi stream's latency jumps by tens of milliseconds now and then.
+  static Future<void> setLowLatencyWifi(bool enabled) async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _channel.invokeMethod('setLowLatencyWifi', {'enabled': enabled});
+    } catch (_) {}
+  }
 }

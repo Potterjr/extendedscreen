@@ -8,7 +8,11 @@ import 'package:extendedscreen/shared/connection/connection_state.dart';
 /// checklist was more scrolling than the information was worth while waiting.
 class ConnectionSteps extends StatelessWidget {
   final ConnectionPhase phase;
-  const ConnectionSteps({super.key, required this.phase});
+
+  /// Dialling the Mac over Wi-Fi instead of through the USB tunnel.
+  final bool wifi;
+
+  const ConnectionSteps({super.key, required this.phase, this.wifi = false});
 
   /// 0.0–1.0 progress toward streaming, for the bar under the status row.
   double get _progress => switch (phase) {
@@ -23,8 +27,9 @@ class ConnectionSteps extends StatelessWidget {
           'step_ready_detail'.tr,
         ConnectionPhase.configuring => 'step_configure_detail'.tr,
         ConnectionPhase.error => 'phase_error'.tr,
-        ConnectionPhase.disconnected => 'conn_card_plug_prompt'.tr,
-        _ => 'step_connect_detail'.tr,
+        ConnectionPhase.disconnected =>
+          wifi ? 'conn_card_wifi_prompt'.tr : 'conn_card_plug_prompt'.tr,
+        _ => wifi ? 'step_connect_detail_wifi'.tr : 'step_connect_detail'.tr,
       };
 
   @override

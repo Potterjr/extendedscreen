@@ -1,11 +1,45 @@
+import 'dart:convert';
+
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
+import 'package:extendedscreen/shared/connection/usb_session_service.dart';
 import 'package:extendedscreen/shared/models/device_model.dart';
 import 'package:extendedscreen/shared/services/logger_service.dart';
+
+/// What became of something handed to adb for the tablet's app: a Wi-Fi
+/// pairing or a USB session key. The numbers are the broadcast result codes
+/// `WifiPairingReceiver.kt` sets.
+enum AdbDelivery {
+  /// The tablet's app took it.
+  stored,
+
+  /// The app got it and would not take it (a pairing: it knows this Mac's id
+  /// with another certificate or token; either: it could not read the
+  /// payload).
+  refused,
+
+  /// Nothing took it: a build without the receiver, the app not running, or
+  /// adb failed.
+  notDelivered;
+
+  static AdbDelivery fromResultCode(int? code) => switch (code) {
+        1 => stored,
+        2 => refused,
+        _ => notDelivered,
+      };
+}
 
 class AdbService extends GetxService {
   static const _channel = MethodChannel('extended_screen/adb');
   final _log = Get.find<LoggerService>();
+
+  /// The Android app's receiver for what this Mac hands it through adb (the
+  /// manifest's `.plugins.WifiPairingReceiver`, which only the shell may send
+  /// to), and its two actions: a Wi-Fi pairing, and a USB session key.
+  static const pairingReceiver =
+      'com.example.extendedscreen/.plugins.WifiPairingReceiver';
+  static const pairingAction = 'com.example.extendedscreen.WIFI_PAIR';
+  static const sessionAction = 'com.example.extendedscreen.USB_SESSION';
 
   /// Returns list of connected ADB devices.
   Future<List<DeviceModel>> listDevices() async {
@@ -80,6 +114,60 @@ class AdbService extends GetxService {
   /// Types literal text on the device (spaces must be escaped as %s for `input`).
   Future<void> inputText({required String serial, required String text}) =>
       _shellInput(serial, ['text', text.replaceAll(' ', '%s')]);
+
+  // ─── Wi-Fi pairing ────────────────────────────────────────────────────────
+
+  /// Hands a Wi-Fi pairing [payload] to this app on the device [serial], and
+  /// to nothing else: `am broadcast` names the app's receiver, and the
+  /// receiver only accepts the shell as sender. That is the proof the tablet
+  /// needs that a pairing came from the Mac on the other end of the cable,
+  /// and it keeps the token away from whatever else on the tablet has dialled
+  /// the tunnel.
+  ///
+  /// The command reaches the device's shell on adb's stdin, so the token
+  /// never shows up in this Mac's process list.
+  Future<AdbDelivery> deliverWifiPairing({
+    required String serial,
+    required Uint8List payload,
+  }) =>
+      _broadcast(serial, pairingAction, payload);
+
+  // ─── USB session key ──────────────────────────────────────────────────────
+
+  /// Hands this USB attempt's [key] to this app on the device [serial], the
+  /// same way and for the same reason as a Wi-Fi pairing: only the app's
+  /// receiver gets it, and the app knows it came from adb. See
+  /// [UsbSessionService].
+  Future<AdbDelivery> deliverUsbSessionKey({
+    required String serial,
+    required Uint8List key,
+  }) =>
+      _broadcast(serial, sessionAction, UsbSessionService.buildDelivery(key));
+
+  Future<AdbDelivery> _broadcast(
+      String serial, String action, Uint8List payload) async {
+    // base64url: letters, digits, `-`, `_` and `=`, nothing a shell reads.
+    final script = "am broadcast -n $pairingReceiver -a $action "
+        "--es payload '${base64Url.encode(payload)}'\n";
+    try {
+      final out = await _channel.invokeMethod<String>('shellScript', {
+        'serial': serial,
+        'script': script,
+      });
+      return AdbDelivery.fromResultCode(broadcastResultCode(out ?? ''));
+    } catch (e) {
+      _log.w('ADB broadcast ($action) failed: $e');
+      return AdbDelivery.notDelivered;
+    }
+  }
+
+  /// The result code in `am broadcast`'s output ("Broadcast completed:
+  /// result=1"), or null when it reports none. With no receiver it is 0.
+  static int? broadcastResultCode(String output) {
+    final match =
+        RegExp(r'Broadcast completed: result=(-?\d+)').firstMatch(output);
+    return match == null ? null : int.tryParse(match.group(1)!);
+  }
 
   Future<void> _shellInput(String serial, List<String> args) async {
     try {

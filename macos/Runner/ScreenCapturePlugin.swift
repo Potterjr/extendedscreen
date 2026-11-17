@@ -132,6 +132,14 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
     private var pendingEncodeFrames: Int32 = 0
     private static let maxPendingEncodeFrames: Int32 = 10
 
+    // Over Wi-Fi the host's BitrateAdapter moves the encoder's average
+    // bitrate to what the link carries. setBitrate (main thread) leaves the
+    // new value here; the timer thread applies it before its next encode.
+    // 0: nothing waiting. [encoderBitrate] is what the session runs at.
+    private var requestedBitrate = 0
+    private var encoderBitrate = 0
+    private let bitrateLock = NSLock()
+
     // High-resolution Mach thread drives encode at exactly targetFps.
     // GCD DispatchSourceTimer is capped by the OS at ~60fps; mach_wait_until bypasses this.
     private var encodeTimer: DispatchSourceTimer?
@@ -239,6 +247,17 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
             result(nil)
         case "requestIdr":
             forceKeyframe = true
+            result(nil)
+        case "setBitrate":
+            // Applied by the timer thread before its next encode (see
+            // onDisplayLinkTick), the thread every other call into the
+            // session comes from, so nothing here touches the session.
+            if let args = call.arguments as? [String: Any],
+               let bps = args["bitrate"] as? Int, bps > 0 {
+                bitrateLock.lock()
+                requestedBitrate = min(bps, Int(Int32.max))
+                bitrateLock.unlock()
+            }
             result(nil)
         case "createVirtualDisplay":
             guard let args = call.arguments as? [String: Any] else {
@@ -573,6 +592,7 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
             }
         }
         guard let session = compressionSession else { return }
+        applyRequestedBitrate(session)
 
         bufferLock.lock()
         let pixelBuffer = latestPixelBuffer
@@ -659,6 +679,28 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
                   let higher = rates.first(where: { $0 > targetFps }) {
             lastStepUpAt = Date()
             setAdaptiveRate(higher, reason: "encoder recovered")
+        }
+    }
+
+    /// Timer thread: hands the session a bitrate setBitrate left waiting. VT
+    /// rate control takes it from the next frame on; nothing is rebuilt and
+    /// no keyframe is forced.
+    private func applyRequestedBitrate(_ session: VTCompressionSession) {
+        bitrateLock.lock()
+        let requested = requestedBitrate
+        let current = encoderBitrate
+        requestedBitrate = 0
+        bitrateLock.unlock()
+        guard requested > 0, requested != current else { return }
+        let status = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate,
+                                          value: NSNumber(value: requested))
+        if status == noErr {
+            esLog("[ExtendedScreen] bitrate: \(current / 1000) → \(requested / 1000) kbps (fitting the Wi-Fi link)")
+            bitrateLock.lock()
+            encoderBitrate = requested
+            bitrateLock.unlock()
+        } else {
+            esLog("[ExtendedScreen] WARNING bitrate \(requested / 1000) kbps not applied (status \(status))")
         }
     }
 
@@ -795,6 +837,12 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate,       value: NSNumber(value: bitrate))
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ExpectedFrameRate,    value: NSNumber(value: fps))
         VTCompressionSessionPrepareToEncodeFrames(s)
+        // A new session runs at the bitrate it was made with; a value set for
+        // the session before it does not carry over.
+        bitrateLock.lock()
+        requestedBitrate = 0
+        encoderBitrate = bitrate
+        bitrateLock.unlock()
         compressionSession = s
         esLog("[ExtendedScreen] Encoder: \(isHEVC ? "HEVC" : "H264") \(width)x\(height) \(fps)fps \(bitrate/1000)kbps")
     }

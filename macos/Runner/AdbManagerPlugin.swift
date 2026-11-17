@@ -30,8 +30,14 @@ class AdbManagerPlugin: NSObject {
                   let serial = args["serial"] as? String else {
                 result(nil); return
             }
-            removeForward(serial: serial)
-            result(nil)
+            // Answered once adb is done, so the caller's await orders the
+            // removal before anything that follows it: a reconnect's own
+            // `adb reverse` must not be undone by this one landing late, or
+            // the new attempt waits for a tablet with no tunnel to dial
+            // (and its session key would rest on a port adb no longer
+            // holds). The timeout keeps a hung adb from stalling teardown.
+            adbRun(args: ["-s", serial, "reverse", "--remove-all"],
+                   timeout: 5) { _, _ in result(nil) }
         case "shellInput":
             guard let args = call.arguments as? [String: Any],
                   let serial = args["serial"] as? String,
@@ -43,15 +49,43 @@ class AdbManagerPlugin: NSObject {
             // Fire-and-forget so a dropped tap never stalls the control loop.
             adbRun(args: ["-s", serial, "shell", "input"] + inputArgs) { _, _ in }
             result(nil)
+        case "shellScript":
+            guard let args = call.arguments as? [String: Any],
+                  let serial = args["serial"] as? String,
+                  let script = args["script"] as? String,
+                  let input = script.data(using: .utf8),
+                  input.count <= AdbManagerPlugin.maxScriptBytes else {
+                result(FlutterError(code: "BAD_ARGS", message: nil, details: nil))
+                return
+            }
+            // The script goes to the device's shell on stdin, not in adb's
+            // arguments: it can carry the Wi-Fi pairing token, and every
+            // process on this Mac can read another's arguments (`ps`). -T
+            // means no terminal: the shell runs the lines and exits at EOF.
+            adbRun(args: ["-s", serial, "shell", "-T"], stdin: input,
+                   timeout: 20) { output, error in
+                if let err = error {
+                    result(FlutterError(code: "ADB_FAILED", message: err, details: nil))
+                } else {
+                    result(output ?? "")
+                }
+            }
         default:
             result(FlutterMethodNotImplemented)
         }
     }
 
+    // Well inside a pipe's buffer (16 KB at least), which is what lets
+    // adbRun write the whole script before adb has started.
+    private static let maxScriptBytes = 8 * 1024
+
     // MARK: - ADB helpers
 
     private func listDevices(result: @escaping FlutterResult) {
-        adbRun(args: ["devices", "-l"]) { output, error in
+        // Bounded: a wedged adb must not hold up the picker, a USB attempt's
+        // detectingDevice step or the launch's auto-connect for ever (a
+        // terminated adb answers as no devices).
+        adbRun(args: ["devices", "-l"], timeout: 10) { output, error in
             guard error == nil, let out = output else {
                 result([])
                 return
@@ -84,13 +118,13 @@ class AdbManagerPlugin: NSObject {
         }
     }
 
-    private func removeForward(serial: String) {
-        adbRun(args: ["-s", serial, "reverse", "--remove-all"]) { _, _ in }
-    }
-
     // MARK: - Process runner
 
-    private func adbRun(args: [String], completion: @escaping (String?, String?) -> Void) {
+    /// `stdin` is written to adb's standard input. `timeout` (seconds) ends an
+    /// adb that has not exited by then, e.g. one waiting on a device that
+    /// went away mid-command.
+    private func adbRun(args: [String], stdin: Data? = nil, timeout: TimeInterval? = nil,
+                        completion: @escaping (String?, String?) -> Void) {
         let adbPaths = ["/usr/local/bin/adb", "/opt/homebrew/bin/adb",
                         "/Users/\(NSUserName())/Library/Android/sdk/platform-tools/adb"]
         guard let adb = adbPaths.first(where: { FileManager.default.fileExists(atPath: $0) }) else {
@@ -106,7 +140,22 @@ class AdbManagerPlugin: NSObject {
             proc.standardOutput = out
             proc.standardError  = err
             do {
+                if let input = stdin {
+                    // Written and closed before adb exists: the pipe holds it
+                    // (the caller keeps it small), and this process still
+                    // owns the reading end, so an adb that exits without
+                    // reading can't turn the write into a SIGPIPE.
+                    let pipe = Pipe()
+                    try pipe.fileHandleForWriting.write(contentsOf: input)
+                    try pipe.fileHandleForWriting.close()
+                    proc.standardInput = pipe
+                }
                 try proc.run()
+                if let limit = timeout {
+                    DispatchQueue.global().asyncAfter(deadline: .now() + limit) {
+                        if proc.isRunning { proc.terminate() }
+                    }
+                }
                 proc.waitUntilExit()
                 let stdout = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)
                 let stderr = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)

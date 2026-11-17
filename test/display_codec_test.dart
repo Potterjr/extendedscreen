@@ -11,6 +11,7 @@ import 'package:extendedscreen/modules/remote_screen/client/android_capture_chan
 import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
 import 'package:extendedscreen/shared/connection/client_connection_manager.dart';
 import 'package:extendedscreen/shared/connection/socket_service.dart';
+import 'package:extendedscreen/shared/connection/usb_session_service.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
 import 'package:extendedscreen/shared/models/packet_model.dart';
 import 'package:extendedscreen/shared/services/logger_service.dart';
@@ -30,8 +31,12 @@ class _QuietLogger extends LoggerService {
 
 /// A host link that is always up: [receive] plays a packet from the host on
 /// the same broadcast stream the real socket uses, and [sent] records what
-/// the client sent.
+/// the client sent. Like a Mac that holds [sessionKey], it answers the hello
+/// a USB session opens with.
 class _LoopbackSocket extends SocketService {
+  _LoopbackSocket(this.sessionKey);
+
+  final Uint8List sessionKey;
   final _packets = StreamController<Packet>.broadcast();
   final sent = <Packet>[];
 
@@ -42,7 +47,18 @@ class _LoopbackSocket extends SocketService {
   Future<void> connect(String host, int port) async {}
 
   @override
-  void send(Packet packet) => sent.add(packet);
+  void send(Packet packet) {
+    sent.add(packet);
+    final p = packet.payload;
+    if (packet.type == PacketType.control &&
+        p.isNotEmpty &&
+        p[0] == UsbSessionService.helloCommand) {
+      final nonce = UsbSessionService.verifyHello(sessionKey, p);
+      if (nonce != null) {
+        receive(UsbSessionService.buildAnswer(sessionKey, nonce));
+      }
+    }
+  }
 
   @override
   Future<void> disconnect() async {}
@@ -120,7 +136,11 @@ void main() {
     settings = SettingsService();
     await settings.init();
     Get.put<SettingsService>(settings);
-    socket = _LoopbackSocket();
+    // The key adb delivered for this session, held by both ends.
+    final sessionKey = UsbSessionService.newKey();
+    Get.put(UsbSessionService())
+        .accept(UsbSessionService.buildDelivery(sessionKey));
+    socket = _LoopbackSocket(sessionKey);
     Get.put<SocketService>(socket);
     Get.put<AndroidCaptureChannel>(_IdleCapture());
 

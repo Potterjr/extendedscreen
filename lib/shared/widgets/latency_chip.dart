@@ -3,7 +3,16 @@ import 'package:get/get.dart';
 
 class LatencyChip extends StatelessWidget {
   final int latencyMs;
-  const LatencyChip({super.key, required this.latencyMs});
+
+  /// Which link the second chip names.
+  final bool wifi;
+
+  /// The stream's bitrate in bits/s, shown with the link when known (the
+  /// host over Wi-Fi, where it follows the link).
+  final int? bitrate;
+
+  const LatencyChip(
+      {super.key, required this.latencyMs, this.wifi = false, this.bitrate});
 
   @override
   Widget build(BuildContext context) {
@@ -48,10 +57,15 @@ class LatencyChip extends StatelessWidget {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(Icons.usb, size: 14, color: Colors.white.withValues(alpha: 0.5)),
+              Icon(wifi ? Icons.wifi : Icons.usb,
+                  size: 14, color: Colors.white.withValues(alpha: 0.5)),
               const SizedBox(width: 4),
               Text(
-                'USB-C',
+                [
+                  wifi ? 'Wi-Fi' : 'USB-C',
+                  if (bitrate != null)
+                    '${(bitrate! / 1000000).toStringAsFixed(bitrate! < 10000000 ? 1 : 0)} Mbps',
+                ].join(' · '),
                 style: TextStyle(
                   color: Colors.white.withValues(alpha: 0.5),
                   fontSize: 13,

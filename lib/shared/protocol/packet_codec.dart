@@ -81,7 +81,9 @@ class PacketCodec {
   /// Returns null if the payload is too short to be a valid ping.
   static Packet? heartbeatPong(Uint8List pingPayload) {
     if (pingPayload.length < 9) return null;
-    final pong = Uint8List.fromList(pingPayload);
+    // Only the nine bytes that are the ping: a peer must not be able to make
+    // this side send back whatever it appended.
+    final pong = Uint8List.fromList(pingPayload.sublist(0, 9));
     pong[0] = 0x01;
     return Packet(
       type: PacketType.heartbeat,

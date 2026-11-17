@@ -4,6 +4,7 @@ import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
 import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
+import 'package:extendedscreen/shared/models/link_type.dart';
 import 'package:extendedscreen/shared/platform/permissions_channel.dart';
 import 'package:extendedscreen/shared/services/settings_service.dart';
 
@@ -70,6 +71,9 @@ class SettingsController extends GetxController {
   /// Settings are adjustable only on the host (macOS); the client is read-only.
   bool get isHost => _cm.isHost;
 
+  /// The link this device is set to use (picked on Home), for the Info rows.
+  bool get isWifi => _settings.linkTypeRx.value == LinkType.wifi;
+
   /// Name of the target (client) device: the connected device's model, else
   /// the last connected one, else a generic fallback.
   String get targetDeviceName {
@@ -78,6 +82,17 @@ class SettingsController extends GetxController {
     final last = _settings.lastDeviceName;
     if (last != null && last.isNotEmpty) return last;
     return 'device_default_name'.tr;
+  }
+
+  /// Host: the Wi-Fi identity was reset while this screen was open, so the
+  /// row can say what to do next instead of looking as if nothing happened.
+  final wifiPairingReset = false.obs;
+
+  /// Host: discard this Mac's Wi-Fi identity (the view asked first). Every
+  /// paired tablet has to connect over USB once to pair again.
+  Future<void> resetWifiPairing() async {
+    await _cm.resetWifiIdentity();
+    wifiPairingReset.value = true;
   }
 
   final isApplying = false.obs;

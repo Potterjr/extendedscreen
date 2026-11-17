@@ -15,12 +15,17 @@ class ConnectionCard extends StatelessWidget {
   /// Active codec label shown in the subtitle while connected (e.g. "H.265").
   final String codecLabel;
 
+  /// The link in use, for the subtitle: its name while connected, and what to
+  /// do to get connected (plug in, or join the same Wi-Fi) while not.
+  final bool wifi;
+
   const ConnectionCard({
     super.key,
     required this.phase,
     required this.onTap,
     this.canConnect = true,
     this.codecLabel = 'H.264',
+    this.wifi = false,
   });
 
   @override
@@ -71,9 +76,13 @@ class ConnectionCard extends StatelessWidget {
                 const SizedBox(height: 2),
                 Text(
                   isActive
-                      ? 'conn_card_active_subtitle'
-                          .trParams({'codec': codecLabel})
-                      : 'conn_card_plug_prompt'.tr,
+                      ? 'conn_card_active_subtitle'.trParams({
+                          'link': wifi ? 'Wi-Fi' : 'USB-C',
+                          'codec': codecLabel,
+                        })
+                      : wifi
+                          ? 'conn_card_wifi_prompt'.tr
+                          : 'conn_card_plug_prompt'.tr,
                   style: TextStyle(
                     color: Colors.white.withValues(alpha: 0.4),
                     fontSize: 13,
@@ -85,6 +94,12 @@ class ConnectionCard extends StatelessWidget {
           const SizedBox(width: 12),
           if (_action case final action?)
             TextButton(
+              // Keyed by what it does: the phase can change between a
+              // finger going down and coming up (an auto-connect starting, a
+              // redial), and without the key that touch would land on the
+              // new meaning, a press on Connect arriving as Cancel. With it
+              // the button is replaced and the touch does nothing.
+              key: ValueKey(action.label),
               onPressed: onTap,
               style: TextButton.styleFrom(foregroundColor: action.color),
               child: Text(action.label),

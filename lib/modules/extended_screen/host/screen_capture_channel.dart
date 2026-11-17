@@ -88,6 +88,16 @@ class ScreenCaptureChannel extends GetxService {
     } catch (_) {}
   }
 
+  /// Changes the running encoder's average bitrate (bits per second) without
+  /// restarting it: the next frame it encodes is already held to the new
+  /// rate. Used over Wi-Fi to fit the stream to the link (BitrateAdapter).
+  /// The next startCapture uses its own bitrate again.
+  Future<void> setBitrate(int bitsPerSecond) async {
+    try {
+      await _channel.invokeMethod('setBitrate', {'bitrate': bitsPerSecond});
+    } catch (_) {}
+  }
+
   /// Returns false when the virtual display's mode settings weren't applied;
   /// capture then falls back to the main display if the display never shows
   /// up in ScreenCaptureKit.

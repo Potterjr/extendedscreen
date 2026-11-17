@@ -3,6 +3,7 @@ import 'package:get/get.dart';
 import 'package:extendedscreen/shared/features/settings/controllers/settings_controller.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
 import 'package:extendedscreen/shared/services/app_translations.dart';
+import 'package:extendedscreen/shared/widgets/confirm_dialog.dart';
 
 class SettingsView extends GetView<SettingsController> {
   const SettingsView({super.key});
@@ -128,6 +129,18 @@ class SettingsView extends GetView<SettingsController> {
                     ],
                   )
                 : const SizedBox.shrink()),
+            const SizedBox(height: 16),
+            _SectionHeader('settings_section_wifi'.tr),
+            _SettingsCard(children: [
+              Obx(() => _ActionRow(
+                    label: 'settings_wifi_reset'.tr,
+                    description: controller.wifiPairingReset.value
+                        ? 'settings_wifi_reset_done'.tr
+                        : 'settings_wifi_reset_desc'.tr,
+                    icon: Icons.restart_alt,
+                    onTap: () => _confirmWifiReset(context),
+                  )),
+            ]),
           ] else ...[
             _SectionHeader('settings_section_display'.tr),
             _SettingsCard(children: [
@@ -197,7 +210,10 @@ class SettingsView extends GetView<SettingsController> {
           const SizedBox(height: 16),
           _SectionHeader('settings_section_info'.tr),
           _SettingsCard(children: [
-            _InfoRow(label: 'settings_transport'.tr, value: 'USB-C / ADB'),
+            Obx(() => _InfoRow(
+                  label: 'settings_transport'.tr,
+                  value: controller.isWifi ? 'Wi-Fi / TLS' : 'USB-C / ADB',
+                )),
             const Divider(height: 1, color: Colors.white12),
             Obx(() => _InfoRow(
                   label: 'settings_codec'.tr,
@@ -219,6 +235,18 @@ class SettingsView extends GetView<SettingsController> {
         ],
       ),
     );
+  }
+
+  /// Every paired tablet stops connecting over Wi-Fi, and only a cable gets
+  /// one back: ask first.
+  Future<void> _confirmWifiReset(BuildContext context) async {
+    final confirmed = await showConfirmDialog(
+      context,
+      title: 'wifi_reset_title'.tr,
+      message: 'wifi_reset_message'.tr,
+      confirmLabel: 'wifi_reset_confirm'.tr,
+    );
+    if (confirmed) await controller.resetWifiPairing();
   }
 
   void _showPresetPicker(BuildContext context) {
@@ -411,6 +439,51 @@ class _ToggleRow extends StatelessWidget {
               activeTrackColor: const Color(0xFF00C8FF).withValues(alpha: 0.4),
             ),
           ],
+        ),
+      );
+}
+
+/// A row that does something when tapped, with a line saying what.
+class _ActionRow extends StatelessWidget {
+  final String label;
+  final String description;
+  final IconData icon;
+  final VoidCallback onTap;
+
+  const _ActionRow({
+    required this.label,
+    required this.description,
+    required this.icon,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) => InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(label,
+                        style:
+                            const TextStyle(color: Colors.white, fontSize: 15)),
+                    const SizedBox(height: 2),
+                    Text(description,
+                        style: TextStyle(
+                            color: Colors.white.withValues(alpha: 0.45),
+                            fontSize: 12)),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 12),
+              Icon(icon, size: 20, color: Colors.white.withValues(alpha: 0.45)),
+            ],
+          ),
         ),
       );
 }

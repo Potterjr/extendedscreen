@@ -17,6 +17,17 @@ class PermissionInfo {
 class PermissionsChannel {
   static const _channel = MethodChannel('extended_screen/permissions');
 
+  /// What the macOS host needs before capture can start: Screen Recording
+  /// and Accessibility (input injection).
+  static const hostRequired = ['screen_recording', 'accessibility'];
+
+  /// Whether every one of [hostRequired] is granted. False when they can't
+  /// be read.
+  Future<bool> hostGranted() async {
+    final status = await checkPermissions();
+    return hostRequired.every((key) => status[key] ?? false);
+  }
+
   Future<Map<String, bool>> checkPermissions() async {
     try {
       final result = await _channel.invokeMethod<Map>('checkPermissions');

@@ -19,6 +19,16 @@ class MainFlutterWindow: NSWindow {
     RemoteVideoPlugin.register(
       with: flutterViewController.registrar(forPlugin: "RemoteVideoPlugin"))
 
+    // Start Dart now, with every plugin registered, instead of when the
+    // window first appears (FlutterViewController launches the engine in
+    // viewWillAppear). An app launched hidden (a login item set to hide,
+    // `open -j`) has no window on screen, and then main() would not run at
+    // all, so the host would not start listening until someone opened the
+    // window. viewWillAppear skips an engine that is already running.
+    if !flutterViewController.engine.run(withEntrypoint: nil) {
+      NSLog("extendedscreen: the Flutter engine did not start")
+    }
+
     super.awakeFromNib()
   }
 }

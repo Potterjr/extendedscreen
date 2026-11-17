@@ -9,7 +9,9 @@ import com.example.extendedscreen.plugins.PermissionsPlugin
 import com.example.extendedscreen.plugins.ScreenCapturePlugin
 import com.example.extendedscreen.plugins.ClientKeepAlivePlugin
 import com.example.extendedscreen.plugins.ClientKeepAliveService
+import com.example.extendedscreen.plugins.WifiLatencyLock
 import com.example.extendedscreen.plugins.BatteryStatusPlugin
+import com.example.extendedscreen.plugins.WifiPairingPlugin
 
 class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -20,6 +22,7 @@ class MainActivity : FlutterActivity() {
         ScreenCapturePlugin.register(flutterEngine, this)
         ClientKeepAlivePlugin.register(flutterEngine, this)
         BatteryStatusPlugin.register(flutterEngine, this)
+        WifiPairingPlugin.register(flutterEngine, this)
     }
 
     // Route the MediaProjection consent result to the capture plugin.
@@ -42,10 +45,17 @@ class MainActivity : FlutterActivity() {
         // reuse the consent token (single-use on Android 14+), so a capture
         // can't be handed over.
         ScreenCapturePlugin.onHostDestroyed(this)
+        // A broadcast from adb (a pairing, a USB session key) must not be
+        // handed to an engine that is gone: nothing would answer it. A
+        // relaunched activity registers again.
+        WifiPairingPlugin.onHostDestroyed(this)
         // A configuration change relaunches the activity at once and the new
         // engine's connect calls KeepAliveChannel.start() again, so the
         // keep-alive stays up across it.
         if (!isChangingConfigurations) ClientKeepAliveService.stop(this)
+        // Nothing left to release it once the engine is gone; a relaunched
+        // activity's session takes it again when it streams over Wi-Fi.
+        WifiLatencyLock.release()
         super.onDestroy()
     }
 }

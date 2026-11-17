@@ -50,6 +50,58 @@ class AppTranslations extends Translations {
     'phase_paused': 'Paused',
     'phase_error': 'Error',
     'error_waiting_for_host': 'Waiting for Mac host…',
+    'error_wifi_not_paired':
+        'Not paired with a Mac yet. Connect once over USB first.',
+    'error_wifi_host_not_found':
+        'Looking for the Mac on this Wi-Fi… Check that it is on the same '
+            'network and has pressed Connect.',
+    'error_wifi_untrusted':
+        'That is not the Mac this tablet was paired with. Connect once over '
+            'USB to pair again.',
+    'error_wifi_unpaired_client':
+        'A device that is not paired with this Mac tried to connect.',
+    'error_wifi_identity':
+        'Could not create this Mac\'s Wi-Fi identity (openssl failed).',
+    'error_usb_unverified_client':
+        'The tablet connected but did not confirm this USB session. Update '
+            'extendedscreen on the tablet so it matches this Mac.',
+    'error_usb_key_not_delivered':
+        'Could not hand this session\'s key to extendedscreen on the tablet '
+            'through adb. Open the app on the tablet and make sure it is up '
+            'to date.',
+    'error_usb_unverified_host':
+        'The Mac has not confirmed this USB session. Connect from the Mac '
+            'app, and make sure extendedscreen is up to date on both devices.',
+
+    // ── Link type ───────────────────────────────────────────────────────
+    'link_usb_label': 'USB',
+    'link_usb_desc': 'Through the cable. Lowest delay.',
+    'link_wifi_label': 'Wi-Fi',
+    'link_wifi_desc': 'No cable, same network. Pair over USB once.',
+    'wifi_host_title': 'Wi-Fi link',
+    'wifi_host_address': 'This Mac: @address  •  port @port',
+    'wifi_host_no_network':
+        'This Mac has no network address. Join a Wi-Fi network first.',
+    'wifi_host_hint':
+        'Press Connect above if this Mac is not waiting yet, then choose '
+            'Wi-Fi on the tablet. A tablet can connect only after it has been '
+            'connected to this Mac over USB once, which pairs them. A 5 GHz '
+            'or 6 GHz network works best.',
+    'wifi_client_title': 'Mac over Wi-Fi',
+    'wifi_client_paired': 'Paired with @name',
+    'wifi_client_not_paired':
+        'Not paired yet. Switch to USB, connect to the Mac once, then come '
+            'back to Wi-Fi.',
+    'wifi_client_forget': 'Forget this Mac',
+    'wifi_forget_title': 'Forget @name?',
+    'wifi_forget_message':
+        'This tablet will stop connecting to that Mac over Wi-Fi. To pair '
+            'them again, connect to it over USB once.',
+    'wifi_forget_confirm': 'Forget',
+    'wifi_client_address_label': 'Mac address (optional)',
+    'wifi_client_address_hint':
+        'Found automatically. Fill in only if it is not, e.g. 192.168.1.20',
+    'remote_dir_usb_only': 'USB only',
 
     // ── Session modes ───────────────────────────────────────────────────
     'session_extended_label': 'Extended Screen',
@@ -78,12 +130,14 @@ class AppTranslations extends Translations {
         'The Mac can now see and control this tablet. Disconnect to stop.',
 
     // ── Connection card ─────────────────────────────────────────────────
-    'conn_card_active_subtitle': 'USB-C  •  @codec',
+    'conn_card_active_subtitle': '@link  •  @codec',
     'conn_card_plug_prompt': 'Plug tablet via USB-C cable',
+    'conn_card_wifi_prompt': 'Mac and tablet on the same Wi-Fi',
 
     // ── Connection steps (client) ───────────────────────────────────────
     'step_connect_label': 'Connect to Mac host',
     'step_connect_detail': 'Linking over the USB-C tunnel',
+    'step_connect_detail_wifi': 'Looking for the Mac on Wi-Fi',
     'step_configure_label': 'Configure display',
     'step_configure_detail': 'Negotiating codec & resolution',
     'step_ready_label': 'Ready to display',
@@ -108,8 +162,8 @@ class AppTranslations extends Translations {
     'display_reconnecting': 'Reconnecting…',
     'display_reconnect_hint':
         'Waiting for the Mac. This happens after a settings change on the '
-            'Mac, or if the cable was unplugged, the Mac went to sleep or the '
-            'Mac app was quit.',
+            'Mac, or if the cable was unplugged or the Wi-Fi dropped, the Mac '
+            'went to sleep or the Mac app was quit.',
     'display_show_controls': 'Show controls',
     'display_surface_android_only': 'Display surface\n(Android only)',
 
@@ -120,8 +174,23 @@ class AppTranslations extends Translations {
     'settings_section_input': 'Touch',
     'settings_section_performance': 'Performance',
     'settings_section_custom': 'Custom',
+    'settings_section_wifi': 'Wi-Fi',
     'settings_section_permissions': 'Permissions',
     'settings_section_info': 'Info',
+
+    // ── Settings: Wi-Fi pairing (host) ──────────────────────────────────
+    'settings_wifi_reset': 'Reset Wi-Fi pairing',
+    'settings_wifi_reset_desc':
+        'Unpairs every tablet. Each one then has to connect over USB once '
+            'before it can use Wi-Fi again.',
+    'settings_wifi_reset_done':
+        'Done. Connect each tablet over USB once to pair it again.',
+    'wifi_reset_title': 'Reset Wi-Fi pairing?',
+    'wifi_reset_message':
+        'This Mac gets a new Wi-Fi identity. Every tablet paired with it '
+            'stops connecting over Wi-Fi until it has been connected over USB '
+            'once more, and a Wi-Fi session in progress ends.',
+    'wifi_reset_confirm': 'Reset',
 
     // ── Settings: language ──────────────────────────────────────────────
     'settings_language': 'Language',
@@ -262,6 +331,56 @@ class AppTranslations extends Translations {
     'phase_paused': 'หยุดชั่วคราว',
     'phase_error': 'เกิดข้อผิดพลาด',
     'error_waiting_for_host': 'กำลังรอโฮสต์ Mac…',
+    'error_wifi_not_paired':
+        'ยังไม่ได้จับคู่กับ Mac ให้เชื่อมต่อผ่าน USB หนึ่งครั้งก่อน',
+    'error_wifi_host_not_found':
+        'กำลังค้นหา Mac บน Wi-Fi นี้… ตรวจว่า Mac อยู่เครือข่ายเดียวกัน'
+            'และกด "เชื่อมต่อ" แล้ว',
+    'error_wifi_untrusted':
+        'เครื่องนี้ไม่ใช่ Mac ที่แท็บเล็ตจับคู่ไว้ ให้เชื่อมต่อผ่าน USB '
+            'หนึ่งครั้งเพื่อจับคู่ใหม่',
+    'error_wifi_unpaired_client':
+        'มีอุปกรณ์ที่ยังไม่ได้จับคู่กับ Mac เครื่องนี้พยายามเชื่อมต่อ',
+    'error_wifi_identity':
+        'สร้างข้อมูลยืนยันตัวตน Wi-Fi ของ Mac เครื่องนี้ไม่สำเร็จ (openssl ล้มเหลว)',
+    'error_usb_unverified_client':
+        'แท็บเล็ตเชื่อมต่อเข้ามาแต่ไม่ได้ยืนยันเซสชัน USB นี้ ให้อัปเดต '
+            'extendedscreen บนแท็บเล็ตให้ตรงกับ Mac เครื่องนี้',
+    'error_usb_key_not_delivered':
+        'ส่งกุญแจของเซสชันนี้ให้ extendedscreen บนแท็บเล็ตผ่าน adb ไม่สำเร็จ '
+            'ให้เปิดแอปบนแท็บเล็ตและตรวจว่าเป็นเวอร์ชันล่าสุด',
+    'error_usb_unverified_host':
+        'Mac ยังไม่ได้ยืนยันเซสชัน USB นี้ ให้กดเชื่อมต่อจากแอปบน Mac '
+            'และตรวจว่า extendedscreen เป็นเวอร์ชันล่าสุดทั้งสองเครื่อง',
+
+    // ── Link type ───────────────────────────────────────────────────────
+    'link_usb_label': 'USB',
+    'link_usb_desc': 'ผ่านสาย ดีเลย์ต่ำที่สุด',
+    'link_wifi_label': 'Wi-Fi',
+    'link_wifi_desc': 'ไร้สาย เครือข่ายเดียวกัน จับคู่ผ่าน USB หนึ่งครั้ง',
+    'wifi_host_title': 'การเชื่อมต่อ Wi-Fi',
+    'wifi_host_address': 'Mac เครื่องนี้: @address  •  พอร์ต @port',
+    'wifi_host_no_network':
+        'Mac เครื่องนี้ยังไม่มีที่อยู่เครือข่าย ให้เชื่อมต่อ Wi-Fi ก่อน',
+    'wifi_host_hint':
+        'กด "เชื่อมต่อ" ด้านบนหาก Mac ยังไม่ได้รออยู่ แล้วเลือก Wi-Fi บนแท็บเล็ต '
+            'แท็บเล็ตจะเชื่อมต่อได้หลังจากเคยเชื่อมต่อกับ Mac เครื่องนี้ผ่าน USB '
+            'หนึ่งครั้ง ซึ่งเป็นการจับคู่ แนะนำเครือข่าย 5 GHz หรือ 6 GHz',
+    'wifi_client_title': 'Mac ผ่าน Wi-Fi',
+    'wifi_client_paired': 'จับคู่กับ @name แล้ว',
+    'wifi_client_not_paired':
+        'ยังไม่ได้จับคู่ ให้สลับเป็น USB เชื่อมต่อกับ Mac หนึ่งครั้ง '
+            'แล้วกลับมาเลือก Wi-Fi',
+    'wifi_client_forget': 'เลิกจับคู่กับ Mac เครื่องนี้',
+    'wifi_forget_title': 'เลิกจับคู่กับ @name หรือไม่',
+    'wifi_forget_message':
+        'แท็บเล็ตเครื่องนี้จะไม่เชื่อมต่อกับ Mac เครื่องนั้นผ่าน Wi-Fi อีก '
+            'หากต้องการจับคู่ใหม่ ให้เชื่อมต่อผ่าน USB หนึ่งครั้ง',
+    'wifi_forget_confirm': 'เลิกจับคู่',
+    'wifi_client_address_label': 'ที่อยู่ของ Mac (ไม่บังคับ)',
+    'wifi_client_address_hint':
+        'ค้นหาให้อัตโนมัติ กรอกเฉพาะเมื่อหาไม่พบ เช่น 192.168.1.20',
+    'remote_dir_usb_only': 'เฉพาะ USB',
 
     // ── Session modes ───────────────────────────────────────────────────
     'session_extended_label': 'จอเสริม',
@@ -288,12 +407,14 @@ class AppTranslations extends Translations {
         'ตอนนี้ Mac เห็นและควบคุมแท็บเล็ตนี้ได้แล้ว ตัดการเชื่อมต่อเพื่อหยุด',
 
     // ── Connection card ─────────────────────────────────────────────────
-    'conn_card_active_subtitle': 'USB-C  •  @codec',
+    'conn_card_active_subtitle': '@link  •  @codec',
     'conn_card_plug_prompt': 'เสียบแท็บเล็ตด้วยสาย USB-C',
+    'conn_card_wifi_prompt': 'Mac และแท็บเล็ตอยู่ Wi-Fi เดียวกัน',
 
     // ── Connection steps (client) ───────────────────────────────────────
     'step_connect_label': 'เชื่อมต่อกับโฮสต์ Mac',
     'step_connect_detail': 'กำลังเชื่อมผ่านอุโมงค์ USB-C',
+    'step_connect_detail_wifi': 'กำลังค้นหา Mac บน Wi-Fi',
     'step_configure_label': 'ตั้งค่าการแสดงผล',
     'step_configure_detail': 'กำลังตกลงตัวแปลงสัญญาณและความละเอียด',
     'step_ready_label': 'พร้อมแสดงผล',
@@ -318,7 +439,8 @@ class AppTranslations extends Translations {
     'display_reconnecting': 'กำลังเชื่อมต่อใหม่…',
     'display_reconnect_hint':
         'กำลังรอ Mac อยู่ อาจเป็นเพราะเพิ่งเปลี่ยนการตั้งค่าบน Mac '
-            'ถอดสายออก Mac เข้าสู่โหมดพักเครื่อง หรือออกจากแอปบน Mac',
+            'ถอดสายออกหรือ Wi-Fi หลุด Mac เข้าสู่โหมดพักเครื่อง '
+            'หรือออกจากแอปบน Mac',
     'display_show_controls': 'แสดงแถบควบคุม',
     'display_surface_android_only': 'พื้นที่แสดงผล\n(เฉพาะ Android)',
 
@@ -329,8 +451,23 @@ class AppTranslations extends Translations {
     'settings_section_input': 'การสัมผัส',
     'settings_section_performance': 'ประสิทธิภาพ',
     'settings_section_custom': 'กำหนดเอง',
+    'settings_section_wifi': 'Wi-Fi',
     'settings_section_permissions': 'สิทธิ์การเข้าถึง',
     'settings_section_info': 'ข้อมูล',
+
+    // ── Settings: Wi-Fi pairing (host) ──────────────────────────────────
+    'settings_wifi_reset': 'รีเซ็ตการจับคู่ Wi-Fi',
+    'settings_wifi_reset_desc':
+        'ยกเลิกการจับคู่กับแท็บเล็ตทุกเครื่อง แต่ละเครื่องต้องเชื่อมต่อผ่าน USB '
+            'หนึ่งครั้งก่อนจะใช้ Wi-Fi ได้อีก',
+    'settings_wifi_reset_done':
+        'รีเซ็ตแล้ว ให้เชื่อมต่อแท็บเล็ตแต่ละเครื่องผ่าน USB หนึ่งครั้งเพื่อจับคู่ใหม่',
+    'wifi_reset_title': 'รีเซ็ตการจับคู่ Wi-Fi หรือไม่',
+    'wifi_reset_message':
+        'Mac เครื่องนี้จะได้ข้อมูลยืนยันตัวตน Wi-Fi ชุดใหม่ แท็บเล็ตทุกเครื่องที่จับคู่ไว้'
+            'จะเชื่อมต่อผ่าน Wi-Fi ไม่ได้จนกว่าจะเชื่อมต่อผ่าน USB อีกหนึ่งครั้ง '
+            'และการเชื่อมต่อ Wi-Fi ที่ใช้งานอยู่จะถูกตัด',
+    'wifi_reset_confirm': 'รีเซ็ต',
 
     // ── Settings: language ──────────────────────────────────────────────
     'settings_language': 'ภาษา',

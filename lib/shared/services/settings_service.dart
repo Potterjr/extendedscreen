@@ -3,6 +3,7 @@ import 'dart:ui';
 import 'package:get/get.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
+import 'package:extendedscreen/shared/models/link_type.dart';
 import 'package:extendedscreen/shared/models/session_mode.dart';
 import 'package:extendedscreen/shared/services/app_translations.dart';
 
@@ -12,6 +13,8 @@ class SettingsService extends GetxService {
   static const _keyMode = 'display_mode';
   static const _keySessionMode = 'session_mode';
   static const _keyRemoteDirection = 'remote_direction';
+  static const _keyLinkType = 'link_type';
+  static const _keyWifiHostAddress = 'wifi_host_address';
   static const _keyBitrate = 'bitrate';
   static const _keyLastDevice = 'last_device';
   static const _keyLastDeviceName = 'last_device_name';
@@ -47,6 +50,9 @@ class SettingsService extends GetxService {
   // Which side drives a remote-control session. Only meaningful when
   // sessionMode == remoteControl.
   final remoteDirectionRx = RemoteDirection.tabControlsMac.obs;
+  // USB (adb tunnel) or Wi-Fi (TLS on the LAN). Each device keeps its own:
+  // the host how it listens, the client where it dials. Picked on Home.
+  final linkTypeRx = LinkType.usb.obs;
 
   // Native panel of the connected client device (physical px, landscape).
   // Fixed presets derive their capture resolution from these. The fallback is
@@ -81,6 +87,37 @@ class SettingsService extends GetxService {
         _prefs.getInt(_keyPanelMaxHz) ?? clientMaxRefreshHz.value;
     sessionModeRx.value = _resolveSessionMode();
     remoteDirectionRx.value = _resolveRemoteDirection();
+    linkTypeRx.value = _prefs.getString(_keyLinkType) == LinkType.wifi.name
+        ? LinkType.wifi
+        : LinkType.usb;
+  }
+
+  LinkType get linkType => linkTypeRx.value;
+
+  Future<void> setLinkType(LinkType type) async {
+    linkTypeRx.value = type;
+    await _prefs.setString(_keyLinkType, type.name);
+  }
+
+  /// Client, Wi-Fi: an address typed by the user for the Mac. Empty means
+  /// find it by discovery.
+  String get wifiHostAddress => _prefs.getString(_keyWifiHostAddress) ?? '';
+
+  Future<void> setWifiHostAddress(String address) =>
+      _prefs.setString(_keyWifiHostAddress, normalizeHostAddress(address));
+
+  /// What the user meant by what they typed for the Mac: the address or
+  /// name, without spaces and without a `:port` copied along from the Mac's
+  /// card (the port is fixed). Anything that can't be an IPv4 address or a
+  /// host name becomes '' ("find it"), so a slip does not turn into an
+  /// address that is dialled, and fails, for ever.
+  static String normalizeHostAddress(String typed) {
+    var s = typed.trim();
+    final port = RegExp(r'^([^:]+):\d{1,5}$').firstMatch(s);
+    if (port != null) s = port.group(1)!;
+    return RegExp(r'^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$').hasMatch(s)
+        ? s
+        : '';
   }
 
   SessionMode _resolveSessionMode() {
@@ -113,11 +150,20 @@ class SettingsService extends GetxService {
     await _prefs.setString(_keyRemoteDirection, dir.name);
   }
 
+  /// The direction a remote-control session actually runs in. Mac-controls-
+  /// tablet injects its input with `adb shell input`, which needs the cable,
+  /// so over Wi-Fi the saved choice is ignored and the tablet drives the Mac.
+  RemoteDirection get effectiveRemoteDirection => linkType == LinkType.wifi
+      ? RemoteDirection.tabControlsMac
+      : remoteDirection;
+
   /// True when the active session streams Android → macOS (tablet captures, Mac
   /// views): remote-control mode with the Mac-controls-tablet direction. Every
-  /// other mode streams macOS → Android.
+  /// other mode streams macOS → Android. Never true over Wi-Fi (see
+  /// [effectiveRemoteDirection]).
   bool get isReverseRemote =>
-      sessionMode == SessionMode.remoteControl && remoteDirection.isReverse;
+      sessionMode == SessionMode.remoteControl &&
+      effectiveRemoteDirection.isReverse;
 
   /// Display mode the host should actually capture in: remote-control always
   /// mirrors the real desktop; extended-screen honours the user's [displayMode].

@@ -9,6 +9,7 @@ import 'package:extendedscreen/modules/remote_screen/client/android_capture_chan
 import 'package:extendedscreen/shared/connection/client_connection_manager.dart';
 import 'package:extendedscreen/shared/connection/connection_state.dart';
 import 'package:extendedscreen/shared/connection/socket_service.dart';
+import 'package:extendedscreen/shared/connection/usb_session_service.dart';
 import 'package:extendedscreen/shared/models/packet_model.dart';
 import 'package:extendedscreen/shared/services/logger_service.dart';
 import 'package:extendedscreen/shared/services/settings_service.dart';
@@ -63,6 +64,8 @@ void main() {
     Get.put<SettingsService>(settings);
     socket = _RefusingSocket();
     Get.put<SocketService>(socket);
+    // No Mac has handed over a USB session key: the tablet dials all the same.
+    Get.put(UsbSessionService());
     Get.put<AndroidCaptureChannel>(_IdleCapture());
   });
 

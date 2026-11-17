@@ -6,6 +6,9 @@ import 'package:extendedscreen/shared/services/settings_service.dart';
 import 'package:extendedscreen/shared/services/logger_service.dart';
 import 'package:extendedscreen/shared/connection/adb_service.dart';
 import 'package:extendedscreen/shared/connection/host_connection_manager.dart';
+import 'package:extendedscreen/shared/connection/usb_session_service.dart';
+import 'package:extendedscreen/shared/connection/wifi_discovery_service.dart';
+import 'package:extendedscreen/shared/connection/wifi_pairing_service.dart';
 import 'package:extendedscreen/modules/extended_screen/host/screen_capture_channel.dart';
 import 'package:extendedscreen/modules/extended_screen/host/input_inject_channel.dart';
 import 'package:extendedscreen/modules/remote_screen/host/remote_video_channel.dart';
@@ -13,6 +16,7 @@ import 'package:extendedscreen/shared/connection/client_connection_manager.dart'
 import 'package:extendedscreen/modules/extended_screen/client/video_decoder_channel.dart';
 import 'package:extendedscreen/modules/remote_screen/client/android_capture_channel.dart';
 import 'package:extendedscreen/shared/platform/battery_channel.dart';
+import 'package:extendedscreen/shared/platform/wifi_pairing_channel.dart';
 
 class InitialBinding extends Bindings {
   @override
@@ -26,6 +30,10 @@ class InitialBinding extends Bindings {
 
     // Transport — shared by both roles; permanent so it survives route changes.
     Get.put(SocketService(), permanent: true);
+    // Wi-Fi link — both roles: the host owns an identity and answers probes,
+    // the client stores the hosts it was paired with and sends the probes.
+    Get.put(WifiPairingService(), permanent: true);
+    Get.put(WifiDiscoveryService(), permanent: true);
 
     // Role-specific wiring. The chosen manager is bound to BaseConnectionManager
     // so all shared UI depends on a single interface.
@@ -43,6 +51,10 @@ class InitialBinding extends Bindings {
       Get.put(VideoDecoderChannel(), permanent: true);
       Get.put(AndroidCaptureChannel(), permanent: true);
       Get.put(BatteryChannel(), permanent: true);
+      // What adb delivers from the Mac: the key of each USB session (kept
+      // by UsbSessionService) and its Wi-Fi pairing.
+      Get.put(UsbSessionService(), permanent: true);
+      Get.put(WifiPairingChannel(), permanent: true);
       Get.put<BaseConnectionManager>(ClientConnectionManager(), permanent: true);
     }
   }

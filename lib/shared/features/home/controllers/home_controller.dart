@@ -3,7 +3,10 @@ import 'package:get/get.dart';
 import 'package:extendedscreen/app/routes/app_routes.dart';
 import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
 import 'package:extendedscreen/shared/connection/connection_state.dart';
+import 'package:extendedscreen/shared/connection/wifi_discovery_service.dart';
+import 'package:extendedscreen/shared/connection/wifi_pairing_service.dart';
 import 'package:extendedscreen/shared/models/device_model.dart';
+import 'package:extendedscreen/shared/models/link_type.dart';
 import 'package:extendedscreen/shared/models/session_mode.dart';
 import 'package:extendedscreen/shared/platform/battery_channel.dart';
 import 'package:extendedscreen/shared/platform/permissions_channel.dart';
@@ -17,9 +20,6 @@ class HomeController extends GetxController with WidgetsBindingObserver {
   /// Client only — [BatteryChannel] is registered just on Android, so this
   /// must only be read behind an `!isHost` guard.
   Rxn<BatteryStatus> get batteryStatus => Get.find<BatteryChannel>().status;
-
-  /// macOS host permissions that must be granted before capture can start.
-  static const _requiredHostPermissions = ['screen_recording', 'accessibility'];
 
   /// Host: permission keys still missing, checked on load and on app resume
   /// (so returning from System Settings clears it automatically). Drives the
@@ -59,6 +59,82 @@ class HomeController extends GetxController with WidgetsBindingObserver {
   /// live. Reads the session-mode/direction observables so it is reactive.
   bool get isReverseRemote => _settings.isReverseRemote;
 
+  // ─── Link type (USB / Wi-Fi) ──────────────────────────────────────────────
+
+  /// Which link this device uses. Each side picks its own: the host how it
+  /// listens, the client where it dials.
+  Rx<LinkType> get linkType => _settings.linkTypeRx;
+  bool get isWifi => _settings.linkTypeRx.value == LinkType.wifi;
+
+  /// The direction a remote-control session will run in (Wi-Fi allows only
+  /// tablet-controls-Mac). Reactive.
+  RemoteDirection get effectiveDirection => _settings.effectiveRemoteDirection;
+
+  Future<void> onSelectLinkType(LinkType type) async {
+    if (_settings.linkType == type) return;
+    await _settings.setLinkType(type);
+    if (isHost) {
+      // The host's selector only shows while idle: the next connect reads it.
+      _loadLocalAddresses();
+    } else {
+      await _redialClient();
+    }
+  }
+
+  /// Host, Wi-Fi: this Mac's LAN addresses, shown so the user can check the
+  /// network or type one on the tablet if discovery finds nothing.
+  final localAddresses = <String>[].obs;
+
+  Future<void> _loadLocalAddresses() async {
+    localAddresses.value = [
+      for (final a in await WifiDiscoveryService.lanAddresses()) a.address,
+    ];
+  }
+
+  /// Client, Wi-Fi: the Macs this tablet was paired with over USB. Empty when
+  /// the pairing service isn't registered (widget tests).
+  List<PairedHost> get pairedHosts => Get.isRegistered<WifiPairingService>()
+      ? Get.find<WifiPairingService>().pairedHosts.toList()
+      : const [];
+
+  /// Client: unpair a Mac (the card asked for confirmation first). A dial in
+  /// progress may be heading for that very Mac, so it starts over, unless the
+  /// user had stopped it.
+  Future<void> onForgetHost(String id) async {
+    if (!Get.isRegistered<WifiPairingService>()) return;
+    if (!await Get.find<WifiPairingService>().forget(id)) return;
+    if (isWifi) await _redialClient();
+  }
+
+  /// Client, Wi-Fi: an address typed for the Mac ('' = find it).
+  String get wifiHostAddress => _settings.wifiHostAddress;
+
+  /// The field was submitted: save the address and dial it now.
+  Future<void> onSetWifiHostAddress(String address) async {
+    if (SettingsService.normalizeHostAddress(address) ==
+        _settings.wifiHostAddress) {
+      return;
+    }
+    await _settings.setWifiHostAddress(address);
+    await _redialClient();
+  }
+
+  /// The field lost focus to a touch elsewhere: only save. That touch is
+  /// still on its way to whatever it landed on (the pointer is down, not yet
+  /// up), and a redial started now would flip the phase under it: a tap on
+  /// Connect would arrive as Cancel. The next dial reads the new address.
+  Future<void> onSaveWifiHostAddress(String address) =>
+      _settings.setWifiHostAddress(address);
+
+  /// The client is always dialling or waiting to: after a change to where it
+  /// should dial, start over now rather than when the pending retry fires.
+  /// Left alone when the user stopped it.
+  Future<void> _redialClient() async {
+    if (_connection.phase.value == ConnectionPhase.disconnected) return;
+    await _connection.disconnect();
+    await _connection.connect();
+  }
+
   /// Host: (re)open the remote view — used to get back in after backing out of
   /// it while a reverse-remote session is still live.
   void onOpenRemoteView() => Get.toNamed(AppRoutes.remoteHost);
@@ -77,6 +153,7 @@ class HomeController extends GetxController with WidgetsBindingObserver {
       // after granting Screen Recording / Accessibility from the inline banner.
       WidgetsBinding.instance.addObserver(this);
       _checkHostPermissions();
+      _loadLocalAddresses();
     }
 
     // Client (Android): auto-open the display once the link is live. The home
@@ -113,13 +190,22 @@ class HomeController extends GetxController with WidgetsBindingObserver {
     } else {
       // Host: in reverse remote (Mac controls tablet) the Mac is the viewer —
       // open the remote view once the tablet stream is live.
-      _workers.add(ever<ConnectionPhase>(_connection.phase, (p) {
+      void openRemote(ConnectionPhase p) {
         if (p.isActive &&
             _settings.isReverseRemote &&
             Get.currentRoute == AppRoutes.home) {
           Get.toNamed(AppRoutes.remoteHost);
         }
-      }));
+      }
+
+      _workers.add(ever<ConnectionPhase>(_connection.phase, openRemote));
+      // Already live when Home opens: the launch connected by itself
+      // (HostConnectionManager.autoConnect), before the splash moved on or
+      // while the window was hidden, and `ever` only sees changes.
+      if (_connection.phase.value.isActive) {
+        WidgetsBinding.instance.addPostFrameCallback(
+            (_) => openRemote(_connection.phase.value));
+      }
     }
   }
 
@@ -136,35 +222,28 @@ class HomeController extends GetxController with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) _checkHostPermissions();
+    if (state == AppLifecycleState.resumed) {
+      _checkHostPermissions();
+      _loadLocalAddresses(); // the Mac may have changed network meanwhile
+    }
   }
 
   Future<void> _checkHostPermissions() async {
     final status = await _perms.checkPermissions();
-    missingPermissions.value = _requiredHostPermissions
+    missingPermissions.value = PermissionsChannel.hostRequired
         .where((key) => !(status[key] ?? false))
         .toList();
     if (missingPermissions.isEmpty) _maybeAutoConnect();
   }
 
-  /// Host: connect without waiting for a tap when there's nothing to choose —
-  /// exactly one physical device (emulators are ignored whenever a real device
-  /// is present, and only count when they're all there is). Anything more
-  /// ambiguous falls through to the picker. Deliberately not keyed off the
-  /// saved last-used serial: that's persisted on every connect *attempt*, so a
-  /// reconnect-timer fallback can leave it pointing at the wrong device, and
-  /// a wrong pick strands the host mid-handshake with no picker visible.
+  /// Host, permissions granted (Home opened, or the app came back to the
+  /// front): connect without waiting for a tap when there's nothing to choose
+  /// ([BaseConnectionManager.connectIfUnambiguous]), unless the user stopped
+  /// the last attempt. The same check runs at launch from the host's
+  /// `autoConnect()`, which doesn't need this screen to have been drawn.
   Future<void> _maybeAutoConnect() async {
-    if (_userStopped ||
-        _connection.phase.value != ConnectionPhase.disconnected) {
-      return;
-    }
-    await _connection.refreshDevices();
-    final devices = _connection.availableDevices;
-    final physical =
-        devices.where((d) => !d.serial.startsWith('emulator-')).toList();
-    final candidates = physical.isNotEmpty ? physical : devices;
-    if (candidates.length == 1) await _connect(serial: candidates.first.serial);
+    if (_userStopped) return;
+    await _connection.connectIfUnambiguous();
   }
 
   void onGrantPermission(String key) => _perms.openPermission(key);
@@ -201,7 +280,8 @@ class HomeController extends GetxController with WidgetsBindingObserver {
 
   /// The card's single action: Disconnect while live, Cancel while connecting
   /// (or, on the host, while a retry is pending), else Connect. Matches
-  /// ConnectionCard's choice of label.
+  /// ConnectionCard's choice of label. On the host, Connect is only offered
+  /// over Wi-Fi (start listening); over USB it connects by picking a device.
   void onConnectTap() {
     final p = _connection.phase.value;
     final stops = p.isActive ||
@@ -232,9 +312,7 @@ class HomeController extends GetxController with WidgetsBindingObserver {
   }
 
   Future<bool> _ensureHostPermissions() async {
-    final status = await _perms.checkPermissions();
-    final granted = _requiredHostPermissions
-        .every((key) => status[key] ?? false);
+    final granted = await _perms.hostGranted();
     if (!granted) {
       Get.snackbar(
         'perm_required_title'.tr,

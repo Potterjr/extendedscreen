@@ -4,12 +4,16 @@ import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
 import 'package:extendedscreen/shared/connection/connection_state.dart';
 
 class SplashController extends GetxController {
+  // onInit, not onReady: onReady waits for a frame after this controller is
+  // made, and a macOS app launched behind other windows is `hidden` to
+  // Flutter, which then draws none. Nothing here needs one.
   @override
-  void onReady() {
-    super.onReady();
+  void onInit() {
+    super.onInit();
     // Kick off connection immediately; navigate after brief splash.
-    // On the host with multiple devices this stays disconnected so the user
-    // picks a client on the home screen instead of auto-grabbing one.
+    // The host connects by itself only when there is nothing to choose (see
+    // HostConnectionManager.autoConnect); otherwise the user picks a client
+    // on the home screen.
     final cm = Get.find<BaseConnectionManager>();
     if (cm.phase.value == ConnectionPhase.disconnected) {
       cm.autoConnect();

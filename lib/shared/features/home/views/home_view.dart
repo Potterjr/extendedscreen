@@ -3,10 +3,13 @@ import 'package:get/get.dart';
 import 'package:extendedscreen/shared/features/home/controllers/home_controller.dart';
 import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
 import 'package:extendedscreen/shared/connection/connection_state.dart';
+import 'package:extendedscreen/shared/connection/wifi_pairing_service.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
+import 'package:extendedscreen/shared/models/link_type.dart';
 import 'package:extendedscreen/shared/models/session_mode.dart';
 import 'package:extendedscreen/shared/services/settings_service.dart';
 import 'package:extendedscreen/shared/widgets/battery_chip.dart';
+import 'package:extendedscreen/shared/widgets/confirm_dialog.dart';
 import 'package:extendedscreen/shared/widgets/connection_card.dart';
 import 'package:extendedscreen/shared/widgets/connection_steps.dart';
 import 'package:extendedscreen/shared/widgets/device_info_card.dart';
@@ -46,6 +49,7 @@ class HomeView extends GetView<HomeController> {
       body: SafeArea(
         child: Obx(() {
           final phase = cm.phase.value;
+          final wifi = settings.linkTypeRx.value == LinkType.wifi;
           return ListView(
             padding: const EdgeInsets.all(20),
             children: [
@@ -60,11 +64,16 @@ class HomeView extends GetView<HomeController> {
               ConnectionCard(
                 phase: phase,
                 onTap: controller.onConnectTap,
-                // Host connects only via the device picker, not this button.
-                canConnect: !controller.isHost,
+                // Over USB the host connects only via the device picker, not
+                // this button. Over Wi-Fi there is no device to pick, so the
+                // button starts listening; in `error` the host retries on its
+                // own and the card offers Cancel, as over USB.
+                canConnect: !controller.isHost ||
+                    (wifi && phase == ConnectionPhase.disconnected),
                 codecLabel: settings.codecRx.value == CodecType.h265
                     ? 'H.265'
                     : 'H.264',
+                wifi: wifi,
               ),
               const SizedBox(height: 16),
               // Host: pick which Android client to stream to while idle.
@@ -78,16 +87,30 @@ class HomeView extends GetView<HomeController> {
                   _DirectionSelector(controller: controller),
                   const SizedBox(height: 16),
                 ],
-                DevicePickerCard(
-                  // Snapshot the list here, inside the Obx builder, so GetX
-                  // subscribes to it. Passing the RxList itself registers
-                  // nothing (the card reads it in its own build, outside this
-                  // builder), which left the picker stale after a refresh.
-                  devices: cm.availableDevices.toList(),
-                  refreshing: controller.refreshingDevices.value,
-                  onSelect: controller.onSelectDevice,
-                  onRefresh: controller.refreshDevices,
-                ),
+                _LinkTypeSelector(controller: controller),
+                const SizedBox(height: 16),
+                if (!wifi) ...[
+                  DevicePickerCard(
+                    // Snapshot the list here, inside the Obx builder, so GetX
+                    // subscribes to it. Passing the RxList itself registers
+                    // nothing (the card reads it in its own build, outside
+                    // this builder), which left the picker stale after a
+                    // refresh.
+                    devices: cm.availableDevices.toList(),
+                    refreshing: controller.refreshingDevices.value,
+                    onSelect: controller.onSelectDevice,
+                    onRefresh: controller.refreshDevices,
+                  ),
+                  const SizedBox(height: 16),
+                ],
+              ],
+              // Host over Wi-Fi: where the tablet finds this Mac. Not part of
+              // the idle-only block above: listening is a connecting phase,
+              // and that is exactly when the address is needed (to type on a
+              // tablet that can't find the Mac by itself).
+              if (controller.isHost && wifi && !phase.isActive) ...[
+                // Snapshot for the same reason as the picker's list above.
+                _WifiHostCard(addresses: controller.localAddresses.toList()),
                 const SizedBox(height: 16),
               ],
               // Client: show connection progress and an Open View button that
@@ -109,11 +132,26 @@ class HomeView extends GetView<HomeController> {
                     ),
                   );
                 }),
+                // Where to dial. Hidden during a session; while waiting for
+                // the Mac (the client's usual state) it stays put, so a tablet
+                // set to the wrong link can be switched without stopping.
+                if (!phase.isActive) ...[
+                  _LinkTypeSelector(controller: controller),
+                  const SizedBox(height: 16),
+                  if (wifi) ...[
+                    _WifiClientCard(
+                      controller: controller,
+                      // A snapshot taken inside this Obx (see the picker).
+                      hosts: controller.pairedHosts,
+                    ),
+                    const SizedBox(height: 16),
+                  ],
+                ],
                 // Only while actively connecting — the ConnectionCard above
                 // already states disconnected/error/streaming on its own, so
                 // showing this too in those phases just duplicates it.
                 if (phase.isConnecting) ...[
-                  ConnectionSteps(phase: phase),
+                  ConnectionSteps(phase: phase, wifi: wifi),
                   const SizedBox(height: 20),
                 ],
                 // Reverse remote (Mac controls this tablet): the tablet is the
@@ -137,7 +175,10 @@ class HomeView extends GetView<HomeController> {
                   _OpenRemoteButton(controller: controller),
                   const SizedBox(height: 12),
                 ],
-                LatencyChip(latencyMs: cm.latencyMs.value),
+                LatencyChip(
+                    latencyMs: cm.latencyMs.value,
+                    wifi: wifi,
+                    bitrate: cm.streamBitrate.value),
               ],
               if (phase == ConnectionPhase.error) ...[
                 const SizedBox(height: 16),
@@ -260,51 +301,64 @@ class _DirectionSelector extends StatelessWidget {
           ),
         ),
         Obx(() {
-          final active = controller.remoteDirection.value;
+          // Over Wi-Fi only tablet → Mac exists (the other way injects input
+          // with `adb shell input`), so that one shows as chosen and the
+          // other is greyed out, whatever was saved for USB.
+          final wifi = controller.isWifi;
+          final active = controller.effectiveDirection;
           return Row(
             children: RemoteDirection.values.map((dir) {
               final selected = dir == active;
+              final available = !(wifi && dir.isReverse);
               return Expanded(
                 child: Padding(
                   padding: EdgeInsets.only(
                       right: dir == RemoteDirection.values.first ? 8 : 0),
-                  child: Material(
-                    color: selected
-                        ? const Color(0xFF00C8FF).withValues(alpha: 0.16)
-                        : Colors.white.withValues(alpha: 0.04),
-                    borderRadius: BorderRadius.circular(12),
-                    child: InkWell(
+                  child: Opacity(
+                    opacity: available ? 1 : 0.45,
+                    child: Material(
+                      color: selected
+                          ? const Color(0xFF00C8FF).withValues(alpha: 0.16)
+                          : Colors.white.withValues(alpha: 0.04),
                       borderRadius: BorderRadius.circular(12),
-                      onTap: () => controller.onSelectDirection(dir),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 14, vertical: 12),
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(
-                            color: selected
-                                ? const Color(0xFF00C8FF)
-                                : Colors.white.withValues(alpha: 0.08),
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(12),
+                        onTap: available
+                            ? () => controller.onSelectDirection(dir)
+                            : null,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 14, vertical: 12),
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: selected
+                                  ? const Color(0xFF00C8FF)
+                                  : Colors.white.withValues(alpha: 0.08),
+                            ),
                           ),
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              dir.label,
-                              style: TextStyle(
-                                color: selected ? Colors.white : Colors.white70,
-                                fontSize: 14,
-                                fontWeight: FontWeight.w600,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                dir.label,
+                                style: TextStyle(
+                                  color:
+                                      selected ? Colors.white : Colors.white70,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w600,
+                                ),
                               ),
-                            ),
-                            const SizedBox(height: 2),
-                            Text(
-                              dir.description,
-                              style: const TextStyle(
-                                  color: Colors.white54, fontSize: 11),
-                            ),
-                          ],
+                              const SizedBox(height: 2),
+                              Text(
+                                available
+                                    ? dir.description
+                                    : 'remote_dir_usb_only'.tr,
+                                style: const TextStyle(
+                                    color: Colors.white54, fontSize: 11),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     ),
@@ -315,6 +369,285 @@ class _DirectionSelector extends StatelessWidget {
           );
         }),
       ],
+    );
+  }
+}
+
+/// USB or Wi-Fi. On the host it sits with the other idle-only selectors; on
+/// the client it shows whenever no session is live.
+class _LinkTypeSelector extends StatelessWidget {
+  final HomeController controller;
+  const _LinkTypeSelector({required this.controller});
+
+  @override
+  Widget build(BuildContext context) {
+    return Obx(() {
+      final active = controller.linkType.value;
+      return Row(
+        children: LinkType.values.map((type) {
+          final selected = type == active;
+          return Expanded(
+            child: Padding(
+              padding: EdgeInsets.only(
+                right: type == LinkType.values.first ? 8 : 0,
+              ),
+              child: Material(
+                color: selected
+                    ? const Color(0xFF00C8FF).withValues(alpha: 0.16)
+                    : Colors.white.withValues(alpha: 0.04),
+                borderRadius: BorderRadius.circular(12),
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(12),
+                  onTap: () => controller.onSelectLinkType(type),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 12,
+                    ),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: selected
+                            ? const Color(0xFF00C8FF)
+                            : Colors.white.withValues(alpha: 0.08),
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(
+                          type == LinkType.wifi ? Icons.wifi : Icons.usb,
+                          size: 20,
+                          color: selected
+                              ? const Color(0xFF00C8FF)
+                              : Colors.white54,
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                type.label,
+                                style: TextStyle(
+                                  color: selected
+                                      ? Colors.white
+                                      : Colors.white70,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                type.description,
+                                style: const TextStyle(
+                                  color: Colors.white54,
+                                  fontSize: 11,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+        }).toList(),
+      );
+    });
+  }
+}
+
+/// Host, Wi-Fi, idle: where the tablet will find this Mac, and the one thing
+/// the user has to know (pair over USB first). Takes the place of the device
+/// picker, since over Wi-Fi there is no device list to pick from.
+///
+/// Plain widget over a snapshot, like [DevicePickerCard].
+class _WifiHostCard extends StatelessWidget {
+  final List<String> addresses;
+  const _WifiHostCard({required this.addresses});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFF111827),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'wifi_host_title'.tr,
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.6),
+              fontSize: 13,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              const Icon(Icons.wifi, color: Color(0xFF00C8FF), size: 20),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  addresses.isEmpty
+                      ? 'wifi_host_no_network'.tr
+                      : 'wifi_host_address'.trParams({
+                          'address': addresses.join(', '),
+                          'port': '${BaseConnectionManager.port}',
+                        }),
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w500,
+                    fontSize: 14,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text(
+            'wifi_host_hint'.tr,
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.4),
+              fontSize: 12,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Client, Wi-Fi: whether this tablet can reach a Mac at all (it has to have
+/// been paired over USB), each paired Mac with a button to forget it, plus a
+/// field for the Mac's address on networks where discovery finds nothing.
+///
+/// Stateful only to own the text field's controller, so Home rebuilding on
+/// every phase change doesn't reset what is being typed.
+class _WifiClientCard extends StatefulWidget {
+  final HomeController controller;
+
+  /// The paired Macs, read inside Home's `Obx`.
+  final List<PairedHost> hosts;
+
+  const _WifiClientCard({required this.controller, required this.hosts});
+
+  @override
+  State<_WifiClientCard> createState() => _WifiClientCardState();
+}
+
+class _WifiClientCardState extends State<_WifiClientCard> {
+  late final _address = TextEditingController(
+    text: widget.controller.wifiHostAddress,
+  );
+
+  @override
+  void dispose() {
+    _address.dispose();
+    super.dispose();
+  }
+
+  /// Forgetting is not undone from here (it takes a USB session), so ask.
+  Future<void> _forget(PairedHost host) async {
+    final confirmed = await showConfirmDialog(
+      context,
+      title: 'wifi_forget_title'.trParams({'name': host.name}),
+      message: 'wifi_forget_message'.tr,
+      confirmLabel: 'wifi_forget_confirm'.tr,
+    );
+    if (confirmed) await widget.controller.onForgetHost(host.id);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final paired = widget.hosts.isNotEmpty;
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFF111827),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'wifi_client_title'.tr,
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.6),
+              fontSize: 13,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          const SizedBox(height: 10),
+          if (!paired)
+            Row(
+              children: [
+                const Icon(Icons.usb, color: Color(0xFFFFB300), size: 20),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    'wifi_client_not_paired'.tr,
+                    style: const TextStyle(color: Colors.white, fontSize: 14),
+                  ),
+                ),
+              ],
+            ),
+          for (final host in widget.hosts)
+            Row(
+              children: [
+                const Icon(
+                  Icons.verified_user_outlined,
+                  color: Color(0xFF00E676),
+                  size: 20,
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    'wifi_client_paired'.trParams({'name': host.name}),
+                    style: const TextStyle(color: Colors.white, fontSize: 14),
+                  ),
+                ),
+                IconButton(
+                  // Keyed by the Mac, so a row that moves up when another is
+                  // forgotten is not mistaken for the one that was pressed.
+                  key: ValueKey('forget-${host.id}'),
+                  icon: const Icon(Icons.link_off, size: 20),
+                  color: Colors.white54,
+                  tooltip: 'wifi_client_forget'.tr,
+                  onPressed: () => _forget(host),
+                ),
+              ],
+            ),
+          if (paired) ...[
+            const SizedBox(height: 12),
+            TextField(
+              controller: _address,
+              keyboardType: TextInputType.url,
+              autocorrect: false,
+              textInputAction: TextInputAction.done,
+              onSubmitted: widget.controller.onSetWifiHostAddress,
+              onTapOutside: (_) {
+                FocusManager.instance.primaryFocus?.unfocus();
+                widget.controller.onSaveWifiHostAddress(_address.text);
+              },
+              style: const TextStyle(color: Colors.white, fontSize: 14),
+              decoration: InputDecoration(
+                isDense: true,
+                labelText: 'wifi_client_address_label'.tr,
+                helperText: 'wifi_client_address_hint'.tr,
+                helperMaxLines: 2,
+                border: const OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ],
+      ),
     );
   }
 }

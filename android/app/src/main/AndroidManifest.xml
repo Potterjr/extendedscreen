@@ -82,6 +82,24 @@
             android:exported="false"
             android:stopWithTask="true"
             android:foregroundServiceType="connectedDevice"/>
+
+        <!-- What the Mac hands this app through adb (`adb shell am broadcast
+             -n …`), never over the link: its Wi-Fi pairing (certificate and
+             token), and the key of each USB session, which both ends of the
+             USB link then prove they hold. Exported so the shell can reach
+             it, and guarded by DUMP, which the shell holds and an installed
+             app cannot get without adb (`pm grant`): no other app on the
+             tablet can pair it with a Mac of its own, or pose as the Mac on
+             its USB link. -->
+        <receiver
+            android:name=".plugins.WifiPairingReceiver"
+            android:exported="true"
+            android:permission="android.permission.DUMP">
+            <intent-filter>
+                <action android:name="com.example.extendedscreen.WIFI_PAIR"/>
+                <action android:name="com.example.extendedscreen.USB_SESSION"/>
+            </intent-filter>
+        </receiver>
     </application>
 
     <queries>
