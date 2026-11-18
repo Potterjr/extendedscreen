@@ -12,6 +12,7 @@ import 'package:extendedscreen/modules/extended_screen/client/video_decoder_chan
 import 'package:extendedscreen/modules/extended_screen/host/input_inject_channel.dart';
 import 'package:extendedscreen/modules/extended_screen/host/screen_capture_channel.dart';
 import 'package:extendedscreen/modules/remote_screen/client/android_capture_channel.dart';
+import 'package:extendedscreen/modules/remote_screen/host/remote_video_channel.dart';
 import 'package:extendedscreen/shared/connection/adb_service.dart';
 import 'package:extendedscreen/shared/connection/client_connection_manager.dart';
 import 'package:extendedscreen/shared/connection/connection_state.dart';
@@ -52,35 +53,41 @@ class _FakeCapture extends ScreenCaptureChannel {
   int idrRequests = 0;
 
   @override
-  Stream<Uint8List> get frameStream => frames.stream;
+  Stream<Uint8List> framesFor(int session) => frames.stream;
   @override
   Future<bool> requestPermission() async => true;
   @override
-  Future<bool> createVirtualDisplay(DisplayConfigModel config) async => true;
+  Future<bool> createVirtualDisplay(DisplayConfigModel config,
+          {required int session,
+          int serialNum = 1,
+          String name = 'Extended Screen'}) async =>
+      true;
   @override
-  Future<void> startCapture(DisplayConfigModel config) async => started = true;
+  Future<void> startCapture(DisplayConfigModel config,
+          {required int session}) async =>
+      started = true;
   /// How long the native side takes to stop, when a test needs a teardown
   /// that is still running while something else happens.
   Duration stopDelay = Duration.zero;
 
   @override
-  Future<void> stopCapture() async {
+  Future<void> stopCapture({required int session}) async {
     if (stopDelay > Duration.zero) await Future<void>.delayed(stopDelay);
     started = false;
   }
 
   @override
-  Future<void> removeVirtualDisplay() async {}
+  Future<void> removeVirtualDisplay({required int session}) async {}
   @override
-  Future<void> requestIdr() async => idrRequests++;
+  Future<void> requestIdr({required int session}) async => idrRequests++;
   @override
-  Future<Map<String, double>> getDisplayBounds() async =>
+  Future<Map<String, double>> getDisplayBounds({required int session}) async =>
       {'x': 0, 'y': 0, 'w': 1480, 'h': 924};
 
   /// Every rate the host asked the encoder for, in order.
   final bitrates = <int>[];
   @override
-  Future<void> setBitrate(int bitsPerSecond) async =>
+  Future<void> setBitrate(int bitsPerSecond, {required int session}) async =>
       bitrates.add(bitsPerSecond);
 }
 
@@ -98,13 +105,13 @@ class _FakeInput extends InputInjectChannel {
   Duration releaseDelay = Duration.zero;
 
   @override
-  Future<void> releaseAll() async {
+  Future<void> releaseAll({required int session}) async {
     if (releaseDelay > Duration.zero) await Future<void>.delayed(releaseDelay);
   }
 
   @override
-  Future<void> injectMouse(
-      MouseEventModel e, Map<String, double> displayBounds) async {
+  Future<void> injectMouse(MouseEventModel e, Map<String, double> displayBounds,
+      {required int session}) async {
     injected++;
   }
 }
@@ -180,7 +187,25 @@ class _NoAdb extends AdbService {
   }
 
   @override
-  Future<void> removeForward({required String serial}) async => calls++;
+  Future<void> removeForward({required String serial, int? remotePort}) async =>
+      calls++;
+}
+
+/// The Mac's decoder for the tablet's picture (reverse remote), with nothing
+/// behind it.
+class _FakeRemote extends RemoteVideoChannel {
+  @override
+  Future<int?> initialize({
+    required int session,
+    required CodecType codec,
+    required int width,
+    required int height,
+  }) async =>
+      7;
+  @override
+  Future<void> feedNal(int session, List<int> nalBytes) async {}
+  @override
+  Future<void> dispose({required int session}) async {}
 }
 
 /// The tablet's screen capture, slow to stop: a client teardown that takes
@@ -1819,6 +1844,19 @@ Future<void> main() async {
       await client.connect();
       await _until(() => host.phase.value == ConnectionPhase.streaming);
     }
+
+    test('reverse remote: as the Mac starts receiving it asks the tablet for '
+        'a keyframe too, after the request to capture', () async {
+      await settings.setSessionMode(SessionMode.remoteControl);
+      await settings.setRemoteDirection(RemoteDirection.macControlsTab);
+      Get.put<RemoteVideoChannel>(_FakeRemote());
+      final controls = controlsSeenByTablet();
+      await usbSession();
+      await _until(() => controls.contains(0xFF));
+      // A capture left running by the last session ignores 0xF8, and only
+      // the 0xFF gets the new decoder a picture it can start from.
+      expect(controls, containsAllInOrder([0xF8, 0xFF]));
+    }, skip: _opensslMissing);
 
     test('a USB session keeps the preset\'s bitrate: nothing is adapted',
         () async {

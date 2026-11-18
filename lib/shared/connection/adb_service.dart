@@ -123,9 +123,14 @@ class AdbService extends GetxService {
     }
   }
 
-  Future<void> removeForward({required String serial}) async {
+  /// Removes this app's reverse tunnel from [serial]: the rule for the
+  /// tablet-side [remotePort], or every rule on it when that is not given.
+  Future<void> removeForward({required String serial, int? remotePort}) async {
     try {
-      await _channel.invokeMethod('removeForward', {'serial': serial});
+      await _channel.invokeMethod('removeForward', {
+        'serial': serial,
+        'remotePort': ?remotePort,
+      });
     } catch (_) {}
   }
 

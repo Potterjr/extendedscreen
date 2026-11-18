@@ -54,7 +54,11 @@ class AdbManagerPlugin: NSObject {
             // the new attempt waits for a tablet with no tunnel to dial
             // (and its session key would rest on a port adb no longer
             // holds). The timeout keeps a hung adb from stalling teardown.
-            adbRun(args: ["-s", serial, "reverse", "--remove-all"],
+            // With the tablet-side port, only this app's rule goes; other
+            // tools' rules on the tablet stay.
+            let rule = (args["remotePort"] as? Int).map { ["--remove", "tcp:\($0)"] }
+                ?? ["--remove-all"]
+            adbRun(args: ["-s", serial, "reverse"] + rule,
                    timeout: 5) { _, _ in result(nil) }
         case "shellInput":
             guard let args = call.arguments as? [String: Any],

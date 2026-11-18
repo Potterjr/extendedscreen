@@ -385,8 +385,7 @@ abstract class BaseConnectionManager extends GetxService
 
   /// Decoder side → encoder side: ask for a fresh keyframe so the decoder can
   /// start cleanly. Client → host normally; in reverse remote the host wires
-  /// it as its decoder's IDR callback (host → client), though the native macOS
-  /// decoder does not fire that callback yet.
+  /// it as its decoder's IDR callback (host → client).
   void requestIdr() {
     if (!phase.value.isActive || !peerTrusted) return;
     socket.send(Packet(

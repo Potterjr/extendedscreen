@@ -3,33 +3,28 @@ import FlutterMacOS
 import VideoToolbox
 import CoreVideo
 
-/// Reverse remote (Mac controls tablet): decodes the H.264/H.265 Annex-B stream
-/// coming FROM the tablet via VideoToolbox and exposes the decoded frames to
-/// Flutter as a `FlutterTexture`. The mirror image of the Android
+/// Reverse remote (Mac controls tablet): decodes the H.264/H.265 Annex-B streams
+/// coming FROM the tablets via VideoToolbox and exposes each tablet's decoded
+/// frames to Flutter as a `FlutterTexture`. The mirror image of the Android
 /// `VideoDecoderPlugin`.
 ///
-/// NAL units arrive over a binary message channel (no codec overhead). The
-/// encoder prepends SPS/PPS to every keyframe, so a format description can be
-/// (re)built whenever parameter sets appear.
-class RemoteVideoPlugin: NSObject, FlutterTexture {
+/// One decoder per session (the id Dart sends as `session`; none means 0).
+/// NAL units arrive over a binary message channel (no codec overhead), each
+/// message behind its session's id, 4 bytes big-endian. The encoder prepends
+/// SPS/PPS to every keyframe, so a format description can be (re)built
+/// whenever parameter sets appear. A decoder fed pictures it cannot decode
+/// (none of those yet, or a decode error) asks for a keyframe with
+/// `onRequestIdr {session}`, at most once a second. Main thread: method
+/// calls, the registry and feeding; each decoder's output lands on
+/// VideoToolbox's threads.
+class RemoteVideoPlugin: NSObject {
 
     private static let channelName    = "extended_screen/remote_video"
     private static let nalChannelName = "extended_screen/remote_nal"
 
     private let registrar: FlutterPluginRegistrar
     private let channel: FlutterMethodChannel
-    private var textureId: Int64 = 0
-
-    private var session: VTDecompressionSession?
-    private var formatDesc: CMVideoFormatDescription?
-    private var isHEVC = false
-
-    private var vps: [UInt8]?
-    private var sps: [UInt8]?
-    private var pps: [UInt8]?
-
-    private let lock = NSLock()
-    private var latestPixelBuffer: CVPixelBuffer?
+    private var decoders: [Int: RemoteDecoder] = [:]
 
     private init(registrar: FlutterPluginRegistrar) {
         self.registrar = registrar
@@ -47,27 +42,85 @@ class RemoteVideoPlugin: NSObject, FlutterTexture {
             binaryMessenger: registrar.messenger,
             codec: FlutterBinaryCodec.sharedInstance())
         nalChannel.setMessageHandler { message, reply in
-            if let data = message as? Data {
-                plugin.feedNal([UInt8](data))
+            if let data = message as? Data, data.count > 4 {
+                let bytes = [UInt8](data)
+                let id = Int(UInt32(bytes[0]) << 24 | UInt32(bytes[1]) << 16
+                             | UInt32(bytes[2]) << 8 | UInt32(bytes[3]))
+                plugin.decoders[id]?.feedNal(Array(bytes[4...]))
             }
             reply(nil)
         }
     }
 
     private func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+        let args = call.arguments as? [String: Any] ?? [:]
+        let id = args["session"] as? Int ?? 0
         switch call.method {
         case "initialize":
-            let args = call.arguments as? [String: Any]
-            isHEVC = (args?["codec"] as? String) == "h265"
-            // Register a texture; frames flow in as NALs arrive.
-            textureId = registrar.textures.register(self)
-            result(NSNumber(value: textureId))
+            // A session starting again gets a fresh decoder and texture.
+            decoders.removeValue(forKey: id)?.teardown()
+            let decoder = RemoteDecoder(
+                id: id, isHEVC: (args["codec"] as? String) == "h265",
+                registrar: registrar,
+                requireHardware: !decoders.isEmpty,
+                onError: { [weak self] message in
+                    self?.channel.invokeMethod("onCodecError", arguments: ["session": id, "error": message])
+                },
+                onRequestIdr: { [weak self] in
+                    self?.channel.invokeMethod("onRequestIdr", arguments: ["session": id])
+                })
+            decoders[id] = decoder
+            result(NSNumber(value: decoder.register()))
         case "dispose":
-            teardown()
+            decoders.removeValue(forKey: id)?.teardown()
             result(nil)
         default:
             result(FlutterMethodNotImplemented)
         }
+    }
+}
+
+/// One tablet's decoder and the texture it renders into.
+private final class RemoteDecoder: NSObject, FlutterTexture {
+    private let id: Int
+    private let registrar: FlutterPluginRegistrar
+    private let requireHardware: Bool
+    private let onError: (String) -> Void
+    private let onRequestIdr: () -> Void
+    private var textureId: Int64 = 0
+    // When the tablet was last asked for a keyframe (main thread).
+    private var lastKeyframeRequest: Date?
+    private static let keyframeRequestInterval: TimeInterval = 1
+
+    private var session: VTDecompressionSession?
+    private var formatDesc: CMVideoFormatDescription?
+    private let isHEVC: Bool
+
+    private var vps: [UInt8]?
+    private var sps: [UInt8]?
+    private var pps: [UInt8]?
+
+    // Guards latestPixelBuffer and alive: the decoder's output thread writes,
+    // Flutter's raster thread reads, teardown (main) ends it.
+    private let lock = NSLock()
+    private var latestPixelBuffer: CVPixelBuffer?
+    private var alive = true
+
+    init(id: Int, isHEVC: Bool, registrar: FlutterPluginRegistrar, requireHardware: Bool,
+         onError: @escaping (String) -> Void, onRequestIdr: @escaping () -> Void) {
+        self.id = id
+        self.isHEVC = isHEVC
+        self.registrar = registrar
+        self.requireHardware = requireHardware
+        self.onError = onError
+        self.onRequestIdr = onRequestIdr
+        super.init()
+    }
+
+    /// Registers the texture; returns its id. Frames flow in as NALs arrive.
+    func register() -> Int64 {
+        textureId = registrar.textures.register(self)
+        return textureId
     }
 
     // MARK: - FlutterTexture
@@ -80,7 +133,7 @@ class RemoteVideoPlugin: NSObject, FlutterTexture {
 
     // MARK: - Decode
 
-    private func feedNal(_ data: [UInt8]) {
+    func feedNal(_ data: [UInt8]) {
         let nals = Self.splitAnnexB(data)
         if nals.isEmpty { return }
 
@@ -105,8 +158,27 @@ class RemoteVideoPlugin: NSObject, FlutterTexture {
         }
 
         if paramChanged { rebuildSession() }
-        guard session != nil, formatDesc != nil, !vclNals.isEmpty else { return }
+        guard !vclNals.isEmpty else { return }
+        guard session != nil, formatDesc != nil else {
+            // Pictures with nothing to start from: this decoder joined a
+            // stream already under way (the tablet's capture outlived the
+            // last session), or its session could not be made.
+            requestKeyframe()
+            return
+        }
         decode(vclNals)
+    }
+
+    /// Asks the tablet for a keyframe, at most once a second: the decoder has
+    /// pictures it cannot use. Main thread.
+    private func requestKeyframe() {
+        lock.lock(); let alive = self.alive; lock.unlock()
+        guard alive else { return }
+        let now = Date()
+        if let last = lastKeyframeRequest,
+           now.timeIntervalSince(last) < Self.keyframeRequestInterval { return }
+        lastKeyframeRequest = now
+        onRequestIdr()
     }
 
     /// First-byte NAL unit type (H.264: bits 0–4; H.265: bits 1–6).
@@ -147,12 +219,22 @@ class RemoteVideoPlugin: NSObject, FlutterTexture {
             kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
             kCVPixelBufferMetalCompatibilityKey: true,
         ]
+        // Another tablet's decoder is live: this one must be a hardware one
+        // too, or it can land silently on a software decoder.
+        let spec: [CFString: Any]? = requireHardware
+            ? [kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder: true]
+            : nil
         var newSession: VTDecompressionSession?
-        VTDecompressionSessionCreate(
+        let status2 = VTDecompressionSessionCreate(
             allocator: kCFAllocatorDefault, formatDescription: newFd,
-            decoderSpecification: nil, imageBufferAttributes: attrs as CFDictionary,
+            decoderSpecification: spec as CFDictionary?, imageBufferAttributes: attrs as CFDictionary,
             outputCallback: nil, decompressionSessionOut: &newSession)
         session = newSession
+        if status2 != noErr || newSession == nil {
+            let code = status2 == kVTVideoDecoderNotAvailableNowErr ? "DECODER_BUSY" : "DECODER_FAILED"
+            NSLog("[ExtendedScreen] s\(id) remote decoder not created (status \(status2), \(code))")
+            onError("\(code) (\(status2))")
+        }
     }
 
     private func decode(_ vclNals: [[UInt8]]) {
@@ -191,18 +273,30 @@ class RemoteVideoPlugin: NSObject, FlutterTexture {
             flags: [._EnableAsynchronousDecompression],
             infoFlagsOut: nil
         ) { [weak self] status, _, imageBuffer, _, _ in
-            guard let self = self, status == noErr, let img = imageBuffer else { return }
-            self.lock.lock(); self.latestPixelBuffer = img; self.lock.unlock()
-            self.registrar.textures.textureFrameAvailable(self.textureId)
+            guard let self = self else { return }
+            guard status == noErr, let img = imageBuffer else {
+                // A picture that would not decode (one whose reference never
+                // arrived, say): start again from a keyframe.
+                if status != noErr {
+                    DispatchQueue.main.async { [weak self] in self?.requestKeyframe() }
+                }
+                return
+            }
+            self.lock.lock()
+            let alive = self.alive
+            if alive { self.latestPixelBuffer = img }
+            self.lock.unlock()
+            // Never for a texture that has been unregistered.
+            if alive { self.registrar.textures.textureFrameAvailable(self.textureId) }
         }
     }
 
-    private func teardown() {
+    func teardown() {
+        lock.lock(); alive = false; latestPixelBuffer = nil; lock.unlock()
         if let s = session { VTDecompressionSessionInvalidate(s) }
         session = nil
         formatDesc = nil
         vps = nil; sps = nil; pps = nil
-        lock.lock(); latestPixelBuffer = nil; lock.unlock()
         if textureId != 0 { registrar.textures.unregisterTexture(textureId); textureId = 0 }
     }
 

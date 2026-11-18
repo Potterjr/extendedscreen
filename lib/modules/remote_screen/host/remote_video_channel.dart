@@ -9,48 +9,53 @@ import 'package:extendedscreen/shared/services/logger_service.dart';
 ///
 /// [initialize] returns the texture id to hand to a `Texture` widget; NAL units
 /// are fed over a binary channel to avoid `StandardMessageCodec` overhead on the
-/// frame hot path.
+/// frame hot path. One decoder and texture per session (one per tablet, the
+/// id its connection was given).
 class RemoteVideoChannel extends GetxService {
   static const _channel = MethodChannel('extended_screen/remote_video');
   static const _nalChannel =
       BasicMessageChannel<ByteData?>('extended_screen/remote_nal', BinaryCodec());
   final _log = Get.find<LoggerService>();
 
-  /// Invoked when the native decoder needs a keyframe (post-configure / error);
-  /// the host relays this to the tablet as an IDR request.
-  void Function()? onRequestIdr;
-
-  /// Texture id of the live decoder output, or null before [initialize].
-  int? textureId;
+  /// Invoked with the session whose native decoder needs a keyframe (it is
+  /// fed pictures it has nothing to start from, or one failed to decode; at
+  /// most once a second); the host relays this to that tablet as an IDR
+  /// request.
+  void Function(int session)? onRequestIdr;
 
   @override
   void onInit() {
     super.onInit();
     _channel.setMethodCallHandler((call) async {
+      final args = call.arguments;
+      final session = args is Map ? args['session'] : null;
       switch (call.method) {
         case 'onRequestIdr':
-          onRequestIdr?.call();
+          if (session is int) onRequestIdr?.call(session);
         case 'onCodecError':
-          _log.w('RemoteVideo codec error: ${call.arguments}');
+          _log.w('RemoteVideo codec error: $args');
       }
       return null;
     });
   }
 
-  /// Create the decoder + backing texture. Returns the texture id (also stored
-  /// in [textureId]); null if the native side failed to allocate one.
+  /// Create [session]'s decoder + backing texture (replacing one it had).
+  /// Returns the texture id; null if the native side failed to allocate one.
   Future<int?> initialize({
+    required int session,
     required CodecType codec,
     required int width,
     required int height,
   }) async {
     try {
-      textureId = await _channel.invokeMethod<int>('initialize', {
+      final textureId = await _channel.invokeMethod<int>('initialize', {
+        'session': session,
         'codec': codec == CodecType.h265 ? 'h265' : 'h264',
         'width': width,
         'height': height,
       });
-      _log.i('RemoteVideo decoder ready (texture $textureId) ${width}x$height');
+      _log.i('RemoteVideo decoder ready (session $session, texture $textureId) '
+          '${width}x$height');
       return textureId;
     } catch (e, st) {
       _log.e('RemoteVideo initialize failed', e, st);
@@ -58,16 +63,18 @@ class RemoteVideoChannel extends GetxService {
     }
   }
 
-  /// Feed one raw NAL unit (Annex-B) to the decoder.
-  Future<void> feedNal(List<int> nalBytes) async {
-    final nal = nalBytes is Uint8List ? nalBytes : Uint8List.fromList(nalBytes);
-    await _nalChannel.send(nal.buffer.asByteData());
+  /// Feed one encoded frame (Annex-B) to [session]'s decoder: one message,
+  /// the session's id (4 bytes, big-endian) and then the frame.
+  Future<void> feedNal(int session, List<int> nalBytes) async {
+    final message = Uint8List(4 + nalBytes.length);
+    ByteData.sublistView(message).setUint32(0, session);
+    message.setRange(4, message.length, nalBytes);
+    await _nalChannel.send(ByteData.sublistView(message));
   }
 
-  Future<void> dispose() async {
+  Future<void> dispose({required int session}) async {
     try {
-      await _channel.invokeMethod('dispose');
+      await _channel.invokeMethod('dispose', {'session': session});
     } catch (_) {}
-    textureId = null;
   }
 }

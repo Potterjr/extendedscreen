@@ -18,16 +18,32 @@ private func esLog(_ message: String) {
     FileHandle.standardError.write(Data((message + "\n").utf8))
 }
 
-/// Where the captured display's picture sits inside the encoded frame,
+/// Where a session's captured display sits inside its encoded frame,
 /// normalised to the frame (0…1). The frame is always panel-shaped, so a
 /// display of another shape (Mirror from a notched MacBook or a 16:9 monitor
 /// onto a 16:10 tablet) is scaled to fit with bars along two edges. The tablet
 /// reports touches over the whole frame, and InputInjectPlugin maps them
-/// through this rect onto the display. Written on the capture queue from each
+/// through this rect onto the display. One per capture session (the session
+/// id Dart hands out): written on that session's capture queue from each
 /// frame's SCStreamFrameInfo and read on the main thread, hence the lock.
 /// Until the current capture's first frame arrives it is the whole frame.
 final class CaptureContentRect {
-    static let shared = CaptureContentRect()
+    private static let registryLock = NSLock()
+    private static var registry: [Int: CaptureContentRect] = [:]
+
+    /// The rect of capture session [id], made on first use.
+    static func forSession(_ id: Int) -> CaptureContentRect {
+        registryLock.lock(); defer { registryLock.unlock() }
+        if let rect = registry[id] { return rect }
+        let rect = CaptureContentRect()
+        registry[id] = rect
+        return rect
+    }
+
+    /// Forgets session [id]'s rect (the session is gone).
+    static func remove(_ id: Int) {
+        registryLock.lock(); registry[id] = nil; registryLock.unlock()
+    }
 
     private let lock = NSLock()
     private var rect: CGRect?  // nil: not measured yet, use the whole frame
@@ -75,93 +91,25 @@ class ScreenCapturePlugin: NSObject {
     }
 }
 
+/// The capture plugin: one method channel and one frame stream for every
+/// capture session, each session (one per tablet) addressed by the id Dart
+/// sends as `session` (a call without one means session 0). Every encoded
+/// frame on the stream starts with its session's id, 4 bytes big-endian.
+/// Main thread: the method calls, the session registry and every
+/// display/stream start and stop.
 @available(macOS 12.3, *)
-private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutput, FlutterStreamHandler {
+private class ScreenCapturePluginImpl: NSObject, FlutterStreamHandler {
 
     private static let channelName = "extended_screen/screen_capture"
     private static let frameChannelName = "extended_screen/frames"
     private var channel: FlutterMethodChannel?
     private var frameSink: FlutterEventSink?
-    private var stream: SCStream?
-    private var compressionSession: VTCompressionSession?
-    // CGVirtualDisplay / CGVirtualDisplayDescriptor available macOS 12.4+ only;
-    // stored as AnyObject to compile at 10.15 deployment target.
-    private var virtualDisplay: AnyObject?
-    private var virtualDisplayID: CGDirectDisplayID = 0
-    // The display the running capture shows (0 when not capturing): the
-    // virtual display in Extend, the main display in Mirror or when Extend
-    // had to fall back. getVirtualDisplayBounds reports this display, so touch
-    // input maps onto the picture the tablet actually shows. Main thread only.
-    private var capturedDisplayID: CGDirectDisplayID = 0
-    // Bumped on every start/stop (main thread) so a start still waiting on
-    // ScreenCaptureKit (up to ~1.5 s while it polls for a new virtual
-    // display) can't bring a stream up after stopCapture.
-    private var captureGeneration = 0
-    // A just-created virtual display can take a moment to show up in
-    // ScreenCaptureKit's list: re-poll this many times, this far apart.
-    private static let virtualDisplayLookupRetries = 6
-    private static let virtualDisplayLookupDelay = 0.25
-    private var forceKeyframe = true  // first encoded frame is always an IDR
-    private var frameCount = 0
-    // True between a successful startCapture and stopCapture. Gates the wake
-    // handler so we only rebuild the pipeline when a session is actually live.
-    private var isCapturing = false
-    private var targetFps = 60
-    // "Max" preset: the encode rate steps down from the tablet's top refresh
-    // rate when this Mac's encoder can't keep up, and back up once it
-    // recovers (see adaptFrameRate).
-    private var adaptiveFps = false
-    private var maxFps = 60
-    private var overloadStreak = 0
-    // Sum of the timer's ticks/s over the current overload streak — while the
-    // encoder is saturated that's its real throughput (see adaptFrameRate).
-    private var overloadTickSum = 0.0
-    private var healthyStreak = 0
-    // 45 sits between 30 and 60 because a 60 fps H.264 session at a tablet's
-    // native resolution is right at the limit on some Macs (M3 Pro: ~50–60).
-    private static let adaptiveRates = [30, 45, 60, 90, 120]
-    // Seconds of health required before trying the next rate up; doubles each
-    // time a step-up fails quickly so a rate that doesn't fit can't oscillate.
-    private var stepUpDelay = 10
-    private var lastStepUpAt: Date?
-    // Keeps macOS from App-Napping the (usually hidden) host while it streams:
-    // throttled timers/priority stalled encoding for seconds at a time.
+    private var sessions: [Int: CaptureSession] = [:]
+    // Keeps macOS from App-Napping the (usually hidden) host while any
+    // session streams: throttled timers/priority stalled encoding for
+    // seconds at a time. Held while [streamingSessions] is not empty.
     private var captureActivity: NSObjectProtocol?
-    // Counts frames dispatched to encodeQueue but not yet returned.
-    // If this grows beyond the threshold we skip the incoming frame to bound latency.
-    private var pendingEncodeFrames: Int32 = 0
-    private static let maxPendingEncodeFrames: Int32 = 10
-
-    // Over Wi-Fi the host's BitrateAdapter moves the encoder's average
-    // bitrate to what the link carries. setBitrate (main thread) leaves the
-    // new value here; the timer thread applies it before its next encode.
-    // 0: nothing waiting. [encoderBitrate] is what the session runs at.
-    private var requestedBitrate = 0
-    private var encoderBitrate = 0
-    private let bitrateLock = NSLock()
-
-    // High-resolution Mach thread drives encode at exactly targetFps.
-    // GCD DispatchSourceTimer is capped by the OS at ~60fps; mach_wait_until bypasses this.
-    private var encodeTimer: DispatchSourceTimer?
-    private var machThread: Thread?
-    private var machThreadRunning = false
-    // Bumped on every start/stop so a timer thread still inside mach_wait_until
-    // exits even if capture restarts before it wakes (a stop→start within one
-    // interval used to leave two timer threads encoding in parallel).
-    private var timerGeneration = 0
-    private var latestPixelBuffer: CVPixelBuffer?
-    private let bufferLock = NSLock()
-
-    // Diagnostic counters.
-    private var diagSckCount: Int32 = 0
-    private var diagEncCount: Int32 = 0
-    private var diagDropCount: Int32 = 0
-    private var diagTickCount: Int32 = 0   // timer ticks per second
-    private var diagLastLog = Date()
-
-    private let captureQueue = DispatchQueue(label: "capture", qos: .userInteractive)
-    private let encodeQueue  = DispatchQueue(label: "encode",  qos: .userInteractive)
-    private let timerQueue   = DispatchQueue(label: "timer",   qos: .userInteractive)
+    private var streamingSessions = Set<Int>()
 
     static func register(with messenger: FlutterBinaryMessenger) {
         let plugin = ScreenCapturePluginImpl()
@@ -175,12 +123,18 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
         plugin.observeSystemWake()
     }
 
+    private var anyCapturing: Bool { sessions.values.contains { $0.isCapturing } }
+    // Bumped by each wake notification: only the last one's rebuild request
+    // goes out (the system-wake and display-wake notifications both fire on
+    // resume).
+    private var wakeGeneration = 0
+
     // MARK: - Sleep / Wake recovery
 
-    // A sleep/wake cycle invalidates ScreenCaptureKit, the CGVirtualDisplay and
-    // the VideoToolbox session, but the ADB-reverse socket (USB) survives — so
+    // A sleep/wake cycle invalidates ScreenCaptureKit, the CGVirtualDisplays and
+    // the VideoToolbox sessions, but the ADB-reverse socket (USB) survives — so
     // the Dart heartbeat/reconnect never fires and the pipeline stays dead. On
-    // wake we ask Dart to rebuild the whole thing (Dart owns the orchestration:
+    // wake we ask Dart to rebuild every session (Dart owns the orchestration:
     // virtual display → SCK → encoder → control packets).
     private func observeSystemWake() {
         let nc = NSWorkspace.shared.notificationCenter
@@ -190,27 +144,36 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
                        name: NSWorkspace.screensDidWakeNotification, object: nil)
 
         // Rearranging displays (or changing resolution/scaling) in System
-        // Settings → Displays doesn't invalidate the capture session, but it
-        // does move the virtual display's screen-space origin — which Dart
-        // caches to map tablet touch coordinates onto the real screen. Ask it
-        // to refetch the bounds so touch keeps landing in the right place.
+        // Settings → Displays doesn't invalidate the capture sessions, but it
+        // does move the displays' screen-space origins — which Dart caches to
+        // map tablet touch coordinates onto the real screen. Adding or removing
+        // one session's virtual display moves the others too. Ask Dart to
+        // refetch every session's bounds so touch keeps landing in the right
+        // place.
         NotificationCenter.default.addObserver(self, selector: #selector(screenParametersChanged),
                        name: NSApplication.didChangeScreenParametersNotification, object: nil)
     }
 
     @objc private func screenParametersChanged(_ note: Notification) {
-        guard isCapturing else { return }
+        guard anyCapturing else { return }
         channel?.invokeMethod("onDisplayBoundsChanged", arguments: nil)
     }
 
     @objc private func systemDidWake(_ note: Notification) {
-        guard isCapturing else { return }
+        // Whether or not a stream is running: ScreenCaptureKit stops it as
+        // the displays go to sleep, the rebuild that follows finds no display
+        // and fails, and the wake is when one can work again. Dart decides
+        // which sessions to rebuild (those still connected; it ignores this
+        // with none).
+        guard !sessions.isEmpty else { return }
         esLog("[ExtendedScreen] Wake (\(note.name.rawValue)) — scheduling capture restart")
-        // Give the GPU/displays a moment to come back before rebuilding. The
-        // display-wake and system-wake notifications both fire on resume; the
-        // Dart side coalesces the two rebuild requests.
+        // Give the GPU/displays a moment to come back before rebuilding,
+        // counted from the last of the wake notifications, which then get
+        // one request. No session id: every session needs rebuilding.
+        wakeGeneration += 1
+        let generation = wakeGeneration
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
-            guard let self = self, self.isCapturing else { return }
+            guard let self = self, generation == self.wakeGeneration else { return }
             self.channel?.invokeMethod("onCaptureNeedsRestart", arguments: nil)
         }
     }
@@ -232,56 +195,89 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
         return nil
     }
 
+    // MARK: - Called by sessions (main thread)
+
+    /// A session's encoded frame, already prefixed with its id.
+    func emitFrame(_ data: Data) {
+        frameSink?(FlutterStandardTypedData(bytes: data))
+    }
+
+    func invoke(_ method: String, _ arguments: Any?) {
+        channel?.invokeMethod(method, arguments: arguments)
+    }
+
+    /// App Nap is held off while any session streams.
+    func setStreaming(_ id: Int, _ streaming: Bool) {
+        if streaming { streamingSessions.insert(id) } else { streamingSessions.remove(id) }
+        if !streamingSessions.isEmpty, captureActivity == nil {
+            captureActivity = ProcessInfo.processInfo.beginActivity(
+                options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical],
+                reason: "Streaming the screen to the tablet")
+        } else if streamingSessions.isEmpty, let activity = captureActivity {
+            ProcessInfo.processInfo.endActivity(activity)
+            captureActivity = nil
+        }
+    }
+
+    /// Whether a session other than [id] has an encoder: every encoder after
+    /// the first must be a hardware one (the second can otherwise land
+    /// silently on a software encoder).
+    func otherSessionEncodes(than id: Int) -> Bool {
+        sessions.contains { $0.key != id && $0.value.hasEncoder }
+    }
+
+    // MARK: - Method calls
+
+    private func session(_ id: Int) -> CaptureSession {
+        if let s = sessions[id] { return s }
+        let s = CaptureSession(id: id, plugin: self)
+        sessions[id] = s
+        return s
+    }
+
     func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+        let args = call.arguments as? [String: Any] ?? [:]
+        let id = args["session"] as? Int ?? 0
         switch call.method {
         case "requestPermission":
             requestPermission(result: result)
         case "startCapture":
-            guard let args = call.arguments as? [String: Any] else {
-                result(FlutterError(code: "BAD_ARGS", message: nil, details: nil))
-                return
-            }
-            startCapture(args: args, result: result)
+            session(id).startCapture(args: args, result: result)
         case "stopCapture":
-            stopCapture()
-            result(nil)
+            guard let s = sessions[id] else { result(nil); return }
+            s.stopCapture { result(nil) }
         case "requestIdr":
-            forceKeyframe = true
+            sessions[id]?.requestKeyframe()
             result(nil)
         case "setBitrate":
-            // Applied by the timer thread before its next encode (see
-            // onDisplayLinkTick), the thread every other call into the
-            // session comes from, so nothing here touches the session.
-            if let args = call.arguments as? [String: Any],
-               let bps = args["bitrate"] as? Int, bps > 0 {
-                bitrateLock.lock()
-                requestedBitrate = min(bps, Int(Int32.max))
-                bitrateLock.unlock()
+            // Applied by the session's timer thread before its next encode
+            // (see onTick), the thread every other call into the encoder
+            // comes from, so nothing here touches the encoder.
+            if let bps = args["bitrate"] as? Int, bps > 0 {
+                sessions[id]?.requestBitrate(bps)
             }
             result(nil)
         case "createVirtualDisplay":
-            guard let args = call.arguments as? [String: Any] else {
-                result(FlutterError(code: "BAD_ARGS", message: nil, details: nil))
-                return
-            }
-            createVirtualDisplay(args: args, result: result)
+            session(id).createVirtualDisplay(args: args, result: result)
         case "removeVirtualDisplay":
-            virtualDisplay = nil
-            virtualDisplayID = 0
-            result(nil)
+            guard let s = sessions[id] else { result(nil); return }
+            s.removeVirtualDisplay { result(nil) }
         case "getVirtualDisplayBounds":
-            // The display being captured, so input lands on what the tablet
-            // shows. Before a capture is running: the virtual display if one
-            // exists, else the main display.
-            let displayID = capturedDisplayID != 0 ? capturedDisplayID
-                : (virtualDisplayID != 0 ? virtualDisplayID : CGMainDisplayID())
-            let rect = CGDisplayBounds(displayID)
+            let rect = CGDisplayBounds(sessions[id]?.boundsDisplayID ?? CGMainDisplayID())
             result([
                 "x": rect.origin.x,
                 "y": rect.origin.y,
                 "w": rect.width,
                 "h": rect.height,
             ])
+        case "disposeSession":
+            // Stops and forgets the session: its capture, encoder and
+            // virtual display. Answered once all of that is gone.
+            guard let s = sessions.removeValue(forKey: id) else { result(nil); return }
+            s.dispose {
+                CaptureContentRect.remove(id)
+                result(nil)
+            }
         default:
             result(FlutterMethodNotImplemented)
         }
@@ -296,29 +292,177 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
             }
         }
     }
+}
+
+/// Counts frames handed to VideoToolbox and not yet returned. Retained by
+/// every encode callback, so a callback that lands after its session is gone
+/// still has a counter to decrement.
+private final class EncodeCounter {
+    private let value = UnsafeMutablePointer<Int32>.allocate(capacity: 1)
+    init() { value.initialize(to: 0) }
+    deinit { value.deallocate() }
+    func increment() { OSAtomicIncrement32(value) }
+    func decrement() { OSAtomicDecrement32(value) }
+    var current: Int32 { OSAtomicAdd32(0, value) }
+}
+
+/// One run of a session's timer thread: stop() tells it to end, and [done]
+/// is signalled once it has. Its frames in flight are counted per run, so a
+/// frame an old encoder never returned can't hold back the next capture.
+private final class TimerRun {
+    private let lock = NSLock()
+    private var running = true
+    let done = DispatchSemaphore(value: 0)
+    let inFlight = EncodeCounter()
+    var reportedEncodeError = false  // timer thread only
+
+    var isRunning: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return running
+    }
+
+    func stop() {
+        lock.lock(); running = false; lock.unlock()
+    }
+}
+
+/// One tablet's capture pipeline: its virtual display (Extend), its
+/// ScreenCaptureKit stream, its VideoToolbox encoder and the real-time timer
+/// thread that feeds the encoder. Main thread: everything except the
+/// capture queue's sample handling, the timer thread's encoding and the
+/// encoder's callbacks, which share only what [lock], [bufferLock] and the
+/// counters guard.
+@available(macOS 12.3, *)
+private final class CaptureSession: NSObject, SCStreamDelegate, SCStreamOutput {
+    let id: Int
+    private weak var plugin: ScreenCapturePluginImpl?
+    private let contentRect: CaptureContentRect
+    private let tag: String
+
+    private var stream: SCStream?
+    private var compressionSession: VTCompressionSession?
+    // CGVirtualDisplay is a private class (see CGVirtualDisplay.h); kept as
+    // AnyObject, released by dropping the reference.
+    private var virtualDisplay: AnyObject?
+    private var virtualDisplayID: CGDirectDisplayID = 0
+    // The display the running capture shows (0 when not capturing): the
+    // virtual display in Extend, the main display in Mirror or when Extend
+    // had to fall back. getVirtualDisplayBounds reports this display, so touch
+    // input maps onto the picture the tablet actually shows.
+    private var capturedDisplayID: CGDirectDisplayID = 0
+    // Bumped on every start/stop so a start still waiting on ScreenCaptureKit
+    // (up to ~1.5 s while it polls for a new virtual display) can't bring a
+    // stream up after stopCapture.
+    private var captureGeneration = 0
+    // A just-created virtual display can take a moment to show up in
+    // ScreenCaptureKit's list: re-poll this many times, this far apart.
+    private static let virtualDisplayLookupRetries = 6
+    private static let virtualDisplayLookupDelay = 0.25
+    // True between a successful startCapture and stopCapture.
+    private(set) var isCapturing = false
+    private var timerRun: TimerRun?
+
+    // Shared with the timer thread, under [lock].
+    private let lock = NSLock()
+    private var forceKeyframe = true  // first encoded frame is always an IDR
+    // Over Wi-Fi the host's BitrateAdapter moves the encoder's average
+    // bitrate to what the link carries. setBitrate (main thread) leaves the
+    // new value here; the timer thread applies it before its next encode.
+    // 0: nothing waiting. [encoderBitrate] is what the encoder runs at.
+    private var requestedBitrate = 0
+    private var encoderBitrate = 0
+
+    // Timer-thread state: set on the main thread before the thread starts
+    // (startCapture runs only once the previous thread has ended), then the
+    // timer thread's alone.
+    private var targetFps = 60
+    // "Max" preset: the encode rate steps down from the tablet's top refresh
+    // rate when this Mac's encoder can't keep up, and back up once it
+    // recovers (see adaptFrameRate).
+    private var adaptiveFps = false
+    private var maxFps = 60
+    private var overloadStreak = 0
+    // Sum of the timer's ticks/s over the current overload streak — while the
+    // encoder is saturated that's its real throughput (see adaptFrameRate).
+    private var overloadTickSum = 0.0
+    private var healthyStreak = 0
+    // 45 sits between 30 and 60 because a 60 fps H.264 session at a tablet's
+    // native resolution is right at the limit on some Macs (M3 Pro: ~50–60).
+    private static let adaptiveRates = [30, 45, 60, 90, 120]
+    // Seconds of health required before trying the next rate up; doubles each
+    // time a step-up fails quickly so a rate that doesn't fit can't oscillate.
+    private var stepUpDelay = 10
+    private var lastStepUpAt: Date?
+    private var diagLastLog = Date()
+
+    // Frames handed to the encoder and not yet returned (TimerRun.inFlight):
+    // past this many the tick skips the frame to bound latency.
+    private static let maxPendingEncodeFrames: Int32 = 10
+
+    // The newest captured frame (capture queue writes, timer thread reads).
+    private var latestPixelBuffer: CVPixelBuffer?
+    private let bufferLock = NSLock()
+    private var frameCount = 0  // capture queue only
+
+    // Diagnostic counters.
+    private var diagSckCount: Int32 = 0
+    private var diagEncCount: Int32 = 0
+    private var diagDropCount: Int32 = 0
+    private var diagTickCount: Int32 = 0   // timer ticks per second
+
+    private let captureQueue: DispatchQueue
+
+    var hasEncoder: Bool { compressionSession != nil }
+
+    /// The display touch input should land on: the captured one, else this
+    /// session's virtual display, else the main display.
+    var boundsDisplayID: CGDirectDisplayID {
+        capturedDisplayID != 0 ? capturedDisplayID
+            : (virtualDisplayID != 0 ? virtualDisplayID : CGMainDisplayID())
+    }
+
+    init(id: Int, plugin: ScreenCapturePluginImpl) {
+        self.id = id
+        self.plugin = plugin
+        self.contentRect = CaptureContentRect.forSession(id)
+        self.tag = "[ExtendedScreen] s\(id)"
+        self.captureQueue = DispatchQueue(label: "capture.\(id)", qos: .userInteractive)
+        super.init()
+    }
+
+    // MARK: - Keyframes and bitrate (main thread → timer thread)
+
+    func requestKeyframe() {
+        lock.lock(); forceKeyframe = true; lock.unlock()
+    }
+
+    func requestBitrate(_ bps: Int) {
+        lock.lock(); requestedBitrate = min(bps, Int(Int32.max)); lock.unlock()
+    }
 
     // MARK: - Virtual Display (Extend Mode)
 
-    private func createVirtualDisplay(args: [String: Any], result: @escaping FlutterResult) {
-        // Release any previous virtual display first so the system reclaims it
-        // before we allocate a new one (double-alloc causes id=0 / applied=false).
-        virtualDisplay = nil
-        virtualDisplayID = 0
-
-        // Small delay to let the OS fully remove the previous display.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            guard let self else { return }
-
+    /// Gives this session a virtual display, replacing its own previous one
+    /// if it had one; other sessions' displays are left alone. Answers
+    /// {applied, displayID}; displayID 0 means it failed.
+    func createVirtualDisplay(args: [String: Any], result: @escaping FlutterResult) {
+        let make = { [weak self] in
+            guard let self = self else {
+                result(["applied": false, "displayID": 0])
+                return
+            }
             // w/h are the LOGICAL desktop points (the client panel ÷ 2).
             // Physical pixel buffer = w*2 × h*2 — the client's native panel.
             let w = args["width"]  as? Int ?? 1280
             let h = args["height"] as? Int ?? 800
             let r = args["refreshRate"] as? Int ?? 60
+            let serial = args["serialNum"] as? Int ?? 0x0001
+            let name = args["name"] as? String ?? "Extended Screen"
             let pw = w * 2, ph = h * 2  // physical pixels
 
             let descriptor = CGVirtualDisplayDescriptor()
             descriptor.queue = DispatchQueue.global(qos: .userInteractive)
-            descriptor.name = "Extended Screen"
+            descriptor.name = name
             descriptor.maxPixelsWide = UInt32(pw)
             descriptor.maxPixelsHigh = UInt32(ph)
             // ~220 PPI → macOS treats this as a Retina display and applies 2x
@@ -328,8 +472,13 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
             descriptor.sizeInMillimeters = CGSize(width: mmW, height: mmH)
             descriptor.productID = 0x1234
             descriptor.vendorID  = 0x3456
-            descriptor.serialNum = 0x0001
-            descriptor.terminationHandler = { _, _ in }
+            // macOS remembers each display's arrangement by its serial; a
+            // different one per tablet keeps two of them apart.
+            descriptor.serialNum = UInt32(truncatingIfNeeded: max(serial, 1))
+            let tag = self.tag
+            descriptor.terminationHandler = { _, _ in
+                esLog("\(tag) virtual display terminated")
+            }
 
             let display = CGVirtualDisplay(descriptor: descriptor)
 
@@ -342,14 +491,75 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
             let ok = display.apply(settings)
             self.virtualDisplay = display
             self.virtualDisplayID = display.displayID
-            esLog("[ExtendedScreen] Virtual display created id=\(display.displayID) applied=\(ok)")
-            result(ok)
+            esLog("\(tag) Virtual display created id=\(display.displayID) applied=\(ok) serial=\(serial)")
+            result(["applied": ok, "displayID": Int(display.displayID)])
         }
+        guard virtualDisplay != nil else {
+            make()
+            return
+        }
+        // Replacing this session's own display: release it first so the
+        // system reclaims it before the new one is made (a double allocation
+        // gave id 0 / applied false), and give the OS a moment to remove it.
+        virtualDisplay = nil
+        virtualDisplayID = 0
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: make)
+    }
+
+    /// Releases this session's virtual display and calls back once the
+    /// system no longer lists it (at most ~1 s), so whatever runs next sees
+    /// a settled set of displays.
+    func removeVirtualDisplay(completion: @escaping () -> Void) {
+        let old = virtualDisplayID
+        virtualDisplay = nil
+        virtualDisplayID = 0
+        guard old != 0 else {
+            completion()
+            return
+        }
+        Self.waitUntilGone(old, deadline: Date().addingTimeInterval(1), completion: completion)
+    }
+
+    private static func waitUntilGone(_ display: CGDirectDisplayID, deadline: Date,
+                                      completion: @escaping () -> Void) {
+        if !activeDisplays().contains(display) || Date() >= deadline {
+            completion()
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            waitUntilGone(display, deadline: deadline, completion: completion)
+        }
+    }
+
+    private static func activeDisplays() -> [CGDirectDisplayID] {
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else { return [] }
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetActiveDisplayList(count, &ids, &count) == .success else { return [] }
+        return Array(ids.prefix(Int(count)))
     }
 
     // MARK: - Screen Capture
 
-    private func startCapture(args: [String: Any], result: @escaping FlutterResult) {
+    /// Starts capturing. `mode` 0 is Extend (this session's virtual display)
+    /// and 1 Mirror (the main display, whatever other displays exist).
+    /// Answers {displayID, hardware, fellBack} or an error: ENCODER_BUSY,
+    /// NO_ENCODER and ENCODER_FAILED when no encoder could be made.
+    func startCapture(args: [String: Any], result: @escaping FlutterResult) {
+        if stream != nil || timerRun != nil || compressionSession != nil {
+            // Still running (or a start is under way): stop it first, then
+            // start, so two pipelines never run for one session. A stop or
+            // start that comes meanwhile wins over this one.
+            let generation = captureGeneration + 1  // what stopCapture sets
+            stopCapture { [weak self] in
+                guard let self = self, self.captureGeneration == generation else {
+                    result(FlutterError(code: "CANCELLED", message: "Capture stopped before it started", details: nil))
+                    return
+                }
+                self.startCapture(args: args, result: result)
+            }
+            return
+        }
         // Logical size × scaleFactor = the resolution we capture/encode at
         // (2.0 = native panel via HiDPI, 1.0 = half-res for performance/custom).
         let wLogical = args["width"]  as? Int ?? 1280
@@ -360,6 +570,9 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
         let fps   = args["refreshRate"] as? Int ?? 60
         let br    = args["bitrate"]     as? Int ?? 20_000_000
         let codec = args["codec"]       as? String ?? "h264"
+        let extend = (args["mode"] as? Int ?? 0) == 0
+        let requireHardware = (args["requireHardware"] as? Bool ?? false)
+            || (plugin?.otherSessionEncodes(than: id) ?? false)
         targetFps = fps
         maxFps = fps
         adaptiveFps = args["adaptiveFps"] as? Bool ?? false
@@ -368,31 +581,50 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
         healthyStreak = 0
         stepUpDelay = 10
         lastStepUpAt = nil
-        if captureActivity == nil {
-            captureActivity = ProcessInfo.processInfo.beginActivity(
-                options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical],
-                reason: "Streaming the screen to the tablet")
-        }
 
-        setupEncoder(width: w, height: h, fps: fps, bitrate: br, codec: codec)
+        let (hardware, encoderError) = setupEncoder(width: w, height: h, fps: fps, bitrate: br,
+                                                    codec: codec, requireHardware: requireHardware)
+        if let error = encoderError {
+            result(error)
+            return
+        }
+        plugin?.setStreaming(id, true)
 
         captureGeneration += 1
         let generation = captureGeneration
         capturedDisplayID = 0
-        CaptureContentRect.shared.reset()
+        contentRect.reset()
+        // On the capture queue, so after any sample the old stream had
+        // queued and before the new stream's first one: neither a stale frame
+        // nor the first count carries over.
+        captureQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.frameCount = 0
+            self.bufferLock.lock(); self.latestPixelBuffer = nil; self.bufferLock.unlock()
+        }
+
+        // A start that fails from here on lets go of what it holds at once
+        // (its encoder, App Nap's hold) rather than at the next stop. A wake
+        // asks Dart to try again (see systemDidWake).
+        let fail: (FlutterError) -> Void = { [weak self] error in
+            guard let self = self else { result(error); return }
+            esLog("\(self.tag) Capture not started: \(error.code) \(error.message ?? "")")
+            self.stopCapture { result(error) }
+        }
 
         // Called back on the main thread, where the stream is set up so the
         // generation check can't race stopCapture.
-        findCaptureDisplay(virtualID: virtualDisplayID, generation: generation, attempt: 0) { [weak self] display, error in
+        findCaptureDisplay(virtualID: extend ? virtualDisplayID : 0, generation: generation,
+                           attempt: 0) { [weak self] display, fellBack, error in
             guard let self = self, generation == self.captureGeneration else {
                 result(FlutterError(code: "CANCELLED", message: "Capture stopped before it started", details: nil))
                 return
             }
             guard let targetDisplay = display else {
                 if let error = error {
-                    result(FlutterError(code: "SCK_ERROR", message: error.localizedDescription, details: nil))
+                    fail(FlutterError(code: "SCK_ERROR", message: error.localizedDescription, details: nil))
                 } else {
-                    result(FlutterError(code: "NO_DISPLAY", message: "No display to capture", details: nil))
+                    fail(FlutterError(code: "NO_DISPLAY", message: "No display to capture", details: nil))
                 }
                 return
             }
@@ -433,44 +665,50 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
                             result(FlutterError(code: "CANCELLED", message: "Capture stopped before it started", details: nil))
                             return
                         }
-                        if err == nil {
-                            self.isCapturing = true
-                            self.capturedDisplayID = targetDisplay.displayID
-                            self.startDisplayLink(displayID: targetDisplay.displayID)
+                        guard err == nil, let encoder = self.compressionSession else {
+                            fail(FlutterError(code: "START_FAILED", message: err?.localizedDescription, details: nil))
+                            return
                         }
-                        result(err == nil ? nil : FlutterError(code: "START_FAILED", message: err?.localizedDescription, details: nil))
+                        self.isCapturing = true
+                        self.capturedDisplayID = targetDisplay.displayID
+                        self.startTimer(encoder: encoder)
+                        result([
+                            "displayID": Int(targetDisplay.displayID),
+                            "hardware": hardware,
+                            "fellBack": fellBack,
+                        ])
                     }
                 }
             } catch {
-                result(FlutterError(code: "ADD_OUTPUT_FAILED", message: error.localizedDescription, details: nil))
+                fail(FlutterError(code: "ADD_OUTPUT_FAILED", message: error.localizedDescription, details: nil))
             }
         }
     }
 
     /// Picks the display to capture and calls back on the main thread, with a
     /// nil display if the lookup failed or capture was stopped meanwhile.
-    /// Extend (`virtualID` ≠ 0): the virtual display. A just-created one can
-    /// take a moment to appear in ScreenCaptureKit's list, so re-poll for
-    /// ~1.5 s before falling back to the main display (and releasing the
-    /// virtual display nothing would show). Mirror: the main
+    /// Extend (`virtualID` ≠ 0): this session's virtual display. A just-created
+    /// one can take a moment to appear in ScreenCaptureKit's list, so re-poll
+    /// for ~1.5 s before falling back to the main display (`fellBack`, and
+    /// the virtual display nothing would show is released). Mirror: the main
     /// display (CGMainDisplayID, the one with the menu bar), rather than
     /// whichever display ScreenCaptureKit happens to list first.
     private func findCaptureDisplay(virtualID: CGDirectDisplayID, generation: Int, attempt: Int,
-                                    completion: @escaping (SCDisplay?, Error?) -> Void) {
+                                    completion: @escaping (SCDisplay?, Bool, Error?) -> Void) {
         SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) { [weak self] content, error in
             DispatchQueue.main.async {
                 guard let self = self, generation == self.captureGeneration else {
-                    completion(nil, nil)
+                    completion(nil, false, nil)
                     return
                 }
                 guard let content = content, error == nil else {
-                    completion(nil, error)
+                    completion(nil, false, error)
                     return
                 }
                 if virtualID != 0 {
                     if let vd = content.displays.first(where: { $0.displayID == virtualID }) {
-                        esLog("[ExtendedScreen] Capturing virtual display \(virtualID)")
-                        completion(vd, nil)
+                        esLog("\(self.tag) Capturing virtual display \(virtualID)")
+                        completion(vd, false, nil)
                         return
                     }
                     if attempt < Self.virtualDisplayLookupRetries {
@@ -484,12 +722,12 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
                 let mainID = CGMainDisplayID()
                 guard let main = content.displays.first(where: { $0.displayID == mainID })
                         ?? content.displays.first else {
-                    completion(nil, nil)
+                    completion(nil, false, nil)
                     return
                 }
                 if virtualID != 0 {
                     let waited = Double(Self.virtualDisplayLookupRetries) * Self.virtualDisplayLookupDelay
-                    esLog("[ExtendedScreen] WARNING: virtual display \(virtualID) still not in ScreenCaptureKit's display list after \(waited)s; falling back to display \(main.displayID). Extend is NOT active: the tablet mirrors that display, and the virtual display is released.")
+                    esLog("\(self.tag) WARNING: virtual display \(virtualID) still not in ScreenCaptureKit's display list after \(waited)s; falling back to display \(main.displayID). Extend is NOT active: the tablet mirrors that display, and the virtual display is released.")
                     // Nothing shows the virtual display now, so drop it: left
                     // attached, the cursor and windows could move onto a
                     // screen neither the Mac nor the tablet displays.
@@ -497,43 +735,74 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
                         self.virtualDisplay = nil
                         self.virtualDisplayID = 0
                     }
-                } else {
-                    esLog("[ExtendedScreen] Capturing main display \(main.displayID)")
+                    completion(main, true, nil)
+                    return
                 }
-                completion(main, nil)
+                esLog("\(self.tag) Capturing main display \(main.displayID)")
+                completion(main, false, nil)
             }
         }
     }
 
-    private func startDisplayLink(displayID: CGDirectDisplayID) {
-        stopDisplayLink()
-        // Fresh diag window: a stale one (from before this capture) reads as
-        // ~0 ticks/s, which adaptFrameRate would average into the throughput.
+    /// Stops the capture and calls back once its timer thread has ended (at
+    /// most ~1 s) and its encoder is gone, so a start that follows never
+    /// overlaps it.
+    func stopCapture(completion: @escaping () -> Void) {
+        isCapturing = false
+        captureGeneration += 1  // a start still in flight now gives up
+        capturedDisplayID = 0
+        contentRect.reset()
+        plugin?.setStreaming(id, false)
+        let run = timerRun
+        timerRun = nil
+        run?.stop()  // first, so no new encodes start during teardown
+        if let s = stream {
+            try? s.removeStreamOutput(self, type: .screen)
+            s.stopCapture { _ in }
+        }
+        stream = nil
+        bufferLock.lock(); latestPixelBuffer = nil; bufferLock.unlock()
+        let encoder = compressionSession
+        compressionSession = nil
+        let tag = self.tag
+        DispatchQueue.global(qos: .userInitiated).async {
+            if let run = run, run.done.wait(timeout: .now() + 1) == .timedOut {
+                esLog("\(tag) WARNING: the encode timer did not stop within 1 s")
+            }
+            if let encoder = encoder { VTCompressionSessionInvalidate(encoder) }
+            DispatchQueue.main.async { completion() }
+        }
+    }
+
+    /// Stops everything this session holds: capture, encoder, virtual
+    /// display. Holds the session (the registry no longer does) until its
+    /// display is gone.
+    func dispose(completion: @escaping () -> Void) {
+        stopCapture {
+            self.removeVirtualDisplay(completion: completion)
+        }
+    }
+
+    // MARK: - Encode timer
+
+    private func startTimer(encoder: VTCompressionSession) {
         diagLastLog = Date()
         OSAtomicAnd32(0, &diagSckCount); OSAtomicAnd32(0, &diagEncCount)
         OSAtomicAnd32(0, &diagDropCount); OSAtomicAnd32(0, &diagTickCount)
-        // Use a dedicated real-time Mach thread — mach_wait_until gives nanosecond-accurate
-        // wakeups independent of GCD's ~60fps scheduler cap.
-        machThreadRunning = true
-        timerGeneration += 1
-        let generation = timerGeneration
-        let t = Thread { [weak self] in self?.machTimerLoop(generation: generation) }
+        // A dedicated real-time Mach thread — mach_wait_until gives
+        // nanosecond-accurate wakeups independent of GCD's ~60fps scheduler cap.
+        let run = TimerRun()
+        timerRun = run
+        let t = Thread { [weak self] in
+            defer { run.done.signal() }
+            self?.timerLoop(run: run, encoder: encoder)
+        }
         t.qualityOfService = .userInteractive
         t.threadPriority = 1.0
         t.start()
-        machThread = t
     }
 
-    private func stopDisplayLink() {
-        machThreadRunning = false
-        timerGeneration += 1
-        machThread = nil
-        encodeTimer?.cancel()
-        encodeTimer = nil
-        bufferLock.lock(); latestPixelBuffer = nil; bufferLock.unlock()
-    }
-
-    private func machTimerLoop(generation: Int) {
+    private func timerLoop(run: TimerRun, encoder: VTCompressionSession) {
         var info = mach_timebase_info_data_t()
         mach_timebase_info(&info)
         // Apple Silicon ticks at 24 MHz (numer/denom = 125/3); Intel is 1/1.
@@ -542,39 +811,36 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
             let intervalNs = UInt64(1_000_000_000) / UInt64(max(targetFps, 1))
             return intervalNs * UInt64(info.denom) / UInt64(info.numer)
         }
-        esLog("[ExtendedScreen] machTimerLoop: targetFps=\(targetFps) adaptive=\(adaptiveFps) numer=\(info.numer) denom=\(info.denom)")
+        esLog("\(tag) timer: targetFps=\(targetFps) adaptive=\(adaptiveFps) numer=\(info.numer) denom=\(info.denom)")
 
         var next = mach_absolute_time() + currentInterval()
         var loopCount: Int32 = 0
         var loopStart = mach_absolute_time()
-        while machThreadRunning && generation == timerGeneration {
+        while run.isRunning {
             // mach_wait_until can return before the deadline when the wait is
             // interrupted; ticking on every return let the loop run at ~139/s
             // against a 120 target. Only tick once the deadline has passed.
-            while machThreadRunning && generation == timerGeneration
-                    && mach_absolute_time() < next {
+            while run.isRunning && mach_absolute_time() < next {
                 mach_wait_until(next)
             }
-            guard generation == timerGeneration else { break }
+            guard run.isRunning else { break }
             let intervalMach = currentInterval()
             next += intervalMach
             // After a stall, resync instead of bursting to catch up.
             let now = mach_absolute_time()
             if next < now { next = now + intervalMach }
-            OSAtomicIncrement32(&loopCount)
-            // Log loop rate every ~1s independently of onDisplayLinkTick
-            let elapsed = mach_absolute_time() - loopStart
-            let elapsedNs = elapsed * UInt64(info.numer) / UInt64(info.denom)
+            loopCount += 1
+            let elapsedNs = (mach_absolute_time() - loopStart) * UInt64(info.numer) / UInt64(info.denom)
             if elapsedNs >= 1_000_000_000 {
-                esLog("[ExtendedScreen] loopRate=\(loopCount)/s")
+                esLog("\(tag) loopRate=\(loopCount)/s")
                 loopCount = 0
                 loopStart = mach_absolute_time()
             }
-            onDisplayLinkTick()
+            onTick(encoder, run: run)
         }
     }
 
-    private func onDisplayLinkTick() {
+    private func onTick(_ encoder: VTCompressionSession, run: TimerRun) {
         OSAtomicIncrement32(&diagTickCount)
         // Diagnostic log every 1s (happens regardless of encode)
         let now = Date()
@@ -584,15 +850,15 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
             let enc  = OSAtomicAdd32(0, &diagEncCount);  OSAtomicAnd32(0, &diagEncCount)
             let drp  = OSAtomicAdd32(0, &diagDropCount); OSAtomicAnd32(0, &diagDropCount)
             let tick = OSAtomicAdd32(0, &diagTickCount); OSAtomicAnd32(0, &diagTickCount)
-            let pendingNow = OSAtomicAdd32(0, &pendingEncodeFrames)
-            esLog("[ExtendedScreen] diag: tick=\(tick)/s  SCK=\(sck)/s  encoded=\(enc)/s  skipped=\(drp)/s  pending=\(pendingNow)")
+            let pendingNow = run.inFlight.current
+            esLog("\(tag) diag: tick=\(tick)/s  SCK=\(sck)/s  encoded=\(enc)/s  skipped=\(drp)/s  pending=\(pendingNow)")
             diagLastLog = now
             if adaptiveFps {
-                adaptFrameRate(ticksPerSec: Double(tick) / diagElapsed, skipped: drp, pending: pendingNow)
+                adaptFrameRate(encoder, ticksPerSec: Double(tick) / diagElapsed,
+                               skipped: drp, pending: pendingNow)
             }
         }
-        guard let session = compressionSession else { return }
-        applyRequestedBitrate(session)
+        applyRequestedBitrate(encoder)
 
         bufferLock.lock()
         let pixelBuffer = latestPixelBuffer
@@ -609,34 +875,45 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
         // — the "laggy after leaving it a while" bug.
         let pts = CMClockGetTime(CMClockGetHostTimeClock())
 
-        let pending = OSAtomicAdd32(0, &pendingEncodeFrames)
-        if pending >= Self.maxPendingEncodeFrames {
+        if run.inFlight.current >= Self.maxPendingEncodeFrames {
             OSAtomicIncrement32(&diagDropCount)
             return
         }
 
-        var frameProps: CFDictionary? = nil
-        if forceKeyframe {
-            forceKeyframe = false
-            frameProps = [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue] as CFDictionary
-        }
+        lock.lock()
+        let keyframe = forceKeyframe
+        forceKeyframe = false
+        lock.unlock()
+        let frameProps: CFDictionary? = keyframe
+            ? [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue] as CFDictionary
+            : nil
 
         OSAtomicIncrement32(&diagEncCount)
-        OSAtomicIncrement32(&pendingEncodeFrames)
+        let counter = run.inFlight
+        counter.increment()
         // Call VT directly on the timer thread — no serial queue bottleneck.
-        // VTCompressionSessionEncodeFrame is non-blocking (submits to hardware) and
-        // fires its callback on a VT-internal thread, so this is safe.
-        VTCompressionSessionEncodeFrame(
-            session,
+        // VTCompressionSessionEncodeFrame submits to the hardware and fires
+        // its callback on a VT-internal thread.
+        let status = VTCompressionSessionEncodeFrame(
+            encoder,
             imageBuffer: pb,
             presentationTimeStamp: pts,
             duration: .invalid,
             frameProperties: frameProps,
             infoFlagsOut: nil
         ) { [weak self] status, _, encodedBuffer in
-            OSAtomicDecrement32(&self!.pendingEncodeFrames)
+            counter.decrement()
             guard status == noErr, let encoded = encodedBuffer else { return }
             self?.handleEncodedFrame(encoded)
+        }
+        // Refused outright (an encoder a sleep invalidated, say): its handler
+        // never runs, so it is not in flight.
+        if status != noErr {
+            counter.decrement()
+            if !run.reportedEncodeError {
+                run.reportedEncodeError = true
+                esLog("\(tag) WARNING: the encoder refused a frame (status \(status))")
+            }
         }
     }
 
@@ -654,7 +931,8 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
     /// After [stepUpDelay] healthy seconds, step back up one notch. A step-up
     /// that fails within 30 s doubles the delay before the next try (capped
     /// at 5 min), so a rate that really doesn't fit isn't retried in a loop.
-    private func adaptFrameRate(ticksPerSec: Double, skipped: Int32, pending: Int32) {
+    private func adaptFrameRate(_ encoder: VTCompressionSession, ticksPerSec: Double,
+                                skipped: Int32, pending: Int32) {
         let overloaded = skipped > 0
             || pending >= Self.maxPendingEncodeFrames - 3
             || ticksPerSec < Double(targetFps) * 0.9
@@ -674,72 +952,52 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
             if let up = lastStepUpAt, Date().timeIntervalSince(up) < 30 {
                 stepUpDelay = min(stepUpDelay * 2, 300)
             }
-            setAdaptiveRate(lower, reason: String(format: "encoder can't keep up (%.0f fps achieved)", achieved))
+            setAdaptiveRate(encoder, lower,
+                            reason: String(format: "encoder can't keep up (%.0f fps achieved)", achieved))
         } else if healthyStreak >= stepUpDelay,
                   let higher = rates.first(where: { $0 > targetFps }) {
             lastStepUpAt = Date()
-            setAdaptiveRate(higher, reason: "encoder recovered")
+            setAdaptiveRate(encoder, higher, reason: "encoder recovered")
         }
     }
 
-    /// Timer thread: hands the session a bitrate setBitrate left waiting. VT
+    /// Timer thread: hands the encoder a bitrate setBitrate left waiting. VT
     /// rate control takes it from the next frame on; nothing is rebuilt and
     /// no keyframe is forced.
-    private func applyRequestedBitrate(_ session: VTCompressionSession) {
-        bitrateLock.lock()
+    private func applyRequestedBitrate(_ encoder: VTCompressionSession) {
+        lock.lock()
         let requested = requestedBitrate
         let current = encoderBitrate
         requestedBitrate = 0
-        bitrateLock.unlock()
+        lock.unlock()
         guard requested > 0, requested != current else { return }
-        let status = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate,
+        let status = VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_AverageBitRate,
                                           value: NSNumber(value: requested))
         if status == noErr {
-            esLog("[ExtendedScreen] bitrate: \(current / 1000) → \(requested / 1000) kbps (fitting the Wi-Fi link)")
-            bitrateLock.lock()
+            esLog("\(tag) bitrate: \(current / 1000) → \(requested / 1000) kbps (fitting the Wi-Fi link)")
+            lock.lock()
             encoderBitrate = requested
-            bitrateLock.unlock()
+            lock.unlock()
         } else {
-            esLog("[ExtendedScreen] WARNING bitrate \(requested / 1000) kbps not applied (status \(status))")
+            esLog("\(tag) WARNING bitrate \(requested / 1000) kbps not applied (status \(status))")
         }
     }
 
-    private func setAdaptiveRate(_ fps: Int, reason: String) {
+    private func setAdaptiveRate(_ encoder: VTCompressionSession, _ fps: Int, reason: String) {
         overloadStreak = 0
         overloadTickSum = 0
         healthyStreak = 0
         targetFps = fps
-        if let s = compressionSession {
-            VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ExpectedFrameRate,
-                                 value: NSNumber(value: fps))
-        }
-        esLog("[ExtendedScreen] adaptive: \(reason) — now \(fps) fps (next step-up after \(stepUpDelay)s healthy)")
+        VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_ExpectedFrameRate,
+                             value: NSNumber(value: fps))
+        esLog("\(tag) adaptive: \(reason) — now \(fps) fps (next step-up after \(stepUpDelay)s healthy)")
+        let id = self.id
         DispatchQueue.main.async { [weak self] in
-            self?.channel?.invokeMethod("onFrameRateChanged", arguments: fps)
+            self?.plugin?.invoke("onFrameRateChanged", ["session": id, "fps": fps])
         }
     }
 
-    private func stopCapture() {
-        isCapturing = false
-        captureGeneration += 1  // a start still in flight now gives up
-        capturedDisplayID = 0
-        CaptureContentRect.shared.reset()
-        if let activity = captureActivity {
-            ProcessInfo.processInfo.endActivity(activity)
-            captureActivity = nil
-        }
-        stopDisplayLink()  // cancel timer first so no new encodes fire during teardown
-        stream?.stopCapture { _ in }
-        stream = nil
-        frameCount = 0
-        pendingEncodeFrames = 0
-        if let session = compressionSession {
-            VTCompressionSessionInvalidate(session)
-            compressionSession = nil
-        }
-    }
-
-    // MARK: - SCStreamOutput
+    // MARK: - SCStreamOutput / SCStreamDelegate
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .screen,
@@ -748,14 +1006,14 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
         let pw = CVPixelBufferGetWidth(pixelBuffer)
         let ph = CVPixelBufferGetHeight(pixelBuffer)
         if frameCount == 0 {
-            esLog("[ExtendedScreen] First frame pixel size: \(pw)x\(ph)")
+            esLog("\(tag) First frame pixel size: \(pw)x\(ph)")
         }
         trackContentRect(sampleBuffer, pixelWidth: pw, pixelHeight: ph)
         frameCount += 1
         OSAtomicIncrement32(&diagSckCount)
 
         // Store latest frame; the timer tick drives the actual encode (and
-        // stamps it — see onDisplayLinkTick).
+        // stamps it — see onTick).
         bufferLock.lock()
         latestPixelBuffer = pixelBuffer
         bufferLock.unlock()
@@ -786,8 +1044,9 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
                   r.maxX <= 1 + tolerance, r.maxY <= 1 + tolerance else { continue }
             let normalized = r.intersection(unit)
             guard !normalized.isNull, normalized.width > 0, normalized.height > 0 else { return }
-            if CaptureContentRect.shared.update(normalized) {
-                esLog(String(format: "[ExtendedScreen] Content rect in frame: x=%.4f y=%.4f w=%.4f h=%.4f (SCK %.1f,%.1f %.1fx%.1f pt, scaleFactor %.2f, frame %ldx%ld)",
+            if contentRect.update(normalized) {
+                esLog(String(format: "%@ Content rect in frame: x=%.4f y=%.4f w=%.4f h=%.4f (SCK %.1f,%.1f %.1fx%.1f pt, scaleFactor %.2f, frame %ldx%ld)",
+                             tag,
                              Double(normalized.minX), Double(normalized.minY),
                              Double(normalized.width), Double(normalized.height),
                              Double(raw.minX), Double(raw.minY), Double(raw.width), Double(raw.height),
@@ -798,19 +1057,27 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
-        channel?.invokeMethod("onStreamStopped", arguments: error.localizedDescription)
+        let id = self.id
+        let message = error.localizedDescription
+        DispatchQueue.main.async { [weak self] in
+            self?.plugin?.invoke("onStreamStopped", ["session": id, "error": message])
+        }
     }
 
     // MARK: - VideoToolbox Encoder
 
-    private func setupEncoder(width: Int, height: Int, fps: Int, bitrate: Int, codec: String) {
+    /// Makes this session's encoder. Returns whether it runs on the
+    /// hardware, or an error: ENCODER_BUSY (the hardware encoder is taken),
+    /// NO_ENCODER (none fits) or ENCODER_FAILED.
+    private func setupEncoder(width: Int, height: Int, fps: Int, bitrate: Int, codec: String,
+                              requireHardware: Bool) -> (hardware: Bool, error: FlutterError?) {
         var session: VTCompressionSession?
         let isHEVC = codec == "h265"
         let codecType: CMVideoCodecType = isHEVC ? kCMVideoCodecType_HEVC : kCMVideoCodecType_H264
-        let spec: [CFString: Any] = [
-            kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: true
-        ]
-        VTCompressionSessionCreate(
+        let spec: [CFString: Any] = requireHardware
+            ? [kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: true]
+            : [kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: true]
+        let status = VTCompressionSessionCreate(
             allocator: nil,
             width: Int32(width),
             height: Int32(height),
@@ -822,7 +1089,17 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
             refcon: nil,
             compressionSessionOut: &session
         )
-        guard let s = session else { return }
+        guard status == noErr, let s = session else {
+            let code: String
+            switch status {
+            case kVTVideoEncoderNotAvailableNowErr: code = "ENCODER_BUSY"
+            case kVTCouldNotFindVideoEncoderErr: code = "NO_ENCODER"
+            default: code = "ENCODER_FAILED"
+            }
+            esLog("\(tag) WARNING: no \(isHEVC ? "HEVC" : "H264") encoder for \(width)x\(height) (status \(status), \(code), hardware \(requireHardware ? "required" : "preferred"))")
+            return (false, FlutterError(code: code, message: "VTCompressionSessionCreate failed (\(status))",
+                                        details: nil))
+        }
 
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_RealTime,             value: kCFBooleanTrue)
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
@@ -837,18 +1114,28 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate,       value: NSNumber(value: bitrate))
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ExpectedFrameRate,    value: NSNumber(value: fps))
         VTCompressionSessionPrepareToEncodeFrames(s)
-        // A new session runs at the bitrate it was made with; a value set for
-        // the session before it does not carry over.
-        bitrateLock.lock()
+
+        var usingHardware: CFTypeRef?
+        VTSessionCopyProperty(s, key: kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder,
+                              allocator: nil, valueOut: &usingHardware)
+        let hardware = (usingHardware as? Bool) ?? false
+
+        // A new encoder runs at the bitrate it was made with; a value set for
+        // the previous one does not carry over. Its first frame is a keyframe.
+        lock.lock()
         requestedBitrate = 0
         encoderBitrate = bitrate
-        bitrateLock.unlock()
+        forceKeyframe = true
+        lock.unlock()
         compressionSession = s
-        esLog("[ExtendedScreen] Encoder: \(isHEVC ? "HEVC" : "H264") \(width)x\(height) \(fps)fps \(bitrate/1000)kbps")
+        esLog("\(tag) Encoder: \(isHEVC ? "HEVC" : "H264") \(width)x\(height) \(fps)fps \(bitrate/1000)kbps hardware=\(hardware)")
+        return (hardware, nil)
     }
 
     private static let startCode: [UInt8] = [0x00, 0x00, 0x00, 0x01]
 
+    /// Runs on VideoToolbox's callback thread: the frame as Annex-B, behind
+    /// this session's id (4 bytes, big-endian), handed to the main thread.
     private func handleEncodedFrame(_ sampleBuffer: CMSampleBuffer) {
         guard let dataBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
 
@@ -863,6 +1150,8 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
         }
 
         var out = Data()
+        var sessionID = UInt32(truncatingIfNeeded: id).bigEndian
+        withUnsafeBytes(of: &sessionID) { out.append(contentsOf: $0) }
 
         // On keyframes, prepend parameter sets (SPS/PPS for H264; VPS/SPS/PPS for HEVC).
         if isKeyframe, let fmt = CMSampleBufferGetFormatDescription(sampleBuffer) {
@@ -922,8 +1211,7 @@ private class ScreenCapturePluginImpl: NSObject, SCStreamDelegate, SCStreamOutpu
         let payload = out
         // FlutterEventSink must be called on the platform (main) thread.
         DispatchQueue.main.async { [weak self] in
-            self?.frameSink?(FlutterStandardTypedData(bytes: payload))
+            self?.plugin?.emitFrame(payload)
         }
     }
 }
-

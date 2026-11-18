@@ -16,23 +16,52 @@ class InputInjectPlugin: NSObject {
     // Mouse state carried between injected events. Flutter runs the method
     // channel handler on the main thread, so only the main thread touches it.
 
-    // The button an injected down is holding: moves post as drags while it is
-    // held, and releaseAll lets go of it if the link drops before the up.
-    private var heldButton: CGMouseButton?
-    // Click count of the current press, sent as mouseEventClickState: macOS
-    // takes an event's click count (double-click, …) from that field, and
-    // nothing fills it in for posted events.
-    private var clickCount: Int64 = 0
-    private var lastDownTime: TimeInterval = 0
-    private var lastDownPoint = CGPoint.zero
-    private var lastDownButton = CGMouseButton.left
-    // Fractional wheel pixels carried into the next scroll event, per axis, so
-    // a slow finger adds up to a scroll instead of truncating to zero. Plain
-    // scroll and ⌘+scroll (pinch zoom) don't share a remainder: it resets
-    // when the modifier flags change.
-    private var scrollRemainderX = 0.0
-    private var scrollRemainderY = 0.0
-    private var scrollRemainderFlags = CGEventFlags()
+    /// One tablet's mouse state, kept per capture session (the `session` id
+    /// Dart sends with each call; none means session 0).
+    private final class InputState {
+        // The button an injected down is holding: moves post as drags while
+        // it is held, and releaseAll lets go of it if the link drops before
+        // the up.
+        var heldButton: CGMouseButton?
+        // Click count of the current press, sent as mouseEventClickState:
+        // macOS takes an event's click count (double-click, …) from that
+        // field, and nothing fills it in for posted events.
+        var clickCount: Int64 = 0
+        var lastDownTime: TimeInterval = 0
+        var lastDownPoint = CGPoint.zero
+        var lastDownButton = CGMouseButton.left
+        // Fractional wheel pixels carried into the next scroll event, per
+        // axis, so a slow finger adds up to a scroll instead of truncating to
+        // zero. Plain scroll and ⌘+scroll (pinch zoom) don't share a
+        // remainder: it resets when the modifier flags change.
+        var scrollRemainderX = 0.0
+        var scrollRemainderY = 0.0
+        var scrollRemainderFlags = CGEventFlags()
+        // Where this tablet's scrolls go. Scroll events carry no point: the
+        // tablet sends a move to the gesture's start (or the pinch centre)
+        // first, which sets this.
+        var scrollAnchor: CGPoint?
+        // A press of this tablet's was dropped (another tablet held the
+        // pointer): the rest of that gesture is dropped too, up to its
+        // release, rather than reach the Mac in pieces once the pointer is
+        // free.
+        var dropUntilUp = false
+    }
+
+    private var states: [Int: InputState] = [:]
+
+    private func state(_ session: Int) -> InputState {
+        if let st = states[session] { return st }
+        let st = InputState()
+        states[session] = st
+        return st
+    }
+
+    // The Mac has one pointer. The tablet whose press is holding a button
+    // owns it until that button is released: meanwhile another tablet's
+    // presses, releases and scrolls are dropped (its plain moves only set its
+    // own scroll anchor), so one tablet can never break another's drag.
+    private var pointerOwner: Int?
 
     // "Keep the Mac cursor in place" (a host setting, pushed via
     // setKeepCursor). macOS has a single system cursor and a posted press,
@@ -50,9 +79,6 @@ class InputInjectPlugin: NSObject {
     // Where the tablet last moved the cursor (a posted press, release, drag
     // or move); the cursor still being there means the user hasn't touched it.
     private var lastCursorPoint: CGPoint?
-    // Where scrolls go. Scroll events carry no point: the tablet sends a move
-    // to the gesture's start (or the pinch centre) first, which sets this.
-    private var scrollAnchor: CGPoint?
     // Where a scroll puts the cursor back to (see injectScroll); a return
     // from a tap or drag updates it too.
     private var scrollHome: CGPoint?
@@ -105,7 +131,9 @@ class InputInjectPlugin: NSObject {
             injectKey(args: args)
             result(nil)
         case "releaseAll":
-            releaseAll()
+            // With a session: that tablet's button and state. Without one
+            // (the app is ending): every tablet's.
+            releaseAll(session: (call.arguments as? [String: Any])?["session"] as? Int)
             result(nil)
         case "setKeepCursor":
             let enabled = (call.arguments as? [String: Any])?["enabled"] as? Bool ?? false
@@ -128,13 +156,15 @@ class InputInjectPlugin: NSObject {
               let dw = args["displayW"] as? Double,
               let dh = args["displayH"] as? Double,
               rawNx.isFinite, rawNy.isFinite else { return }
+        let session = args["session"] as? Int ?? 0
+        let st = state(session)
 
         // The tablet normalises over its whole screen, i.e. the whole encoded
         // frame, but the captured display fills only the part of the frame its
         // aspect ratio allows (Mirror onto a differently shaped panel adds
-        // bars). Map through the content rect the capture measured so a touch
+        // bars). Map through the content rect its capture measured so a touch
         // lands on what it shows; a touch on a bar clamps to the nearest edge.
-        let (nx, ny) = CaptureContentRect.shared.map(x: rawNx, y: rawNy)
+        let (nx, ny) = CaptureContentRect.forSession(session).map(x: rawNx, y: rawNy)
         // Stay on the display: x == displayX + displayW is already the first
         // column of whatever display sits to its right.
         let x = dx + min(nx * dw, max(dw - 1, 0))
@@ -151,9 +181,29 @@ class InputInjectPlugin: NSObject {
         if mods & 0x04 != 0 { flags.insert(.maskControl)   }
         if mods & 0x08 != 0 { flags.insert(.maskAlternate) }
 
+        // Another tablet is holding the pointer (mid-drag or mid-press): this
+        // one may only note where its next scroll would go.
+        if let owner = pointerOwner, owner != session {
+            if actionIdx == 0 { st.scrollAnchor = pt }
+            if actionIdx == 1 { st.dropUntilUp = true }
+            if actionIdx == 2 { st.dropUntilUp = false }
+            return
+        }
+        // The rest of a gesture whose press was dropped. A new press starts
+        // afresh, so a lost release can't silence this tablet for good.
+        if st.dropUntilUp {
+            if actionIdx == 1 {
+                st.dropUntilUp = false
+            } else {
+                if actionIdx == 0 { st.scrollAnchor = pt }
+                if actionIdx == 2 { st.dropUntilUp = false }
+                return
+            }
+        }
+
         // Only a press, a release or a drag has to move the cursor.
         let takesCursor = actionIdx == 1 || actionIdx == 2
-            || (actionIdx == 0 && heldButton != nil)
+            || (actionIdx == 0 && st.heldButton != nil)
         if keepCursor && takesCursor { borrowCursor() }
 
         switch actionIdx {
@@ -161,59 +211,61 @@ class InputInjectPlugin: NSObject {
             // A down while a button is still held means its up got lost:
             // release it where the cursor is first, so the app never sees two
             // presses in a row.
-            if let held = heldButton {
+            if let held = st.heldButton {
                 postMouse(held == .left ? .leftMouseUp : .rightMouseUp,
                           at: CGEvent(source: nil)?.location ?? pt, button: held,
-                          flags: flags, clickState: clickCount)
+                          flags: flags, clickState: st.clickCount)
             }
             let now = ProcessInfo.processInfo.systemUptime
-            let isRepeat = clickCount > 0
-                && cgButton == lastDownButton
-                && now - lastDownTime <= NSEvent.doubleClickInterval
-                && hypot(pt.x - lastDownPoint.x, pt.y - lastDownPoint.y) <= Self.multiClickRadius
-            clickCount = isRepeat ? clickCount + 1 : 1
-            lastDownTime = now
-            lastDownPoint = pt
-            lastDownButton = cgButton
-            heldButton = cgButton
+            let isRepeat = st.clickCount > 0
+                && cgButton == st.lastDownButton
+                && now - st.lastDownTime <= NSEvent.doubleClickInterval
+                && hypot(pt.x - st.lastDownPoint.x, pt.y - st.lastDownPoint.y) <= Self.multiClickRadius
+            st.clickCount = isRepeat ? st.clickCount + 1 : 1
+            st.lastDownTime = now
+            st.lastDownPoint = pt
+            st.lastDownButton = cgButton
+            st.heldButton = cgButton
+            pointerOwner = session
             postMouse(cgButton == .left ? .leftMouseDown : .rightMouseDown,
-                      at: pt, button: cgButton, flags: flags, clickState: clickCount)
+                      at: pt, button: cgButton, flags: flags, clickState: st.clickCount)
             lastCursorPoint = pt
-            scrollAnchor = pt
+            st.scrollAnchor = pt
         case 2:
             // Release the button actually held; an up with nothing held (its
             // down was lost) is still posted, as a single click's up.
-            let button = heldButton ?? cgButton
-            let clickState = heldButton != nil ? clickCount : 1
-            heldButton = nil
+            let button = st.heldButton ?? cgButton
+            let clickState = st.heldButton != nil ? st.clickCount : 1
+            st.heldButton = nil
+            pointerOwner = nil
             postMouse(button == .left ? .leftMouseUp : .rightMouseUp,
                       at: pt, button: button, flags: flags, clickState: clickState)
             lastCursorPoint = pt
-            scrollAnchor = pt
+            st.scrollAnchor = pt
         case 3:
-            injectScroll(dx: args["scrollDx"] as? Double ?? 0,
+            injectScroll(st, dx: args["scrollDx"] as? Double ?? 0,
                          dy: args["scrollDy"] as? Double ?? 0,
-                         flags: flags, at: scrollAnchor)
+                         flags: flags)
         default:
             // macOS only treats movement as a drag (window moves, text
             // selection, sliders) when it arrives as a dragged event. With no
             // button held this is a plain move: the start of a scroll or the
             // centre of a pinch. It parks the cursor there, except with
             // keepCursor on, where it only marks where the scrolls go.
-            if let held = heldButton {
+            if let held = st.heldButton {
                 postMouse(held == .left ? .leftMouseDragged : .rightMouseDragged,
-                          at: pt, button: held, flags: flags, clickState: clickCount)
+                          at: pt, button: held, flags: flags, clickState: st.clickCount)
                 lastCursorPoint = pt
             } else if !keepCursor {
                 postMouse(.mouseMoved, at: pt, button: cgButton, flags: flags, clickState: nil)
                 lastCursorPoint = pt
             }
-            scrollAnchor = pt
+            st.scrollAnchor = pt
         }
 
         // A held button is a drag still in progress: the cursor stays until
         // the up, which schedules the return.
-        if keepCursor && takesCursor && heldButton == nil { scheduleCursorReturn() }
+        if keepCursor && takesCursor && st.heldButton == nil { scheduleCursorReturn() }
     }
 
     // MARK: - Cursor return
@@ -256,7 +308,7 @@ class InputInjectPlugin: NSObject {
         returnWork = nil
         guard let saved = savedCursor else { return }
         savedCursor = nil
-        guard heldButton == nil else { return }
+        guard pointerOwner == nil else { return }
         // The tablet's button is up here, so a pressed button is the user's:
         // a press-and-hold on the trackpad inside the return delay would
         // otherwise have its drag jump to the saved point.
@@ -299,18 +351,19 @@ class InputInjectPlugin: NSObject {
     /// from either tap. With keepCursor on, a move posted right behind each
     /// scroll puts it back; the same tap keeps the two in order, so the
     /// scroll is routed at the anchor first.
-    private func injectScroll(dx: Double, dy: Double, flags: CGEventFlags, at point: CGPoint?) {
-        if flags != scrollRemainderFlags {
-            scrollRemainderX = 0
-            scrollRemainderY = 0
-            scrollRemainderFlags = flags
+    private func injectScroll(_ st: InputState, dx: Double, dy: Double, flags: CGEventFlags) {
+        let point = st.scrollAnchor
+        if flags != st.scrollRemainderFlags {
+            st.scrollRemainderX = 0
+            st.scrollRemainderY = 0
+            st.scrollRemainderFlags = flags
         }
-        scrollRemainderX += Self.wheelPixels(dx)
-        scrollRemainderY += Self.wheelPixels(dy)
-        let px = scrollRemainderX.rounded(.towardZero)
-        let py = scrollRemainderY.rounded(.towardZero)
-        scrollRemainderX -= px
-        scrollRemainderY -= py
+        st.scrollRemainderX += Self.wheelPixels(dx)
+        st.scrollRemainderY += Self.wheelPixels(dy)
+        let px = st.scrollRemainderX.rounded(.towardZero)
+        let py = st.scrollRemainderY.rounded(.towardZero)
+        st.scrollRemainderX -= px
+        st.scrollRemainderY -= py
         guard px != 0 || py != 0,
               let ev = CGEvent(scrollWheelEvent2Source: nil, units: .pixel,
                   wheelCount: 2, wheel1: Int32(py), wheel2: Int32(px), wheel3: 0) else { return }
@@ -327,14 +380,14 @@ class InputInjectPlugin: NSObject {
         // A button pressed with none held by the tablet (a scroll never comes
         // mid-drag from it) is the user's: the scroll would pull their drag
         // onto the tablet's display, so it is dropped.
-        guard heldButton != nil || NSEvent.pressedMouseButtons == 0 else { return }
+        guard st.heldButton != nil || NSEvent.pressedMouseButtons == 0 else { return }
         let now = ProcessInfo.processInfo.systemUptime
         recentTabletPoints.removeAll { now - $0.time >= Self.staleWindow }
         let cursor = CGEvent(source: nil)?.location
         let nearRecent = cursor.map { c in
             recentTabletPoints.contains { Self.near(c, $0.point, within: Self.staleRadius) }
         } ?? true
-        if let saved = savedCursor, heldButton == nil {
+        if let saved = savedCursor, st.heldButton == nil {
             // A tap or drag's return is still pending: this scroll's move back
             // does it now, unless the user has taken the cursor meanwhile.
             returnWork?.cancel()
@@ -376,7 +429,7 @@ class InputInjectPlugin: NSObject {
             self.scrollSettleWork = nil
             // Not if the tablet has the cursor again, a button is down, or
             // the user has moved it since.
-            guard self.keepCursor, self.savedCursor == nil, self.heldButton == nil,
+            guard self.keepCursor, self.savedCursor == nil, self.pointerOwner == nil,
                   NSEvent.pressedMouseButtons == 0,
                   let now = CGEvent(source: nil)?.location,
                   Self.near(now, home, within: 1) else { return }
@@ -398,30 +451,33 @@ class InputInjectPlugin: NSObject {
         return min(max(units * 10, -10_000), 10_000)
     }
 
-    /// Called when the session tears down. Lets go of a button the tablet
-    /// pressed but never released (the link dropped mid-drag), which would
-    /// otherwise turn every later move into a drag, hands back a borrowed
-    /// cursor, and forgets click and scroll state so the next session starts
-    /// clean.
-    private func releaseAll() {
-        if let held = heldButton {
-            let at = CGEvent(source: nil)?.location ?? lastDownPoint
-            postMouse(held == .left ? .leftMouseUp : .rightMouseUp,
-                      at: at, button: held, flags: [], clickState: clickCount)
+    /// Called when a tablet's session tears down ([session]), or for every
+    /// tablet (nil). Lets go of a button the tablet pressed but never
+    /// released (the link dropped mid-drag), which would otherwise turn every
+    /// later move into a drag, and forgets its click and scroll state so its
+    /// next session starts clean. Once no tablet holds the pointer, a
+    /// borrowed cursor is handed back; once no tablet has any state left, the
+    /// shared cursor-return state is cleared too.
+    private func releaseAll(session: Int?) {
+        let ending = session.map { [$0] } ?? Array(states.keys)
+        for id in ending {
+            guard let st = states.removeValue(forKey: id) else { continue }
+            if let held = st.heldButton {
+                let at = CGEvent(source: nil)?.location ?? st.lastDownPoint
+                postMouse(held == .left ? .leftMouseUp : .rightMouseUp,
+                          at: at, button: held, flags: [], clickState: st.clickCount)
+            }
+            if pointerOwner == id { pointerOwner = nil }
         }
-        heldButton = nil
-        returnCursor()
+        if session == nil { pointerOwner = nil }
+        if pointerOwner == nil { returnCursor() }
+        guard states.isEmpty else { return }
         lastCursorPoint = nil
-        scrollAnchor = nil
         scrollHome = nil
         recentTabletPoints.removeAll()
         scrollSettleWork?.cancel()
         scrollSettleWork = nil
         lastReturn = nil
-        clickCount = 0
-        scrollRemainderX = 0
-        scrollRemainderY = 0
-        scrollRemainderFlags = []
     }
 
     // MARK: - Keyboard

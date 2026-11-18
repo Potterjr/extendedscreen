@@ -49,6 +49,14 @@ class HostConnectionManager extends BaseConnectionManager {
     });
   }
 
+  /// This connection's id in the native capture, input and decode plugins:
+  /// its virtual display, stream, encoder, mouse state and remote decoder are
+  /// kept under it, and its encoded frames come back tagged with it. Never
+  /// reused within a run of the app, so a late callback for an old one
+  /// finds nothing.
+  final int nativeId = _nextNativeId++;
+  static int _nextNativeId = 1;
+
   final _adb = Get.find<AdbService>();
   WifiPairingService get _pairing => Get.find<WifiPairingService>();
   WifiDiscoveryService get _discovery => Get.find<WifiDiscoveryService>();
@@ -89,9 +97,13 @@ class HostConnectionManager extends BaseConnectionManager {
 
   StreamSubscription? _frameSub;
 
-  // Guards against overlapping capture rebuilds (the display-wake and
-  // system-wake notifications both fire on resume).
+  // A capture rebuild is under way; [_restartAgain]: another was asked for
+  // meanwhile and runs once it ends. That second request matters: a rebuild
+  // started as the displays went to sleep (ScreenCaptureKit stops the stream
+  // when they do) cannot work, and the wake's request may come while it is
+  // still trying.
   bool _restarting = false;
+  bool _restartAgain = false;
 
   // Completed when the client's HELLO arrives (it carries the panel size the
   // capture resolution is derived from).
@@ -553,7 +565,7 @@ class HostConnectionManager extends BaseConnectionManager {
     await onTeardown();
     if (!isLatestConnect(seq)) return;
     if (tunnelled != null) {
-      await _adb.removeForward(serial: tunnelled);
+      await _adb.removeForward(serial: tunnelled, remotePort: linkPort);
       if (!isLatestConnect(seq)) return;
     }
     await socket.disconnect();
@@ -571,14 +583,19 @@ class HostConnectionManager extends BaseConnectionManager {
   Future<void> _startCapture(int attempt) async {
     bool stale() => isCancelled(attempt);
     if (stale()) return;
-    // Let native wake/stream-stop callbacks rebuild the pipeline (see below).
-    _capture.onCaptureRestartNeeded = _restartCapture;
+    // Let native wake/stream-stop callbacks rebuild the pipeline (see below):
+    // a wake (no session) or this session's stream stopping.
+    _capture.onCaptureRestartNeeded = (session) {
+      if (session == null || session == nativeId) _restartCapture();
+    };
     // Display rearrangement doesn't need a rebuild — just fresh bounds.
     _capture.onDisplayBoundsChanged = _refreshDisplayBounds;
     // Max preset: the encoder changed its rate (down under load, back up once
     // it recovers) — tell the tablet so its display mode + HUD follow (same
     // 0xFB it gets at stream start).
-    _capture.onFrameRateChanged = _announceRefreshRate;
+    _capture.onFrameRateChanged = (session, fps) {
+      if (session == nativeId) _announceRefreshRate(fps);
+    };
 
     final config = DisplayConfigModel.defaultConfig.copyWith(
       width: settings.captureWidth,
@@ -598,18 +615,18 @@ class HostConnectionManager extends BaseConnectionManager {
     if (stale()) return;
 
     if (config.mode == DisplayMode.extend) {
-      if (!await _capture.createVirtualDisplay(config)) {
+      if (!await _capture.createVirtualDisplay(config, session: nativeId)) {
         log.w('Host: virtual display settings not applied — capture falls '
             'back to the main display if it never appears');
       }
       if (stale()) return;
     }
-    await _capture.startCapture(config);
+    await _capture.startCapture(config, session: nativeId);
     if (stale()) return;
 
     // Fetch the captured display's bounds so touch injection lands on the
     // screen the tablet shows.
-    _displayBounds = await _capture.getDisplayBounds();
+    _displayBounds = await _capture.getDisplayBounds(session: nativeId);
     if (stale()) return;
     if ((_displayBounds['w'] ?? 0) <= 0 || (_displayBounds['h'] ?? 0) <= 0) {
       // Bounds query failed — fall back to the logical size we configured.
@@ -644,7 +661,7 @@ class HostConnectionManager extends BaseConnectionManager {
     if (_wifiSession) _limitSendBufferFor(config.bitrate);
 
     // Forward each encoded NAL unit from native → socket as FRAME_DATA.
-    _frameSub = _capture.frameStream.listen(_forwardFrame);
+    _frameSub = _capture.framesFor(nativeId).listen(_forwardFrame);
     if (_wifiSession) _startBitrateAdaptation(config.bitrate);
   }
 
@@ -671,7 +688,7 @@ class HostConnectionManager extends BaseConnectionManager {
       log.i('Host: Wi-Fi link → encoder at ${next ~/ 1000} kbps');
       streamBitrate.value = next;
       _limitSendBufferFor(next);
-      _capture.setBitrate(next);
+      _capture.setBitrate(next, session: nativeId);
     });
   }
 
@@ -735,7 +752,7 @@ class HostConnectionManager extends BaseConnectionManager {
         if (now.difference(_lastResyncIdr) >
             const Duration(milliseconds: 500)) {
           _lastResyncIdr = now;
-          _capture.requestIdr();
+          _capture.requestIdr(session: nativeId);
         }
         return;
       }
@@ -782,33 +799,49 @@ class HostConnectionManager extends BaseConnectionManager {
   /// heartbeat's 6 s timeout, in which case the reconnect path rebuilds the
   /// whole session instead.
   Future<void> _restartCapture() async {
-    if (_restarting) return;
     if (!phase.value.isActive || settings.isReverseRemote) return;
+    if (_restarting) {
+      _restartAgain = true;
+      return;
+    }
     _restarting = true;
+    // Every round belongs to the session this was asked for: one that ends
+    // meanwhile stops the rounds, and its successor is left alone.
     final attempt = currentAttempt;
     try {
-      await _exclusive(() async {
-        // The session may have ended while this waited its turn.
-        if (isCancelled(attempt) || !phase.value.isActive) return;
-        log.w('Host: rebuilding capture pipeline after wake/stream-stop');
-        // The new encoder starts at the preset's bitrate, and so does the
-        // adaptation that _startCapture sets up for it.
-        _stopBitrateAdaptation();
-        await _frameSub?.cancel();
-        _frameSub = null;
-        await _capture.stopCapture();
-        await _capture.removeVirtualDisplay();
-        await _startCapture(attempt);
-        if (isCancelled(attempt)) return;
-        await _capture.requestIdr();
-        log.i('Host: capture pipeline rebuilt');
-      });
-    } catch (e, st) {
-      log.e('Host: capture restart failed', e, st);
+      do {
+        _restartAgain = false;
+        try {
+          await _exclusive(() async {
+            // The session may have ended while this waited its turn.
+            if (isCancelled(attempt) || !phase.value.isActive) return;
+            log.w('Host: rebuilding capture pipeline after wake/stream-stop');
+            // The new encoder starts at the preset's bitrate, and so does the
+            // adaptation that _startCapture sets up for it.
+            _stopBitrateAdaptation();
+            await _frameSub?.cancel();
+            _frameSub = null;
+            await _capture.stopCapture(session: nativeId);
+            await _capture.removeVirtualDisplay(session: nativeId);
+            await _startCapture(attempt);
+            if (isCancelled(attempt)) return;
+            await _capture.requestIdr(session: nativeId);
+            log.i('Host: capture pipeline rebuilt');
+          });
+        } catch (e, st) {
+          // Typically the displays are asleep: the wake asks again.
+          log.e('Host: capture restart failed', e, st);
+        }
+      } while (_restartAgain && !isCancelled(attempt) && phase.value.isActive);
     } finally {
       _restarting = false;
+      _restartAgain = false;
     }
   }
+
+  /// Runs the rebuild a wake or a stopped stream asks for, as they do.
+  @visibleForTesting
+  Future<void> rebuildCapture() => _restartCapture();
 
   /// Re-fetches the virtual/main display's screen-space bounds after the
   /// native side reports the display arrangement changed (e.g. the virtual
@@ -817,7 +850,7 @@ class HostConnectionManager extends BaseConnectionManager {
   /// these bounds, so a stale cache sends input to the display's old position.
   Future<void> _refreshDisplayBounds() async {
     if (!phase.value.isActive || settings.isReverseRemote) return;
-    final bounds = await _capture.getDisplayBounds();
+    final bounds = await _capture.getDisplayBounds(session: nativeId);
     if ((bounds['w'] ?? 0) > 0 && (bounds['h'] ?? 0) > 0) {
       _displayBounds = bounds;
       log.i('Display bounds refreshed: $_displayBounds');
@@ -832,8 +865,12 @@ class HostConnectionManager extends BaseConnectionManager {
     _sendSessionMode();
 
     // Stand up the decoder + texture sized to the tablet's native panel.
-    _remote.onRequestIdr = requestIdr; // base sends 0xFF → tablet re-IDRs
+    // The base sends 0xFF → the tablet re-IDRs.
+    _remote.onRequestIdr = (session) {
+      if (session == nativeId) requestIdr();
+    };
     final texId = await _remote.initialize(
+      session: nativeId,
       codec: settings.codec,
       width: settings.clientPanelWidth.value,
       height: settings.clientPanelHeight.value,
@@ -859,6 +896,18 @@ class HostConnectionManager extends BaseConnectionManager {
         fps.clamp(0, 255),
         (bitrate ~/ 1000000).clamp(1, 255),
       ]),
+    ));
+    // And a keyframe: a capture can outlive the last session (its 0xF7 never
+    // arrived when the link dropped), and then the tablet only goes on with
+    // pictures the new decoder cannot start from. Its periodic keyframes come
+    // with its frames, so on a still screen the next can be a long way off
+    // (measured: over a minute). A capture that is only starting begins with
+    // one anyway. Sent here, not with requestIdr(): the session is not
+    // streaming yet.
+    _sendToClient(Packet(
+      type: PacketType.control,
+      timestampUs: DateTime.now().microsecondsSinceEpoch,
+      payload: Uint8List.fromList([0xFF]),
     ));
     log.i('Host: reverse remote — decoding tablet stream (texture $texId)');
   }
@@ -1010,7 +1059,7 @@ class HostConnectionManager extends BaseConnectionManager {
     }
     // A drag cut off by the link dropping never gets its up: release the
     // button, or every later injected move would post as a drag.
-    await _input.releaseAll();
+    await _input.releaseAll(session: nativeId);
     // Behind any start still in flight, so what it started is stopped too.
     await _exclusive(() async {
       // Again: a start that was mid-flight above may have set them since.
@@ -1021,16 +1070,17 @@ class HostConnectionManager extends BaseConnectionManager {
       await _frameSub?.cancel();
       _frameSub = null;
       if (reverse) {
-        await _remote.dispose();
+        await _remote.dispose(session: nativeId);
         remoteTextureId.value = null;
       } else {
-        await _capture.stopCapture();
-        await _capture.removeVirtualDisplay();
+        await _capture.stopCapture(session: nativeId);
+        await _capture.removeVirtualDisplay(session: nativeId);
       }
     });
     // A Wi-Fi session has no tunnel, and its "device" is an address.
     if (!_wifiSession && activeDevice.value != null) {
-      await _adb.removeForward(serial: activeDevice.value!.serial);
+      await _adb.removeForward(
+          serial: activeDevice.value!.serial, remotePort: linkPort);
     }
   }
 
@@ -1102,7 +1152,7 @@ class HostConnectionManager extends BaseConnectionManager {
     switch (packet.type) {
       // Reverse remote: encoded frames coming FROM the tablet → decode them.
       case PacketType.frameData when settings.isReverseRemote:
-        _remote.feedNal(packet.payload);
+        _remote.feedNal(nativeId, packet.payload);
         if (!tabletStreaming.value) {
           tabletStreaming.value = true;
           _darkenTabletIfChosen();
@@ -1129,7 +1179,7 @@ class HostConnectionManager extends BaseConnectionManager {
       // 0xFF — Tablet → Host: request a fresh keyframe (IDR).
       case PacketType.control
           when packet.payload.isNotEmpty && packet.payload[0] == 0xFF:
-        _capture.requestIdr();
+        _capture.requestIdr(session: nativeId);
         break;
 
       default:
@@ -1172,6 +1222,7 @@ class HostConnectionManager extends BaseConnectionManager {
       TouchAction.cancel => MouseAction.up,
     };
     _input.injectMouse(
+      session: nativeId,
       MouseEventModel(
         normalizedX: p.normalizedX,
         normalizedY: p.normalizedY,
@@ -1186,12 +1237,12 @@ class HostConnectionManager extends BaseConnectionManager {
   void _injectMouse(Packet packet) {
     if (!_hasBounds) return;
     final m = PacketCodec.decodeMouse(packet.payload);
-    if (m != null) _input.injectMouse(m, _displayBounds);
+    if (m != null) _input.injectMouse(m, _displayBounds, session: nativeId);
   }
 
   void _injectKey(Packet packet) {
     final k = PacketCodec.decodeKey(packet.payload);
-    if (k != null) _input.injectKey(k);
+    if (k != null) _input.injectKey(k, session: nativeId);
   }
 }
 

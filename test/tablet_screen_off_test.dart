@@ -40,29 +40,29 @@ class _Adb extends AdbService {
       calls.add('release $serial');
 
   @override
-  Future<void> removeForward({required String serial}) async {}
+  Future<void> removeForward({required String serial, int? remotePort}) async {}
 }
 
 class _Capture extends ScreenCaptureChannel {
   @override
-  Future<void> stopCapture() async {}
+  Future<void> stopCapture({required int session}) async {}
   @override
-  Future<void> removeVirtualDisplay() async {}
+  Future<void> removeVirtualDisplay({required int session}) async {}
 }
 
 class _Input extends InputInjectChannel {
   @override
   Future<void> setKeepCursor(bool enabled) async {}
   @override
-  Future<void> releaseAll() async {}
+  Future<void> releaseAll({required int session}) async {}
 }
 
 class _Remote extends RemoteVideoChannel {
   int fed = 0;
   @override
-  Future<void> feedNal(List<int> nalBytes) async => fed++;
+  Future<void> feedNal(int session, List<int> nalBytes) async => fed++;
   @override
-  Future<void> dispose() async {}
+  Future<void> dispose({required int session}) async {}
 }
 
 final _frame = Packet(
