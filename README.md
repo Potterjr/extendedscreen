@@ -111,6 +111,7 @@ Mac → Tablet works differently from the other two:
 - On the tablet, tap **Start screen sharing** and approve Android's screen-capture prompt. This is needed again after a Disconnect, and whenever the Mac reconnects to apply a changed Mode, preset, codec or custom value.
 - The Mac opens a remote view with its own Reconnect and Disconnect buttons. Unlike Disconnect on Home, that Disconnect does not switch off auto-connect: with exactly one physical device attached, the Mac connects again the next time the app regains focus. To stop for good, use the back arrow and press Disconnect on Home.
 - In the remote view, a click is sent as a tap and a drag as a straight 50 ms swipe, both through `adb shell input`. There is no keyboard or text entry, long-press, pinch, scroll wheel, or Back/Home/Recents control.
+- **Tablet screen off** in the remote view darkens the tablet's screen while it keeps running: the Mac still sees and controls it, and the tablet does not go to sleep. Press it again (**Tablet screen on**) to light it. The choice is remembered: the next session darkens the tablet as soon as its picture arrives (after you approve screen sharing on it). The screen comes back on by itself when the session ends, when the cable comes out, and within about 10 seconds if the Mac app quits or stops responding. The tablet's power button puts it to sleep as usual; on Android 16 and later that also stops screen sharing, so press **Reconnect** and approve sharing on the tablet again. It needs the current tablet app (the Mac runs a small helper from it through `adb`).
 - The tablet always captures at its native resolution. Presets only set the frame rate and bitrate here, and Max means 60 fps at 20 Mbps.
 - The Mac still requires Screen Recording and Accessibility before it will connect.
 - After a Mac → Tablet session, the tablet does not open the display by itself the first time you connect in another mode. Tap **Open View** on the tablet's Home screen.
@@ -203,6 +204,8 @@ Every packet has a 17-byte big-endian header followed by the payload:
 
 | Symptom | Likely cause |
 |---|---|
+| The tablet's screen stays dark after a Mac → Tablet session | Something stopped the Mac from lighting it, and the tablet's own safeguard (about 10 s) did not either. Press the tablet's power button twice. |
+| **Tablet screen off** says it couldn't | The tablet app is older than the Mac app (update it), or this Android build doesn't allow it. The screen stays on and everything else works. |
 | The Mac shows "No device detected — plug in via USB-C" | `adb` is not in one of the three locations, the tablet has not authorised USB debugging, the cable carries no data, or the tablet was plugged in or authorised after the list was last read (click the refresh icon on the card). A missing `adb` is not reported separately. |
 | The Mac stays on "Handshaking…" | The app is not running on the tablet, or Disconnect was pressed on the tablet: tap **Connect** there. |
 | The Mac says the tablet "did not confirm this USB session" | Whatever connected from the tablet never proved it holds the session key. Usually the tablet runs a build from before USB sessions were checked: update it. Otherwise another app on the tablet is using port 7001. |

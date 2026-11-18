@@ -41,6 +41,48 @@ class AdbService extends GetxService {
   static const pairingAction = 'com.example.extendedscreen.WIFI_PAIR';
   static const sessionAction = 'com.example.extendedscreen.USB_SESSION';
 
+  /// Reverse remote: a tablet's panel came back on without being asked (its
+  /// helper's lease ran out, the cable came out, the helper died). Called
+  /// with the device's serial.
+  void Function(String serial)? onTabletScreenRestored;
+
+  @override
+  void onInit() {
+    super.onInit();
+    _channel.setMethodCallHandler((call) async {
+      if (call.method == 'onTabletScreenRestored' && call.arguments is String) {
+        onTabletScreenRestored?.call(call.arguments as String);
+      }
+      return null;
+    });
+  }
+
+  /// Reverse remote: turns [serial]'s panel off while the tablet keeps
+  /// running, so the Mac still sees and drives it: the app's own
+  /// `ScreenPower` helper, run by adb with the shell's privileges, until
+  /// [releaseTabletScreenOff] (see ScreenPower.kt and AdbManagerPlugin).
+  /// Returns null once the panel is off, else what went wrong.
+  Future<String?> holdTabletScreenOff({required String serial}) async {
+    try {
+      final off = await _channel
+          .invokeMethod<bool>('holdTabletScreenOff', {'serial': serial});
+      return off == true ? null : 'no answer from the tablet';
+    } on PlatformException catch (e) {
+      return e.message ?? e.code;
+    } catch (e) {
+      return '$e';
+    }
+  }
+
+  /// Lights [serial]'s panel again. Does nothing if it was not held off.
+  Future<void> releaseTabletScreenOff({required String serial}) async {
+    try {
+      await _channel.invokeMethod('releaseTabletScreenOff', {'serial': serial});
+    } catch (e) {
+      _log.w('ADB: tablet screen not released: $e');
+    }
+  }
+
   /// Returns list of connected ADB devices.
   Future<List<DeviceModel>> listDevices() async {
     try {

@@ -1,4 +1,4 @@
-import 'package:flutter/widgets.dart';
+import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
 import 'package:extendedscreen/shared/connection/host_connection_manager.dart';
@@ -42,6 +42,29 @@ class RemoteHostController extends GetxController {
       _cm.sendRemoteTap(end.dx, end.dy);
     } else {
       _cm.sendRemoteSwipe(start.dx, start.dy, end.dx, end.dy);
+    }
+  }
+
+  /// The tablet's picture is arriving (its user approved screen capture).
+  RxBool get tabletStreaming => _cm.tabletStreaming;
+
+  /// The tablet's panel is dark while it keeps running.
+  RxBool get tabletScreenOff => _cm.tabletScreenOff;
+
+  /// A turn on or off is under way, this button's or the remembered choice
+  /// being applied as the picture arrived: the button waits for it.
+  RxBool get changingTabletScreen => _cm.changingTabletScreen;
+
+  Future<void> onToggleTabletScreen() async {
+    if (_cm.changingTabletScreen.value) return;
+    final error = await _cm.setTabletScreenOff(!_cm.tabletScreenOff.value);
+    if (error != null) {
+      Get.snackbar(
+        'remote_tablet_screen_failed'.tr,
+        error,
+        snackPosition: SnackPosition.BOTTOM,
+        margin: const EdgeInsets.all(16),
+      );
     }
   }
 

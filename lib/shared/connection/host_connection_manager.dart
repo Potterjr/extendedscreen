@@ -40,7 +40,14 @@ import 'package:extendedscreen/shared/connection/wifi_pairing_service.dart';
 /// [UsbSessionService]): anything on the tablet can dial the tunnel, and
 /// anything on this Mac the loopback server.
 class HostConnectionManager extends BaseConnectionManager {
-  HostConnectionManager({super.socket, super.port});
+  HostConnectionManager({super.socket, super.port}) {
+    _adb.onTabletScreenRestored = _onTabletScreenRestored;
+    // A capture left running from the last session can send its picture
+    // before this one is live; the remembered choice waits for that too.
+    ever<ConnectionPhase>(phase, (p) {
+      if (p == ConnectionPhase.streaming) _darkenTabletIfChosen();
+    });
+  }
 
   final _adb = Get.find<AdbService>();
   WifiPairingService get _pairing => Get.find<WifiPairingService>();
@@ -61,6 +68,21 @@ class HostConnectionManager extends BaseConnectionManager {
   /// tablet). Null unless a reverse-remote session is live; the remote-view
   /// widget renders a `Texture` from it.
   final remoteTextureId = Rxn<int>();
+
+  /// Reverse remote: the tablet's picture has started to arrive this session
+  /// (its user approved screen capture), so its panel may go dark now.
+  final tabletStreaming = false.obs;
+
+  /// Reverse remote: the tablet's panel is held off ([setTabletScreenOff]).
+  final tabletScreenOff = false.obs;
+
+  /// A [setTabletScreenOff] is under way, the user's or the remembered
+  /// choice's: the toggle waits for it, and another call is refused.
+  final changingTabletScreen = false.obs;
+
+  /// Bumped by every [setTabletScreenOff] and by teardown: a call that finds
+  /// it moved on after its await was superseded, and changes nothing.
+  int _tabletScreenSeq = 0;
 
   // Actual display bounds (updated after capture starts in extend/mirror mode).
   Map<String, double> _displayBounds = {'x': 0, 'y': 0, 'w': 0, 'h': 0};
@@ -841,6 +863,70 @@ class HostConnectionManager extends BaseConnectionManager {
     log.i('Host: reverse remote — decoding tablet stream (texture $texId)');
   }
 
+  /// Reverse remote (USB): turns the tablet's panel off, or back on, while
+  /// the tablet keeps running, so the Mac still sees and drives it
+  /// ([AdbService.holdTabletScreenOff]). The choice is remembered once it has
+  /// worked (on is remembered at once: it cannot be refused) and applied
+  /// again when the next session's picture arrives. Returns null when done,
+  /// else why not. One call at a time ([changingTabletScreen]).
+  Future<String?> setTabletScreenOff(bool off) async {
+    final serial = activeDevice.value?.serial;
+    if (!settings.isReverseRemote ||
+        _wifiSession ||
+        !phase.value.isActive ||
+        !tabletStreaming.value ||
+        serial == null) {
+      return 'no live Mac-controls-tablet session';
+    }
+    if (changingTabletScreen.value) return 'already turning the screen';
+    changingTabletScreen.value = true;
+    final seq = ++_tabletScreenSeq;
+    final attempt = currentAttempt;
+    try {
+      if (!off) {
+        tabletScreenOff.value = false;
+        await settings.setTabletScreenOff(false);
+        await _adb.releaseTabletScreenOff(serial: serial);
+        return null;
+      }
+      final error = await _adb.holdTabletScreenOff(serial: serial);
+      // The session may have ended while adb worked: its teardown released
+      // what was held then, not this.
+      if (isCancelled(attempt) || seq != _tabletScreenSeq) {
+        if (error == null) await _adb.releaseTabletScreenOff(serial: serial);
+        return 'the session ended';
+      }
+      if (error != null) {
+        log.w('Host: tablet screen not turned off: $error');
+        return error;
+      }
+      tabletScreenOff.value = true;
+      await settings.setTabletScreenOff(true);
+      return null;
+    } finally {
+      if (seq == _tabletScreenSeq) changingTabletScreen.value = false;
+    }
+  }
+
+  /// The remembered choice, applied once this session's picture is coming
+  /// (the panel had to be on for the capture prompt) and the session is live,
+  /// whichever of the two comes last.
+  void _darkenTabletIfChosen() {
+    if (settings.isReverseRemote &&
+        !_wifiSession &&
+        settings.tabletScreenOff.value &&
+        tabletStreaming.value &&
+        phase.value.isActive &&
+        !tabletScreenOff.value &&
+        !changingTabletScreen.value) {
+      unawaited(setTabletScreenOff(true));
+    }
+  }
+
+  void _onTabletScreenRestored(String serial) {
+    if (serial == activeDevice.value?.serial) tabletScreenOff.value = false;
+  }
+
   /// 0xF9 + sessionMode index + remoteDirection index.
   void _sendSessionMode() {
     _sendToClient(Packet(
@@ -913,6 +999,15 @@ class HostConnectionManager extends BaseConnectionManager {
     // in the middle of the session that replaced it.
     _settle(_Proof.none);
     if (!(_helloReceived?.isCompleted ?? true)) _helloReceived!.complete();
+    // The tablet's panel comes back on with the session's end (adb is still
+    // there; and if it is not, the tablet's helper lights it by itself).
+    tabletStreaming.value = false;
+    tabletScreenOff.value = false;
+    _tabletScreenSeq++;
+    changingTabletScreen.value = false;
+    if (reverse && !_wifiSession && activeDevice.value != null) {
+      await _adb.releaseTabletScreenOff(serial: activeDevice.value!.serial);
+    }
     // A drag cut off by the link dropping never gets its up: release the
     // button, or every later injected move would post as a drag.
     await _input.releaseAll();
@@ -1008,6 +1103,10 @@ class HostConnectionManager extends BaseConnectionManager {
       // Reverse remote: encoded frames coming FROM the tablet → decode them.
       case PacketType.frameData when settings.isReverseRemote:
         _remote.feedNal(packet.payload);
+        if (!tabletStreaming.value) {
+          tabletStreaming.value = true;
+          _darkenTabletIfChosen();
+        }
         break;
 
       // HELLO from the client: version + platform + native panel size.

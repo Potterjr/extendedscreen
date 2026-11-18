@@ -116,6 +116,11 @@ class AppTranslations extends Translations {
     'remote_dir_mac_desc': 'Control the tablet from the Mac.',
     'remote_host_waiting':
         'Waiting for the tablet…\nApprove the screen-capture prompt on the tablet.',
+    'remote_tablet_screen_off': 'Tablet screen off',
+    'remote_tablet_screen_on': 'Tablet screen on',
+    'remote_tablet_screen_hint':
+        'The tablet keeps running and you can still control it: only its screen goes dark.',
+    'remote_tablet_screen_failed': "Couldn't turn the tablet's screen off",
 
     // ── Home ────────────────────────────────────────────────────────────
     'home_open_view': 'Open View',
@@ -393,6 +398,10 @@ class AppTranslations extends Translations {
     'remote_dir_mac_label': 'Mac → แท็บเล็ต',
     'remote_dir_mac_desc': 'คุมแท็บเล็ตจาก Mac',
     'remote_host_waiting': 'กำลังรอแท็บเล็ต…\nกดอนุญาตการบันทึกหน้าจอบนแท็บเล็ต',
+    'remote_tablet_screen_off': 'ปิดจอแท็บเล็ต',
+    'remote_tablet_screen_on': 'เปิดจอแท็บเล็ต',
+    'remote_tablet_screen_hint': 'แท็บเล็ตยังทำงานและคุมได้ตามปกติ แค่จอดับ',
+    'remote_tablet_screen_failed': 'ปิดจอแท็บเล็ตไม่ได้',
 
     // ── Home ────────────────────────────────────────────────────────────
     'home_open_view': 'เปิดหน้าจอ',

@@ -26,6 +26,7 @@ class SettingsService extends GetxService {
   static const _keyPerfOverlay = 'perf_overlay';
   static const _keyHudOverlay = 'hud_overlay';
   static const _keyKeepMacCursor = 'keep_mac_cursor';
+  static const _keyTabletScreenOff = 'tablet_screen_off';
   static const _keyEncodePreset = 'encode_preset';
   static const _keyCodec = 'codec';
   static const _keyLocale = 'locale';
@@ -40,6 +41,10 @@ class SettingsService extends GetxService {
   // Host only: the tablet's touches borrow the Mac's single cursor and hand it
   // back to where the user left it after each gesture (InputInjectPlugin).
   final keepMacCursor = true.obs;
+  // Host only, reverse remote: the tablet's screen goes dark while the Mac
+  // views and controls it (the last choice on the remote view, applied again
+  // when the next session's picture arrives).
+  final tabletScreenOff = false.obs;
   // Reactive mirror of the active codec so UI (e.g. the home card) updates live.
   final codecRx = CodecType.h264.obs;
   // Reactive UI language code ('en' / 'th'); drives the language picker.
@@ -74,6 +79,7 @@ class SettingsService extends GetxService {
     showPerformanceOverlay.value = _prefs.getBool(_keyPerfOverlay) ?? false;
     showHudOverlay.value = _prefs.getBool(_keyHudOverlay) ?? true;
     keepMacCursor.value = _prefs.getBool(_keyKeepMacCursor) ?? true;
+    tabletScreenOff.value = _prefs.getBool(_keyTabletScreenOff) ?? false;
     codecRx.value = switch (_prefs.getString(_keyCodec)) {
       'h265' => CodecType.h265,
       'h264' => CodecType.h264,
@@ -310,5 +316,10 @@ class SettingsService extends GetxService {
   Future<void> setKeepMacCursor(bool v) {
     keepMacCursor.value = v;
     return _prefs.setBool(_keyKeepMacCursor, v);
+  }
+
+  Future<void> setTabletScreenOff(bool v) {
+    tabletScreenOff.value = v;
+    return _prefs.setBool(_keyTabletScreenOff, v);
   }
 }

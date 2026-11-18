@@ -103,6 +103,30 @@ class _TopBar extends StatelessWidget {
                   color: Colors.white, fontWeight: FontWeight.w600),
             ),
             const Spacer(),
+            Obx(() {
+              if (!controller.tabletStreaming.value) {
+                return const SizedBox.shrink();
+              }
+              final off = controller.tabletScreenOff.value;
+              return Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: Tooltip(
+                  message: 'remote_tablet_screen_hint'.tr,
+                  child: TextButton.icon(
+                    onPressed: controller.changingTabletScreen.value
+                        ? null
+                        : controller.onToggleTabletScreen,
+                    icon: Icon(off ? Icons.light_mode : Icons.dark_mode,
+                        size: 16),
+                    label: Text(off
+                        ? 'remote_tablet_screen_on'.tr
+                        : 'remote_tablet_screen_off'.tr),
+                    style: TextButton.styleFrom(
+                        foregroundColor: Colors.white70),
+                  ),
+                ),
+              );
+            }),
             Obx(() => _Chip(
                   icon: Icons.bolt,
                   label:
