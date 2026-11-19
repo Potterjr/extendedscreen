@@ -3,14 +3,17 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:get/get.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:extendedscreen/shared/connection/adb_service.dart';
 import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
 import 'package:extendedscreen/shared/connection/connection_state.dart';
+import 'package:extendedscreen/shared/connection/host_connection_manager.dart';
 import 'package:extendedscreen/shared/connection/socket_service.dart';
 import 'package:extendedscreen/shared/connection/wifi_pairing_service.dart';
 import 'package:extendedscreen/shared/features/home/controllers/home_controller.dart';
 import 'package:extendedscreen/shared/features/home/views/home_view.dart';
 import 'package:extendedscreen/shared/features/settings/controllers/settings_controller.dart';
 import 'package:extendedscreen/shared/features/settings/views/settings_view.dart';
+import 'package:extendedscreen/shared/models/device_model.dart';
 import 'package:extendedscreen/shared/models/link_type.dart';
 import 'package:extendedscreen/shared/models/session_mode.dart';
 import 'package:extendedscreen/shared/platform/battery_channel.dart';
@@ -18,14 +21,9 @@ import 'package:extendedscreen/shared/services/logger_service.dart';
 import 'package:extendedscreen/shared/services/settings_service.dart';
 import 'package:extendedscreen/shared/widgets/device_picker_card.dart';
 
-/// A manager of either role that records what Home asked of it and never
-/// opens a socket.
-class _FakeManager extends BaseConnectionManager {
-  _FakeManager({required this.isHost});
-
-  @override
-  final bool isHost;
-
+/// What Home asked of a connection manager, recorded instead of done: no
+/// socket is ever opened.
+mixin _Recording on BaseConnectionManager {
   int connects = 0;
   int disconnects = 0;
   int identityResets = 0;
@@ -51,6 +49,24 @@ class _FakeManager extends BaseConnectionManager {
     disconnects++;
     if (movesPhase) phase.value = ConnectionPhase.disconnected;
   }
+}
+
+/// The tablet's manager.
+class _FakeClient extends BaseConnectionManager with _Recording {
+  @override
+  bool get isHost => false;
+}
+
+/// The Mac's hub, with its own auto-connect policy and pause; connecting
+/// and disconnecting are recorded.
+class _FakeHub extends HostConnectionManager with _Recording {
+  _FakeHub() : super(adb: _NoDevices(), devicePollInterval: null);
+}
+
+/// adb with nothing attached.
+class _NoDevices extends AdbService {
+  @override
+  Future<List<DeviceModel>?> listDevicesOrNull() async => const [];
 }
 
 const _permissions = MethodChannel('extended_screen/permissions');
@@ -84,7 +100,7 @@ Future<void> _pumpDialog(WidgetTester tester) async {
 
 void main() {
   late SettingsService settings;
-  late _FakeManager cm;
+  late _Recording cm;
 
   Future<void> start({required bool host, bool permissions = true}) async {
     final messenger =
@@ -94,8 +110,8 @@ void main() {
       (_) async => {'screen_recording': permissions, 'accessibility': permissions},
     );
     addTearDown(() => messenger.setMockMethodCallHandler(_permissions, null));
-    cm = Get.put<BaseConnectionManager>(_FakeManager(isHost: host))
-        as _FakeManager;
+    cm = Get.put<BaseConnectionManager>(host ? _FakeHub() : _FakeClient())
+        as _Recording;
     Get.put(HomeController());
   }
 
@@ -215,6 +231,37 @@ void main() {
 
       expect(cm.disconnects, 0, reason: 'the user pressed Connect');
       expect(cm.phase.value, ConnectionPhase.handshaking);
+    });
+
+    testWidgets("the card's Cancel while the Mac listens is not undone when "
+        'the app comes back to the front', (tester) async {
+      await settings.setLinkType(LinkType.wifi);
+      await start(host: true);
+      cm.movesPhase = true;
+      await tester.pumpWidget(const GetMaterialApp(home: HomeView()));
+      await tester.pump();
+      await tester.pump();
+      expect(cm.connects, 1, reason: 'listening by itself');
+      expect(cm.phase.value, ConnectionPhase.handshaking);
+
+      await tester.tap(find.text('common_cancel'));
+      await tester.pump();
+      expect(cm.disconnects, 1);
+      expect(cm.phase.value, ConnectionPhase.disconnected);
+
+      // Focus comes back: both Home and the hub run the policy.
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pump();
+      await tester.pump();
+      expect(cm.connects, 1, reason: 'the user stopped it');
+
+      // The user's own Connect lifts the pause.
+      await tester.tap(find.text('common_connect'));
+      await tester.pump();
+      await tester.pump();
+      expect(cm.connects, 2);
+      expect((cm as HostConnectionManager).autoConnectPaused.value, isFalse);
     });
 
     testWidgets('Mac → Tablet cannot be chosen over Wi-Fi', (tester) async {

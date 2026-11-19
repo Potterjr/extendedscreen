@@ -1,11 +1,16 @@
+import 'dart:convert';
+import 'dart:math' as math;
 import 'dart:ui';
 
 import 'package:get/get.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:extendedscreen/shared/models/client_panel.dart';
+import 'package:extendedscreen/shared/models/device_model.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
+import 'package:extendedscreen/shared/models/known_device.dart';
 import 'package:extendedscreen/shared/models/link_type.dart';
 import 'package:extendedscreen/shared/models/session_mode.dart';
+import 'package:extendedscreen/shared/models/session_spec.dart';
 import 'package:extendedscreen/shared/services/app_translations.dart';
 
 class SettingsService extends GetxService {
@@ -19,6 +24,12 @@ class SettingsService extends GetxService {
   static const _keyBitrate = 'bitrate';
   static const _keyLastDevice = 'last_device';
   static const _keyLastDeviceName = 'last_device_name';
+  // Every tablet the host has had a live USB session with (a JSON list of
+  // [KnownDevice]). Its presence also marks [_migrateToPerTablet]'s
+  // known-devices step as done.
+  static const _keyKnownDevices = 'known_devices';
+  // The configured cap on tablets at once (host).
+  static const _keyMaxTablets = 'max_tablets';
   // Native panel of the connected client (physical px, landscape), learned
   // from its HELLO and persisted so presets stay correct across launches.
   static const _keyPanelW = 'client_panel_w';
@@ -34,6 +45,9 @@ class SettingsService extends GetxService {
   // session key: the adb serial over USB).
   static const _keyTabletScreenOffPrefix = 'tablet_screen_off.';
   static const _keyClientPanelPrefix = 'client_panel.';
+  // Host: what this Mac's encoder was seen to manage, per chip and codec
+  // (`encoder_capacity.apple-m3-pro.h265`), in Mpx/s.
+  static const _keyEncoderCapacityPrefix = 'encoder_capacity.';
   static const _keyEncodePreset = 'encode_preset';
   static const _keyCodec = 'codec';
   static const _keyLocale = 'locale';
@@ -61,6 +75,12 @@ class SettingsService extends GetxService {
   // USB (adb tunnel) or Wi-Fi (TLS on the LAN). Each device keeps its own:
   // the host how it listens, the client where it dials. Picked on Home.
   final linkTypeRx = LinkType.usb.obs;
+  // Host: how many tablets may be connected at once, on top of what the
+  // encoder allows (EncodeBudget). 1 to 8.
+  final maxTabletsRx = defaultMaxTablets.obs;
+
+  static const defaultMaxTablets = 4;
+  static const maxTabletsLimit = 8;
 
   // Native panel of the connected client device (physical px, landscape).
   // Fixed presets derive their capture resolution from these. The fallback is
@@ -98,6 +118,8 @@ class SettingsService extends GetxService {
     linkTypeRx.value = _prefs.getString(_keyLinkType) == LinkType.wifi.name
         ? LinkType.wifi
         : LinkType.usb;
+    maxTabletsRx.value = (_prefs.getInt(_keyMaxTablets) ?? defaultMaxTablets)
+        .clamp(1, maxTabletsLimit);
     await _migrateToPerTablet();
   }
 
@@ -105,9 +127,18 @@ class SettingsService extends GetxService {
   /// screen-off choice) becomes the last-used device's own, and the old
   /// screen-off key goes, so no other tablet inherits it later by becoming
   /// the last-used one. The global panel stays: it is the last panel any
-  /// tablet reported.
+  /// tablet reported. The last-used device also becomes the first known
+  /// device, with virtual-display serial 1, the one every virtual display had
+  /// before, so macOS keeps its place on the desktop. That reads the saved
+  /// serial itself, never [lastDeviceSerial], which falls back to the
+  /// build's DEVICE_SERIAL: a tablet that was never used must not take 1.
   Future<void> _migrateToPerTablet() async {
     final last = _prefs.getString(_keyLastDevice);
+    if (last != null && !_prefs.containsKey(_keyKnownDevices)) {
+      await _saveKnownDevices([
+        KnownDevice(serial: last, model: lastDeviceName, vdSerial: 1),
+      ]);
+    }
     final off = _prefs.getBool(_keyTabletScreenOff);
     if (off != null) {
       if (last != null &&
@@ -216,12 +247,57 @@ class SettingsService extends GetxService {
       ClientPanel.decode(_prefs.getString('$_keyClientPanelPrefix$key'));
 
   /// Host: record [panel] as the one session [key]'s tablet reported (its
-  /// HELLO), and as the last one reported.
+  /// HELLO), and as the last one reported. Nothing for a synthetic tablet.
   Future<void> setClientPanelFor(String key, ClientPanel panel) async {
+    if (isSyntheticKey(key)) return;
     await _prefs.setString('$_keyClientPanelPrefix$key', panel.encode());
     await setClientPanel(panel.width, panel.height);
     await setClientMaxRefresh(panel.maxHz);
   }
+
+  /// The preference key of what was learned of the encoder's capacity on
+  /// [chip] (its brand string, "Apple M3 Pro") with [codec]: lower case,
+  /// every run of anything but a letter or digit one dash
+  /// (`encoder_capacity.apple-m3-pro.h265`). Null for an unknown chip.
+  static String? encoderCapacityKey(String chip, CodecType codec) {
+    final slug = chip
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^a-z0-9]+'), '-')
+        .replaceAll(RegExp(r'^-+|-+$'), '');
+    if (slug.isEmpty) return null;
+    return '$_keyEncoderCapacityPrefix$slug.${codec.name}';
+  }
+
+  /// Host: what an earlier run learned this Mac's encoder manages with
+  /// [codec] on [chip], in Mpx/s (EncodeBudget's learned capacity); null for
+  /// nothing, or for a value that can't be one.
+  double? encoderCapacityFor(String chip, CodecType codec) {
+    final key = encoderCapacityKey(chip, codec);
+    if (key == null) return null;
+    final v = _prefs.getDouble(key);
+    if (v == null || !v.isFinite || v <= 0 || v > maxEncoderCapacity) {
+      return null;
+    }
+    return v;
+  }
+
+  /// Host: saves what was learned of the encoder's capacity on [chip] with
+  /// [codec] ([mpx], Mpx/s), or forgets it (null). Nothing for an unknown
+  /// chip.
+  Future<void> setEncoderCapacityFor(
+      String chip, CodecType codec, double? mpx) async {
+    final key = encoderCapacityKey(chip, codec);
+    if (key == null) return;
+    if (mpx == null || !mpx.isFinite || mpx <= 0) {
+      await _prefs.remove(key);
+    } else {
+      await _prefs.setDouble(key, math.min(mpx, maxEncoderCapacity));
+    }
+  }
+
+  /// More than any media engine manages, in Mpx/s: a saved value past it is
+  /// not taken.
+  static const maxEncoderCapacity = 100000.0;
 
   /// Host: record the client's native panel (from its HELLO). Landscape is
   /// enforced on the client, so width is always the long side.
@@ -300,6 +376,20 @@ class SettingsService extends GetxService {
 
   bool get isCustomPreset => encodePreset == EncodePreset.custom;
 
+  /// What a session capturing for a tablet with [panel] encodes under the
+  /// current preset and codec, in [spec]'s display mode.
+  DisplayConfigModel captureConfigFor(ClientPanel panel, SessionSpec spec) =>
+      encodePreset.configFor(
+        panel,
+        custom: CustomPreset(
+          width: customWidth,
+          bitrateMbps: customBitrateMbps,
+          refreshRate: customRefreshRate,
+        ),
+        mode: spec.displayMode,
+        codec: codec,
+      );
+
   // ─── Effective capture values (resolve custom vs fixed preset) ────────────
   // Custom's width/height are the *physical* encode resolution — that's how the
   // picker labels them and what its help text describes. The desktop itself
@@ -347,15 +437,121 @@ class SettingsService extends GetxService {
   String? get lastDeviceSerial =>
       _prefs.getString(_keyLastDevice) ?? (_buildSerial.isNotEmpty ? _buildSerial : null);
 
-  Future<void> setLastDevice(String serial) =>
-      _prefs.setString(_keyLastDevice, serial);
+  Future<void> setLastDevice(String serial) async {
+    if (isSyntheticKey(serial)) return;
+    await _prefs.setString(_keyLastDevice, serial);
+  }
 
   /// Model name of the last connected client (from `adb devices -l`), shown in
   /// the settings "Target device" row when nothing is connected.
   String? get lastDeviceName => _prefs.getString(_keyLastDeviceName);
 
+  /// It takes a model name, not a serial, so it can't tell a synthetic
+  /// tablet's: [rememberDevice] checks the serial before writing either.
   Future<void> setLastDeviceName(String name) =>
       _prefs.setString(_keyLastDeviceName, name);
+
+  /// A session key (or serial) of an in-process stand-in tablet (debug builds
+  /// and tests). Nothing is ever saved for one: its panel, its screen-off
+  /// choice, the last-used device and the known devices stay as they were.
+  static bool isSyntheticKey(String key) =>
+      key.startsWith(syntheticSerialPrefix);
+
+  // ─── Known devices (host) ─────────────────────────────────────────────────
+
+  /// Every tablet the host has had a live USB session with. A list that
+  /// can't be read is no list.
+  List<KnownDevice> get knownDevices {
+    final text = _prefs.getString(_keyKnownDevices);
+    if (text == null) return const [];
+    try {
+      final list = jsonDecode(text);
+      if (list is! List) return const [];
+      return list.map(KnownDevice.fromJson).whereType<KnownDevice>().toList();
+    } on FormatException {
+      return const [];
+    }
+  }
+
+  KnownDevice? knownDevice(String serial) {
+    for (final d in knownDevices) {
+      if (d.serial == serial) return d;
+    }
+    return null;
+  }
+
+  Future<void> _saveKnownDevices(List<KnownDevice> devices) =>
+      _prefs.setString(_keyKnownDevices,
+          jsonEncode(devices.map((d) => d.toJson()).toList()));
+
+  /// FNV-1a, 32 bits, over [text]'s UTF-8 bytes: a stable number per serial.
+  static int fnv1a32(String text) {
+    var hash = 0x811C9DC5;
+    for (final byte in utf8.encode(text)) {
+      hash = ((hash ^ byte) * 0x01000193) & 0xFFFFFFFF;
+    }
+    return hash;
+  }
+
+  /// The serial number tablet [key]'s virtual display is created with: the
+  /// one it was given before (see [rememberDevice]), else one worked out from
+  /// its serial, at least 0x10000 so it never meets the 1 the migrated
+  /// tablet keeps, and stepped past any in [taken] (displays live right now)
+  /// and any another known tablet has. Saves nothing.
+  int vdSerialFor(String key, {Set<int> taken = const {}}) {
+    final known = knownDevices;
+    for (final d in known) {
+      if (d.serial == key) return d.vdSerial;
+    }
+    final stored = {for (final d in known) d.vdSerial};
+    var v = fnv1a32(key) | 0x10000;
+    while (v == 1 || taken.contains(v) || stored.contains(v)) {
+      v = ((v + 1) & 0xFFFFFFFF) | 0x10000;
+    }
+    return v;
+  }
+
+  /// The name tablet [key]'s virtual display shows in System Settings. The
+  /// migrated tablet (serial 1) keeps the one every display had before;
+  /// another names its model ([model] when none is saved yet), as adb
+  /// reports it with spaces for underscores.
+  String vdNameFor(String key, {String? model}) {
+    const base = 'Extended Screen';
+    final known = knownDevice(key);
+    if (known?.vdSerial == 1) return base;
+    final name = (known?.model ?? model)?.replaceAll('_', ' ').trim();
+    return name == null || name.isEmpty ? base : '$base – $name';
+  }
+
+  /// Host: tablet [serial] has a live session. Adds it to [knownDevices] with
+  /// [vdSerial] (one it already has, and its install id, are kept), and makes
+  /// it the last-used device, which Settings' "Target device" row and the
+  /// first-run auto-connect read. Nothing for a synthetic tablet.
+  Future<void> rememberDevice(String serial,
+      {String? model, required int vdSerial}) async {
+    if (isSyntheticKey(serial)) return;
+    final hasModel = model != null && model.isNotEmpty;
+    final devices = knownDevices.toList();
+    final i = devices.indexWhere((d) => d.serial == serial);
+    if (i < 0) {
+      devices.add(KnownDevice(
+          serial: serial, model: hasModel ? model : null, vdSerial: vdSerial));
+    } else {
+      devices[i] = devices[i].copyWith(model: hasModel ? model : null);
+    }
+    await _saveKnownDevices(devices);
+    await setLastDevice(serial);
+    if (hasModel) await setLastDeviceName(model);
+  }
+
+  /// Host: the configured cap on tablets at once.
+  int get maxTablets => maxTabletsRx.value;
+
+  Future<void> setMaxTablets(int n) async {
+    final v = n.clamp(1, maxTabletsLimit);
+    maxTabletsRx.value = v;
+    await _prefs.setInt(_keyMaxTablets, v);
+  }
 
   Future<void> setShowPerformanceOverlay(bool v) {
     showPerformanceOverlay.value = v;
@@ -378,6 +574,8 @@ class SettingsService extends GetxService {
   bool tabletScreenOffFor(String serial) =>
       _prefs.getBool('$_keyTabletScreenOffPrefix$serial') ?? false;
 
-  Future<void> setTabletScreenOffFor(String serial, bool v) =>
-      _prefs.setBool('$_keyTabletScreenOffPrefix$serial', v);
+  Future<void> setTabletScreenOffFor(String serial, bool v) async {
+    if (isSyntheticKey(serial)) return;
+    await _prefs.setBool('$_keyTabletScreenOffPrefix$serial', v);
+  }
 }

@@ -22,7 +22,10 @@ class LatencyChip extends StatelessWidget {
             ? const Color(0xFFFFB300)
             : Colors.redAccent;
 
+    // Only as wide as the chips: a session card sets it in a Wrap beside
+    // its frame rate.
     return Row(
+      mainAxisSize: MainAxisSize.min,
       children: [
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),

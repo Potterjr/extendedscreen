@@ -3,6 +3,7 @@ import 'package:get/get.dart';
 import 'package:extendedscreen/app/routes/app_routes.dart';
 import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
 import 'package:extendedscreen/shared/connection/connection_state.dart';
+import 'package:extendedscreen/shared/connection/host_connection_manager.dart';
 import 'package:extendedscreen/shared/connection/wifi_discovery_service.dart';
 import 'package:extendedscreen/shared/connection/wifi_pairing_service.dart';
 import 'package:extendedscreen/shared/models/device_model.dart';
@@ -237,14 +238,13 @@ class HomeController extends GetxController with WidgetsBindingObserver {
   }
 
   /// Host, permissions granted (Home opened, or the app came back to the
-  /// front): connect without waiting for a tap when there's nothing to choose
-  /// ([BaseConnectionManager.connectIfUnambiguous]), unless the user stopped
-  /// the last attempt. The same check runs at launch from the host's
-  /// `autoConnect()`, which doesn't need this screen to have been drawn.
-  Future<void> _maybeAutoConnect() async {
-    if (_userStopped) return;
-    await _connection.connectIfUnambiguous();
-  }
+  /// front): run the hub's auto-connect policy
+  /// ([BaseConnectionManager.connectIfUnambiguous]), which does nothing
+  /// while the user's Cancel or Disconnect on this card has paused it. The
+  /// same policy runs at launch from the host's `autoConnect()`, which
+  /// doesn't need this screen to have been drawn, and from the hub's own
+  /// resume and device poll.
+  Future<void> _maybeAutoConnect() => _connection.connectIfUnambiguous();
 
   void onGrantPermission(String key) => _perms.openPermission(key);
 
@@ -273,22 +273,19 @@ class HomeController extends GetxController with WidgetsBindingObserver {
     }
   }
 
-  // Set when the user explicitly disconnects/cancels. Suppresses auto-connect
-  // (which also re-runs whenever the app regains focus) until they connect
-  // again themselves — otherwise a Cancel was undone by the next focus.
-  bool _userStopped = false;
-
   /// The card's single action: Disconnect while live, Cancel while connecting
   /// (or, on the host, while a retry is pending), else Connect. Matches
   /// ConnectionCard's choice of label. On the host, Connect is only offered
   /// over Wi-Fi (start listening); over USB it connects by picking a device.
+  /// A stop also pauses the host's auto-connect until the user connects
+  /// again, or the next focus (or the device poll) would undo the Cancel.
   void onConnectTap() {
     final p = _connection.phase.value;
     final stops = p.isActive ||
         p.isConnecting ||
         (isHost && p == ConnectionPhase.error);
     if (stops) {
-      _userStopped = true;
+      _connection.pauseAutoConnect();
       _connection.disconnect();
     } else {
       _connect();
@@ -301,12 +298,34 @@ class HomeController extends GetxController with WidgetsBindingObserver {
   Future<void> onSelectDevice(DeviceModel device) =>
       _connect(serial: device.serial);
 
+  /// Host, a tablet's card: its Disconnect, or its Cancel while it connects
+  /// or waits to retry. Ends that tablet's session alone, and the automatic
+  /// connects leave the tablet alone until the user connects it again.
+  Future<void> onSessionStop(String key) =>
+      _connection.disconnectSession(key, userStopped: true);
+
+  /// Host, a tablet's card: Retry, offered in `error`: when its failure
+  /// armed no retry (the encoder had no room for it), or to run the retry
+  /// it waits for now instead of when its backoff runs out. Runs that
+  /// session's connect again, on the same session.
+  Future<void> onSessionRetry(String key) => _connect(serial: key);
+
+  /// Host: a tablet's card was tapped; the hub's values (the remote view,
+  /// the screen toggle) follow that tablet from now on. Checked, not cast:
+  /// Home also runs over stand-in managers in tests.
+  void onFocus(String key) {
+    final hub = _connection;
+    if (hub is HostConnectionManager) hub.focus(key);
+  }
+
   /// Gate every connect attempt behind a permission check on the host: capture
   /// and input injection need Screen Recording + Accessibility. If anything is
   /// missing, bounce to Settings (scrolled to Permissions) instead of failing
   /// mid-handshake.
   Future<void> _connect({String? serial}) async {
-    _userStopped = false;
+    // The user connects again: the auto-connect they paused, and the
+    // tablet they stopped, are theirs to connect by itself again.
+    _connection.allowDevice(serial);
     if (isHost && !await _ensureHostPermissions()) return;
     await _connection.connect(serial: serial);
   }

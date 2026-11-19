@@ -10,6 +10,7 @@ import 'package:extendedscreen/app/routes/app_routes.dart';
 import 'package:extendedscreen/shared/connection/adb_service.dart';
 import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
 import 'package:extendedscreen/shared/connection/connection_state.dart';
+import 'package:extendedscreen/shared/connection/encode_budget.dart';
 import 'package:extendedscreen/shared/connection/host_connection_manager.dart';
 import 'package:extendedscreen/shared/connection/socket_service.dart';
 import 'package:extendedscreen/shared/features/home/controllers/home_controller.dart';
@@ -26,17 +27,27 @@ class _Adb extends AdbService {
   List<DeviceModel> devices = const [];
   Completer<void>? answer;
 
+  /// How many times the devices were listed.
+  int listings = 0;
+
   @override
-  Future<List<DeviceModel>> listDevices() async {
+  Future<List<DeviceModel>?> listDevicesOrNull() async {
     await answer?.future;
+    listings++;
     return devices;
   }
 }
 
 /// The real host, up to the point where it would open a server: what it was
-/// asked to connect to is recorded instead.
+/// asked to connect to is recorded instead. No device poll unless [poll]
+/// says how often; [granted] stands in for the permission check (by default
+/// the mocked permissions channel answers).
 class _LaunchHost extends HostConnectionManager {
-  _LaunchHost() : super(socket: SocketService());
+  _LaunchHost({Duration? poll, Future<bool> Function()? granted})
+      : super(
+            socket: SocketService(),
+            devicePollInterval: poll,
+            hostGranted: granted);
 
   final connects = <String?>[];
 
@@ -71,6 +82,17 @@ const _permissions = MethodChannel('extended_screen/permissions');
 
 DeviceModel _device(String serial) =>
     DeviceModel(serial: serial, status: DeviceStatus.connected);
+
+Future<void> _until(bool Function() condition,
+    {Duration timeout = const Duration(seconds: 5)}) async {
+  final deadline = DateTime.now().add(timeout);
+  while (!condition()) {
+    if (DateTime.now().isAfter(deadline)) {
+      fail('condition not met within $timeout');
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+  }
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -203,6 +225,117 @@ void main() {
       await cancelled.disconnect();
       await launch;
       expect(cancelled.connects, isEmpty);
+    });
+  });
+
+  // Every tablet that had a live session before connects by itself, as far
+  // as the encoder's room goes; one seen for the first time does only when
+  // it is the one tablet there is.
+  group('several tablets', () {
+    Future<void> know(List<String> serials) async {
+      for (final (i, serial) in serials.indexed) {
+        await settings.rememberDevice(serial, vdSerial: 0x10000 + i);
+      }
+    }
+
+    /// A host with room for four tablets (an M3 Pro's encoder).
+    _LaunchHost roomy({Duration? poll, Future<bool> Function()? granted}) {
+      final host = _LaunchHost(poll: poll, granted: granted);
+      host.budget.estimate = EncoderEstimate.forChip('Apple M3 Pro');
+      addTearDown(host.stopPolling);
+      return host;
+    }
+
+    test('two known tablets both connect at launch', () async {
+      permissions(granted: true);
+      await know(['TABLET-A', 'TABLET-B']);
+      adb.devices = [_device('TABLET-B'), _device('TABLET-A')];
+      final host = roomy();
+      expect(host.cap, 4);
+
+      await host.autoConnect();
+      expect(host.connects, ['TABLET-A', 'TABLET-B']);
+    });
+
+    test('a known tablet the user stopped does not', () async {
+      permissions(granted: true);
+      await know(['TABLET-A', 'TABLET-B']);
+      adb.devices = [_device('TABLET-A'), _device('TABLET-B')];
+      final host = roomy();
+      host.stoppedDevices.add('TABLET-A');
+
+      await host.autoConnect();
+      expect(host.connects, ['TABLET-B']);
+    });
+
+    test('a known emulator is skipped beside a real tablet, and connects '
+        'when it is alone', () async {
+      permissions(granted: true);
+      await know(['emulator-5554']);
+      adb.devices = [
+        _device('emulator-5554'),
+        _device('TABLET-A'),
+        _device('TABLET-B'),
+      ];
+      final beside = roomy();
+      await beside.autoConnect();
+      expect(beside.connects, isEmpty,
+          reason: 'two new tablets to choose from, and the emulator skipped');
+
+      adb.devices = [_device('emulator-5554')];
+      final alone = roomy();
+      await alone.autoConnect();
+      expect(alone.connects, ['emulator-5554']);
+    });
+
+    test('in remote control, two known tablets wait for the pick', () async {
+      permissions(granted: true);
+      await settings.setSessionMode(SessionMode.remoteControl);
+      await know(['TABLET-A', 'TABLET-B']);
+      adb.devices = [_device('TABLET-A'), _device('TABLET-B')];
+      final host = roomy();
+      expect(host.cap, 1);
+
+      await host.autoConnect();
+      expect(host.connects, isEmpty);
+    });
+
+    test('a stand-in tablet is never a candidate', () async {
+      permissions(granted: true);
+      adb.devices = [_device('${syntheticSerialPrefix}1')];
+      final alone = roomy();
+      await alone.autoConnect();
+      expect(alone.connects, isEmpty);
+
+      adb.devices = [_device('${syntheticSerialPrefix}1'), _device('TABLET')];
+      final beside = roomy();
+      await beside.autoConnect();
+      expect(beside.connects, ['TABLET'],
+          reason: 'it does not make the one real tablet a choice');
+    });
+
+    test('without permissions a known tablet plugged in does not connect; '
+        'once they are granted, the next one plugged in does', () async {
+      var granted = false;
+      await know(['TABLET-A', 'TABLET-B']);
+      final host = roomy(
+          poll: const Duration(milliseconds: 20), granted: () async => granted);
+      await host.autoConnect();
+      expect(host.connects, isEmpty);
+
+      adb.devices = [_device('TABLET-A')];
+      final seen = adb.listings;
+      await _until(() => adb.listings >= seen + 3);
+      expect(host.availableDevices.single.serial, 'TABLET-A',
+          reason: 'the poll lists it for the picker');
+      expect(host.connects, isEmpty);
+
+      granted = true;
+      adb.devices = [_device('TABLET-A'), _device('TABLET-B')];
+      await _until(() => host.connects.isNotEmpty);
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      expect(host.connects, ['TABLET-B'],
+          reason: 'A was plugged in before; only a new one runs the policy');
     });
   });
 

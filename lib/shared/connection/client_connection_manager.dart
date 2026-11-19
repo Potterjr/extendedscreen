@@ -182,13 +182,14 @@ class ClientConnectionManager extends BaseConnectionManager {
       if (isCancelled(attempt)) return; // cancelled mid-attempt: no retry
       // Expected to fail until the host is up; retry quietly.
       log.w('Client connect failed (${e.runtimeType}); retrying…');
-      errorMessage.value = switch (e) {
-        LinkError() => e.toString(),
+      errorKey.value = switch (e) {
+        LinkError() => e.key,
         // The peer's certificate is not a paired Mac's (or the Mac made a new
         // identity): waiting won't fix that, pairing again over USB will.
-        TlsException() => 'error_wifi_untrusted'.tr,
-        _ => 'error_waiting_for_host'.tr,
+        TlsException() => 'error_wifi_untrusted',
+        _ => 'error_waiting_for_host',
       };
+      errorMessage.value = errorKey.value!.tr;
       // Keep the keep-alive service running (default onLinkLost is a no-op) so
       // the retry still works while the app is in the background.
       await handleLinkFailure();

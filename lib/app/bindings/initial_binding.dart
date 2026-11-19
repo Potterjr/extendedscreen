@@ -5,6 +5,7 @@ import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
 import 'package:extendedscreen/shared/services/settings_service.dart';
 import 'package:extendedscreen/shared/services/logger_service.dart';
 import 'package:extendedscreen/shared/connection/adb_service.dart';
+import 'package:extendedscreen/shared/connection/debug/synthetic_tablet.dart';
 import 'package:extendedscreen/shared/connection/host_connection_manager.dart';
 import 'package:extendedscreen/shared/connection/usb_session_service.dart';
 import 'package:extendedscreen/shared/connection/wifi_discovery_service.dart';
@@ -43,7 +44,17 @@ class InitialBinding extends Bindings {
       Get.put(ScreenCaptureChannel(), permanent: true);
       Get.put(InputInjectChannel(), permanent: true);
       Get.put(RemoteVideoChannel(), permanent: true);
-      Get.put(AdbService(), permanent: true);
+      if (synthTablets) {
+        // Debug builds with --dart-define=SYNTH_TABLETS=N: N tablets stood
+        // in for in this process, reached through an adb that hands every
+        // other serial to the real one. A const condition, so no other
+        // build contains any of it.
+        final synth =
+            Get.put(SyntheticTablets(synthTabletCount), permanent: true);
+        Get.put<AdbService>(synth.adb, permanent: true);
+      } else {
+        Get.put(AdbService(), permanent: true);
+      }
       Get.put<BaseConnectionManager>(HostConnectionManager(), permanent: true);
     } else if (defaultTargetPlatform == TargetPlatform.android) {
       // CLIENT (Android): video decoder, plus the reverse-remote screen

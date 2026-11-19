@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/widgets.dart' show AppLifecycleState;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:get/get.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -45,6 +46,13 @@ class _RefusingSocket extends SocketService {
   Future<void> disconnect() async {}
 }
 
+/// A client whose link fails for good, with no retry (as a host session
+/// the encoder has no room for does).
+class _Client extends ClientConnectionManager {
+  // ignore: invalid_use_of_protected_member
+  Future<void> failForGood() => handleLinkFailure(retry: false);
+}
+
 /// Only [ClientConnectionManager.onTeardown] (via disconnect) touches it.
 class _IdleCapture extends AndroidCaptureChannel {
   @override
@@ -81,6 +89,8 @@ void main() {
     await cm.connect();
     expect(socket.dials, 1);
     expect(cm.phase.value, ConnectionPhase.error);
+    expect(cm.retryPending.value, isTrue);
+    expect(cm.errorKey.value, 'error_waiting_for_host');
 
     // The user taps Connect on Home during that wait; it is refused too.
     await tester.pump(const Duration(seconds: 1));
@@ -109,7 +119,34 @@ void main() {
     // Cancel: drops the pending retry so no timer outlives the test.
     await cm.disconnect();
     expect(cm.phase.value, ConnectionPhase.disconnected);
+    expect(cm.retryPending.value, isFalse);
     await tester.pump(const Duration(seconds: 10));
     expect(socket.dials, 4);
+  });
+
+  testWidgets(
+      'a failure with no retry arms nothing, and the resume rule leaves it '
+      'alone until the next connect', (tester) async {
+    final cm = _Client();
+
+    await cm.failForGood();
+    expect(cm.phase.value, ConnectionPhase.error);
+    expect(cm.retryPending.value, isFalse);
+    await tester.pump(const Duration(seconds: 30));
+    expect(socket.dials, 0);
+
+    cm.didChangeAppLifecycleState(AppLifecycleState.resumed);
+    await tester.pump();
+    expect(socket.dials, 0, reason: 'nothing comes back by itself');
+
+    // The user's own connect is a fresh start: its failure retries again.
+    await cm.connect();
+    expect(socket.dials, 1);
+    expect(cm.retryPending.value, isTrue);
+    await tester.pump(const Duration(seconds: 5));
+    expect(socket.dials, 2);
+
+    await cm.disconnect();
+    expect(cm.retryPending.value, isFalse);
   });
 }

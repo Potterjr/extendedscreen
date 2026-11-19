@@ -1,12 +1,17 @@
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
+import 'package:extendedscreen/app/routes/app_routes.dart';
+import 'package:extendedscreen/shared/connection/debug/synthetic_tablet.dart';
 import 'package:extendedscreen/shared/features/home/controllers/home_controller.dart';
 import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
 import 'package:extendedscreen/shared/connection/connection_state.dart';
+import 'package:extendedscreen/shared/connection/host_connection_manager.dart';
+import 'package:extendedscreen/shared/connection/host_session.dart';
 import 'package:extendedscreen/shared/connection/wifi_pairing_service.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
 import 'package:extendedscreen/shared/models/link_type.dart';
 import 'package:extendedscreen/shared/models/session_mode.dart';
+import 'package:extendedscreen/shared/models/session_spec.dart';
 import 'package:extendedscreen/shared/services/settings_service.dart';
 import 'package:extendedscreen/shared/widgets/battery_chip.dart';
 import 'package:extendedscreen/shared/widgets/confirm_dialog.dart';
@@ -15,6 +20,7 @@ import 'package:extendedscreen/shared/widgets/connection_steps.dart';
 import 'package:extendedscreen/shared/widgets/device_info_card.dart';
 import 'package:extendedscreen/shared/widgets/device_picker_card.dart';
 import 'package:extendedscreen/shared/widgets/latency_chip.dart';
+import 'package:extendedscreen/shared/widgets/session_card.dart';
 
 class HomeView extends GetView<HomeController> {
   const HomeView({super.key});
@@ -27,19 +33,43 @@ class HomeView extends GetView<HomeController> {
     return Scaffold(
       appBar: AppBar(
         // On the host show the chosen session mode (picked via the selector
-        // below) — wrapped in Obx so it reacts to mode changes. The client
-        // always shows the static app name, so it must NOT be in an Obx (a
-        // builder that reads no observable trips GetX's "improper use").
+        // below), or with several tablets the app's name and how many —
+        // wrapped in Obx so it reacts. The client always shows the static
+        // app name, so it must NOT be in an Obx (a builder that reads no
+        // observable trips GetX's "improper use").
         title: controller.isHost
-            ? Obx(() => Text(
-                  settings.sessionModeRx.value.label,
-                  style: const TextStyle(fontWeight: FontWeight.w600),
-                ))
+            ? Obx(() {
+                final count = (cm as HostConnectionManager).sessions.length;
+                const style = TextStyle(fontWeight: FontWeight.w600);
+                if (count <= 1) {
+                  return Text(settings.sessionModeRx.value.label, style: style);
+                }
+                return Row(
+                  children: [
+                    Text('app_name'.tr, style: style),
+                    const SizedBox(width: 10),
+                    Text(
+                      'home_appbar_tablets'.trParams({'n': '$count'}),
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.5),
+                        fontSize: 14,
+                      ),
+                    ),
+                  ],
+                );
+              })
             : Text(
                 'app_name'.tr,
                 style: const TextStyle(fontWeight: FontWeight.w600),
               ),
         actions: [
+          // Debug builds with synthetic tablets only (a const condition).
+          if (synthTablets && controller.isHost)
+            IconButton(
+              icon: const Icon(Icons.grid_view_outlined),
+              tooltip: 'loopback_preview_title'.tr,
+              onPressed: () => Get.toNamed(AppRoutes.loopbackPreview),
+            ),
           IconButton(
             icon: const Icon(Icons.settings_outlined),
             onPressed: controller.onGoToSettings,
@@ -47,149 +77,309 @@ class HomeView extends GetView<HomeController> {
         ],
       ),
       body: SafeArea(
-        child: Obx(() {
-          final phase = cm.phase.value;
-          final wifi = settings.linkTypeRx.value == LinkType.wifi;
-          return ListView(
-            padding: const EdgeInsets.all(20),
-            children: [
-              if (controller.isHost &&
-                  controller.missingPermissions.isNotEmpty) ...[
-                _PermissionBanner(
-                  onGrant: () => controller
-                      .onGrantPermission(controller.missingPermissions.first),
-                ),
-                const SizedBox(height: 16),
-              ],
-              ConnectionCard(
-                phase: phase,
-                onTap: controller.onConnectTap,
-                // Over USB the host connects only via the device picker, not
-                // this button. Over Wi-Fi there is no device to pick, so the
-                // button starts listening; in `error` the host retries on its
-                // own and the card offers Cancel, as over USB.
-                canConnect: !controller.isHost ||
-                    (wifi && phase == ConnectionPhase.disconnected),
-                codecLabel: settings.codecRx.value == CodecType.h265
-                    ? 'H.265'
-                    : 'H.264',
-                wifi: wifi,
-              ),
-              const SizedBox(height: 16),
-              // Host: pick which Android client to stream to while idle.
-              if (controller.isHost &&
-                  !phase.isActive &&
-                  !phase.isConnecting) ...[
-                _SessionModeSelector(controller: controller),
-                const SizedBox(height: 16),
-                // Remote-control only: choose which side drives the session.
-                if (controller.isRemoteControl) ...[
-                  _DirectionSelector(controller: controller),
-                  const SizedBox(height: 16),
-                ],
-                _LinkTypeSelector(controller: controller),
-                const SizedBox(height: 16),
-                if (!wifi) ...[
-                  DevicePickerCard(
-                    // Snapshot the list here, inside the Obx builder, so GetX
-                    // subscribes to it. Passing the RxList itself registers
-                    // nothing (the card reads it in its own build, outside
-                    // this builder), which left the picker stale after a
-                    // refresh.
-                    devices: cm.availableDevices.toList(),
-                    refreshing: controller.refreshingDevices.value,
-                    onSelect: controller.onSelectDevice,
-                    onRefresh: controller.refreshDevices,
-                  ),
-                  const SizedBox(height: 16),
-                ],
-              ],
-              // Host over Wi-Fi: where the tablet finds this Mac. Not part of
-              // the idle-only block above: listening is a connecting phase,
-              // and that is exactly when the address is needed (to type on a
-              // tablet that can't find the Mac by itself).
-              if (controller.isHost && wifi && !phase.isActive) ...[
-                // Snapshot for the same reason as the picker's list above.
-                _WifiHostCard(addresses: controller.localAddresses.toList()),
-                const SizedBox(height: 16),
-              ],
-              // Client: show connection progress and an Open View button that
-              // unlocks once the stream is ready.
-              if (!controller.isHost) ...[
-                // Charging is the same USB-C cable as the data link but isn't
-                // implied by it — show it plainly instead of leaving it silent.
-                Obx(() {
-                  final status = controller.batteryStatus.value;
-                  if (status == null) return const SizedBox.shrink();
-                  return Padding(
-                    padding: const EdgeInsets.only(bottom: 16),
-                    child: Align(
-                      alignment: Alignment.centerLeft,
-                      child: BatteryChip(
-                        isCharging: status.isCharging,
-                        level: status.level,
-                      ),
-                    ),
-                  );
-                }),
-                // Where to dial. Hidden during a session; while waiting for
-                // the Mac (the client's usual state) it stays put, so a tablet
-                // set to the wrong link can be switched without stopping.
-                if (!phase.isActive) ...[
-                  _LinkTypeSelector(controller: controller),
-                  const SizedBox(height: 16),
-                  if (wifi) ...[
-                    _WifiClientCard(
-                      controller: controller,
-                      // A snapshot taken inside this Obx (see the picker).
-                      hosts: controller.pairedHosts,
-                    ),
-                    const SizedBox(height: 16),
-                  ],
-                ],
-                // Only while actively connecting — the ConnectionCard above
-                // already states disconnected/error/streaming on its own, so
-                // showing this too in those phases just duplicates it.
-                if (phase.isConnecting) ...[
-                  ConnectionSteps(phase: phase, wifi: wifi),
-                  const SizedBox(height: 20),
-                ],
-                // Reverse remote (Mac controls this tablet): the tablet is the
-                // capture source, so offer a screen-share button instead of the
-                // "open view" button (there is no incoming video to open).
-                if (controller.needsScreenShare.value ||
-                    controller.isScreenSharing.value)
-                  _ShareScreenButton(controller: controller)
-                else
-                  _OpenViewButton(controller: controller, phase: phase),
-                const SizedBox(height: 12),
-              ],
-              if (phase.isActive) ...[
-                if (controller.isHost)
-                  DeviceInfoCard(device: cm.activeDevice.value),
-                if (controller.isHost) const SizedBox(height: 12),
-                // Host, reverse remote (Mac controls tablet): the Mac is the
-                // viewer. It auto-opens the remote view on connect, but offer a
-                // button to get back in after backing out.
-                if (controller.isHost && controller.isReverseRemote) ...[
-                  _OpenRemoteButton(controller: controller),
-                  const SizedBox(height: 12),
-                ],
-                LatencyChip(
-                    latencyMs: cm.latencyMs.value,
-                    wifi: wifi,
-                    bitrate: cm.streamBitrate.value),
-              ],
-              if (phase == ConnectionPhase.error) ...[
-                const SizedBox(height: 16),
-                _ErrorBanner(message: cm.errorMessage.value),
-              ],
-            ],
-          );
-        }),
+        child: controller.isHost
+            ? _HostBody(
+                hub: cm as HostConnectionManager,
+                controller: controller,
+                settings: settings,
+              )
+            : _ClientBody(cm: cm, controller: controller, settings: settings),
       ),
     );
   }
+}
+
+/// The tablet's Home: its one link to the Mac.
+class _ClientBody extends StatelessWidget {
+  final BaseConnectionManager cm;
+  final HomeController controller;
+  final SettingsService settings;
+  const _ClientBody(
+      {required this.cm, required this.controller, required this.settings});
+
+  @override
+  Widget build(BuildContext context) {
+    return Obx(() {
+      final phase = cm.phase.value;
+      final wifi = settings.linkTypeRx.value == LinkType.wifi;
+      return ListView(
+        padding: const EdgeInsets.all(20),
+        children: [
+          ConnectionCard(
+            phase: phase,
+            onTap: controller.onConnectTap,
+            codecLabel:
+                settings.codecRx.value == CodecType.h265 ? 'H.265' : 'H.264',
+            wifi: wifi,
+          ),
+          const SizedBox(height: 16),
+          // Charging is the same USB-C cable as the data link but isn't
+          // implied by it — show it plainly instead of leaving it silent.
+          Obx(() {
+            final status = controller.batteryStatus.value;
+            if (status == null) return const SizedBox.shrink();
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 16),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: BatteryChip(
+                  isCharging: status.isCharging,
+                  level: status.level,
+                ),
+              ),
+            );
+          }),
+          // Where to dial. Hidden during a session; while waiting for the
+          // Mac (the client's usual state) it stays put, so a tablet set to
+          // the wrong link can be switched without stopping.
+          if (!phase.isActive) ...[
+            _LinkTypeSelector(controller: controller),
+            const SizedBox(height: 16),
+            if (wifi) ...[
+              _WifiClientCard(
+                controller: controller,
+                // A snapshot taken inside this Obx (see the host's picker).
+                hosts: controller.pairedHosts,
+              ),
+              const SizedBox(height: 16),
+            ],
+          ],
+          // Only while actively connecting — the ConnectionCard above
+          // already states disconnected/error/streaming on its own, so
+          // showing this too in those phases just duplicates it.
+          if (phase.isConnecting) ...[
+            ConnectionSteps(phase: phase, wifi: wifi),
+            const SizedBox(height: 20),
+          ],
+          // Reverse remote (Mac controls this tablet): the tablet is the
+          // capture source, so offer a screen-share button instead of the
+          // "open view" button (there is no incoming video to open).
+          if (controller.needsScreenShare.value ||
+              controller.isScreenSharing.value)
+            _ShareScreenButton(controller: controller)
+          else
+            _OpenViewButton(controller: controller, phase: phase),
+          const SizedBox(height: 12),
+          if (phase.isActive)
+            LatencyChip(
+                latencyMs: cm.latencyMs.value,
+                wifi: wifi,
+                bitrate: cm.streamBitrate.value),
+          if (phase == ConnectionPhase.error) ...[
+            const SizedBox(height: 16),
+            _ErrorBanner(message: cm.errorMessage.value),
+          ],
+        ],
+      );
+    });
+  }
+}
+
+/// The Mac's Home. Over Wi-Fi, one session shown through the hub's facade,
+/// as it has always been. Over USB, a card per tablet, and the panel that
+/// adds another (always on screen, so a second tablet is one tap away).
+class _HostBody extends StatelessWidget {
+  final HostConnectionManager hub;
+  final HomeController controller;
+  final SettingsService settings;
+  const _HostBody(
+      {required this.hub, required this.controller, required this.settings});
+
+  @override
+  Widget build(BuildContext context) {
+    return Obx(() {
+      final phase = hub.phase.value;
+      final wifi = settings.linkTypeRx.value == LinkType.wifi;
+      final codecLabel =
+          settings.codecRx.value == CodecType.h265 ? 'H.265' : 'H.264';
+      final sessions = hub.sessions.values.toList()
+        ..sort((a, b) => a.key.compareTo(b.key));
+      // Every session's phase and grant read here, so this builder hears
+      // each of them change (the facade follows only the focused one).
+      final phases = [for (final s in sessions) s.phase.value];
+      final capturing = [for (final s in sessions) s.granted.value]
+          .any((g) => g != null);
+      // The encoder's load line and the picker's room follow what the
+      // encoder is taken to manage, which can be learned while nothing
+      // else here changes.
+      hub.capacityChanges.value;
+      final busy = phases.any((p) => p.isConnecting || p.isActive) ||
+          phase.isConnecting ||
+          phase.isActive;
+      // Mode, direction and link apply to the next connect, and to every
+      // tablet at once: only while nothing is under way, and never with
+      // several tablets (their sessions keep what they started with).
+      final selectors = !busy && sessions.length <= 1;
+      return ListView(
+        padding: const EdgeInsets.all(20),
+        children: [
+          if (controller.missingPermissions.isNotEmpty) ...[
+            _PermissionBanner(
+              onGrant: () => controller
+                  .onGrantPermission(controller.missingPermissions.first),
+            ),
+            const SizedBox(height: 16),
+          ],
+          if (wifi)
+            ..._wifi(phase, codecLabel, selectors)
+          else
+            ..._usb(phase, codecLabel, sessions, busy, selectors, capturing),
+        ],
+      );
+    });
+  }
+
+  /// Over Wi-Fi: the one session through the facade, laid out as before
+  /// several tablets existed. Its stop is the card's [HomeController
+  /// .onConnectTap], which also pauses the auto-connect.
+  List<Widget> _wifi(ConnectionPhase phase, String codecLabel, bool selectors) {
+    return [
+      ConnectionCard(
+        phase: phase,
+        onTap: controller.onConnectTap,
+        // There is no device to pick, so the button starts listening; in
+        // `error` the host retries on its own and the card offers Cancel.
+        canConnect: phase == ConnectionPhase.disconnected,
+        codecLabel: codecLabel,
+        wifi: true,
+      ),
+      const SizedBox(height: 16),
+      if (selectors) ..._selectors(),
+      // Where the tablet finds this Mac. Not part of the idle-only block
+      // above: listening is a connecting phase, and that is exactly when the
+      // address is needed (to type on a tablet that can't find the Mac by
+      // itself).
+      if (!phase.isActive) ...[
+        // Snapshot for the same reason as the picker's list.
+        _WifiHostCard(addresses: controller.localAddresses.toList()),
+        const SizedBox(height: 16),
+      ],
+      if (phase.isActive) ...[
+        DeviceInfoCard(device: hub.activeDevice.value),
+        const SizedBox(height: 12),
+        if (controller.isReverseRemote) ...[
+          _OpenRemoteButton(controller: controller),
+          const SizedBox(height: 12),
+        ],
+        LatencyChip(
+            latencyMs: hub.latencyMs.value,
+            wifi: true,
+            bitrate: hub.streamBitrate.value),
+      ],
+      if (phase == ConnectionPhase.error) ...[
+        const SizedBox(height: 16),
+        _ErrorBanner(message: hub.errorMessage.value),
+      ],
+    ];
+  }
+
+  /// Over USB: a card per tablet (with none, the facade's card, which says
+  /// what the hub is doing: looking for a device, or that none is
+  /// attached), the selectors while idle, and the add panel.
+  List<Widget> _usb(ConnectionPhase phase, String codecLabel,
+      List<HostSession> sessions, bool busy, bool selectors, bool capturing) {
+    final focusedKey = hub.focusedKey.value;
+    final devices = hub.availableDevices.toList();
+    final cap = hub.cap;
+    final remote = settings.sessionModeRx.value == SessionMode.remoteControl;
+    // With one tablet at most (cap 1), picking another one replaces the
+    // session there is while it is not under way, as it always has.
+    final canPick = hub.canAdd || (cap == 1 && sessions.length <= 1 && !busy);
+    // A Disconnect of every tablet (the remote view's, say) is still ending
+    // them: the tablets it freed are not short of room, and the facade
+    // still reads the phase of a session that has no card any more.
+    final ending = hub.endingAll.value;
+    final spec = SessionSpec.of(settings, LinkType.usb);
+    final free = hub.freeDevices.toList();
+    final disabled = <String, String>{
+      for (final d in free)
+        if (!canPick ||
+            !hub.budget.wouldFit(
+                settings.captureConfigFor(
+                    settings.clientPanelFor(d.serial) ??
+                        settings.lastClientPanel,
+                    spec),
+                cap: cap))
+          d.serial: ending
+              ? 'home_disconnecting'.tr
+              : remote && sessions.isNotEmpty
+                  ? 'home_remote_single'.tr
+                  : 'home_at_limit'.tr,
+    };
+    final header = [
+      'home_tablets_count'.trParams({'n': '${hub.usbSessionCount}', 'cap': '$cap'}),
+      if (capturing)
+        'home_encoder_load'.trParams({
+          'load': '${(hub.budget.load * 100).round()}',
+          'codec': codecLabel,
+        }),
+    ].join(' · ');
+    return [
+      if (sessions.isEmpty) ...[
+        ConnectionCard(
+          // Nothing left to stop while every session ends: no Disconnect
+          // for a session that has gone.
+          phase: ending ? ConnectionPhase.disconnected : phase,
+          onTap: controller.onConnectTap,
+          // Over USB the host connects by picking a device, not here; in
+          // `error` (no device yet, looked for again every second) the card
+          // offers Cancel.
+          canConnect: false,
+          codecLabel: codecLabel,
+        ),
+        if (phase == ConnectionPhase.error) ...[
+          const SizedBox(height: 16),
+          _ErrorBanner(message: hub.errorMessage.value),
+        ],
+        const SizedBox(height: 16),
+      ],
+      for (final s in sessions) ...[
+        SessionCard(
+          key: ValueKey('session/${s.key}'),
+          session: s,
+          focused: sessions.length > 1 && s.key == focusedKey,
+          listed: devices.firstWhereOrNull((d) => d.serial == s.key),
+          onFocus: () => controller.onFocus(s.key),
+          onStop: controller.onSessionStop,
+          onRetry: controller.onSessionRetry,
+          onOpenRemote: () {
+            controller.onFocus(s.key);
+            controller.onOpenRemoteView();
+          },
+        ),
+        const SizedBox(height: 12),
+      ],
+      if (sessions.isNotEmpty) const SizedBox(height: 4),
+      if (selectors) ..._selectors(),
+      DevicePickerCard(
+        // Snapshots taken here, inside the Obx builder, so GetX subscribes
+        // to them. Passing the RxList itself registers nothing (the card
+        // reads it in its own build, outside this builder), which left the
+        // picker stale after a refresh.
+        devices: free,
+        title: 'home_add_tablet'.tr,
+        header: header,
+        emptyText:
+            sessions.isNotEmpty ? 'home_all_attached_connected'.tr : null,
+        disabledReasons: disabled,
+        refreshing: controller.refreshingDevices.value,
+        onSelect: controller.onSelectDevice,
+        onRefresh: controller.refreshDevices,
+      ),
+    ];
+  }
+
+  /// Session mode, remote direction (remote control only) and link.
+  List<Widget> _selectors() => [
+        _SessionModeSelector(controller: controller),
+        const SizedBox(height: 16),
+        if (controller.isRemoteControl) ...[
+          _DirectionSelector(controller: controller),
+          const SizedBox(height: 16),
+        ],
+        _LinkTypeSelector(controller: controller),
+        const SizedBox(height: 16),
+      ];
 }
 
 class _OpenViewButton extends StatelessWidget {

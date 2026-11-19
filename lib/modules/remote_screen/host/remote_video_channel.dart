@@ -23,20 +23,40 @@ class RemoteVideoChannel extends GetxService {
   /// request.
   void Function(int session)? onRequestIdr;
 
+  // Decoders that are no session's (the debug Loopback preview's): their
+  // keyframe requests go to their own listener, never to [onRequestIdr].
+  final _idrListeners = <int, void Function()>{};
+
+  /// [session]'s keyframe requests go to [onIdr] instead of [onRequestIdr],
+  /// until [unlistenIdr].
+  void listenIdr(int session, void Function() onIdr) =>
+      _idrListeners[session] = onIdr;
+
+  void unlistenIdr(int session) => _idrListeners.remove(session);
+
   @override
   void onInit() {
     super.onInit();
-    _channel.setMethodCallHandler((call) async {
-      final args = call.arguments;
-      final session = args is Map ? args['session'] : null;
-      switch (call.method) {
-        case 'onRequestIdr':
-          if (session is int) onRequestIdr?.call(session);
-        case 'onCodecError':
-          _log.w('RemoteVideo codec error: $args');
-      }
-      return null;
-    });
+    _channel.setMethodCallHandler(_handleNative);
+  }
+
+  Future<Object?> _handleNative(MethodCall call) async {
+    final args = call.arguments;
+    final session = args is Map ? args['session'] : null;
+    switch (call.method) {
+      case 'onRequestIdr':
+        if (session is int) {
+          final listener = _idrListeners[session];
+          if (listener != null) {
+            listener();
+          } else {
+            onRequestIdr?.call(session);
+          }
+        }
+      case 'onCodecError':
+        _log.w('RemoteVideo codec error: $args');
+    }
+    return null;
   }
 
   /// Create [session]'s decoder + backing texture (replacing one it had).

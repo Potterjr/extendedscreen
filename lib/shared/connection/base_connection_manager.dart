@@ -70,6 +70,15 @@ abstract class BaseConnectionManager extends GetxService
 
   final phase = ConnectionPhase.disconnected.obs;
   final errorMessage = ''.obs;
+
+  /// The translation key of the [LinkError] behind [errorMessage], when it
+  /// was one: what the UI can branch on without comparing translated text.
+  /// Null for any other failure.
+  final errorKey = RxnString();
+
+  /// A retry is armed ([handleLinkFailure]) and has not fired yet. False for
+  /// a failure that retries nothing (`retry: false`).
+  final retryPending = false.obs;
   final activeDevice = Rxn<DeviceModel>();
   final latencyMs = 0.obs;
 
@@ -153,6 +162,7 @@ abstract class BaseConnectionManager extends GetxService
   @protected
   int beginConnect() {
     _reconnectTimer?.cancel();
+    retryPending.value = false;
     _recovering = false;
     // A round trip measured on the previous link (USB, say) is not this
     // one's: the host's bitrate adaptation reads it as the network's own.
@@ -195,8 +205,8 @@ abstract class BaseConnectionManager extends GetxService
         !_recovering) {
       if (isHost) {
         // Host: reconnect only to an already-chosen device. Picking one
-        // (connectIfUnambiguous) is for the launch and for Home, which also
-        // runs it on resume once the permissions are checked.
+        // (connectIfUnambiguous) is the hub's auto-connect policy, which it
+        // runs on resume itself, as Home does.
         if (activeDevice.value != null) {
           connect(serial: activeDevice.value!.serial);
         }
@@ -231,8 +241,9 @@ abstract class BaseConnectionManager extends GetxService
   /// no picker visible. Only when idle (`disconnected`), and not when a
   /// [disconnect] (the user's Cancel or Disconnect), a link failure or a
   /// restart came after [since] (a [currentAttempt] the caller took before
-  /// its own awaits; by default, now). The caller checks the macOS
-  /// permissions first. Nothing on the client, which always dials.
+  /// its own awaits; by default, now). Nothing on the client, which always
+  /// dials. The hub overrides this with its auto-connect policy for several
+  /// tablets, which checks the macOS permissions itself.
   Future<void> connectIfUnambiguous({int? since}) async {
     final attempt = since ?? _attempt;
     if (!isHost ||
@@ -252,8 +263,7 @@ abstract class BaseConnectionManager extends GetxService
       return;
     }
     final devices = availableDevices.toList();
-    final physical =
-        devices.where((d) => !d.serial.startsWith('emulator-')).toList();
+    final physical = devices.where((d) => !d.isEmulator).toList();
     final candidates = physical.isNotEmpty ? physical : devices;
     if (candidates.length == 1) await connect(serial: candidates.first.serial);
   }
@@ -266,6 +276,25 @@ abstract class BaseConnectionManager extends GetxService
   /// again over USB. No-op on the client, which has no identity (it forgets
   /// a Mac with `WifiPairingService.forget`).
   Future<void> resetWifiIdentity() async {}
+
+  /// Host: ends the one tablet's session [key] (its adb serial, or the Wi-Fi
+  /// session's key) and leaves the others running; with [userStopped] the
+  /// automatic connects leave that tablet alone until [allowDevice]. No-op
+  /// on the client, which has one link ([disconnect]).
+  Future<void> disconnectSession(String key, {bool userStopped = false}) async {}
+
+  /// Host: runs the pending retry of the session [key] now, unless the
+  /// encoder refused it. No-op on the client.
+  Future<void> retryNow(String key) async {}
+
+  /// Host: the user stopped connecting; nothing connects by itself until
+  /// they connect again ([allowDevice]). No-op on the client.
+  void pauseAutoConnect() {}
+
+  /// Host: the user connected [key] again (null: whatever [connect] picks):
+  /// it is no longer stopped, and connecting by itself is no longer paused.
+  /// No-op on the client.
+  void allowDevice([String? key]) {}
 
   // ─── Shared lifecycle ─────────────────────────────────────────────────────
 
@@ -285,6 +314,7 @@ abstract class BaseConnectionManager extends GetxService
     try {
       _heartbeatTimer?.cancel();
       _reconnectTimer?.cancel();
+      retryPending.value = false;
       _recovering = false;
       packetSub?.cancel();
       await onTeardown();
@@ -301,6 +331,13 @@ abstract class BaseConnectionManager extends GetxService
   // link is being stopped, not lost.
   int _stopping = 0;
 
+  /// A [disconnect] is still tearing down. Its phase still reads what it
+  /// was (`error`, say) until the end, when it sets `disconnected` and drops
+  /// the device: a connect started meanwhile would have its server closed
+  /// and its phase overwritten under it, and run beside the next one.
+  @protected
+  bool get isStopping => _stopping > 0;
+
   /// Role-specific cleanup run during [disconnect] (host stops capture and
   /// removes the adb-reverse tunnel; client stops its keep-alive service and
   /// any reverse-remote screen capture). The host also runs it on link loss
@@ -314,8 +351,13 @@ abstract class BaseConnectionManager extends GetxService
   /// half-alive session, stacking duplicate listeners/timers and (on the host)
   /// a second server socket while the tablet was already connected to the
   /// first, so setup packets like the refresh rate were never re-sent.
+  ///
+  /// With [retry] false it does all of that and arms no retry: a failure that
+  /// trying again cannot fix (the host's encoder has no room for another
+  /// tablet). [_recovering] stays set, so the resume rule and a late socket
+  /// error leave it alone; the next [connect] (the user's Retry) clears it.
   @protected
-  Future<void> handleLinkFailure() async {
+  Future<void> handleLinkFailure({bool retry = true}) async {
     if (_recovering) return;
     _recovering = true;
     // The session is over for any connect() still awaiting something in it.
@@ -333,7 +375,10 @@ abstract class BaseConnectionManager extends GetxService
     if (_attempt != failure) return;
     setPhase(ConnectionPhase.error);
     _reconnectTimer?.cancel();
+    if (!retry) return;
+    retryPending.value = true;
     _reconnectTimer = Timer(nextRetryDelay(), () {
+      retryPending.value = false;
       _recovering = false;
       connect();
     });
@@ -357,6 +402,7 @@ abstract class BaseConnectionManager extends GetxService
     final restart = ++_attempt;
     _heartbeatTimer?.cancel();
     _reconnectTimer?.cancel();
+    retryPending.value = false;
     _recovering = false;
     await packetSub?.cancel();
     packetSub = null;

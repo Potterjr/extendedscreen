@@ -42,15 +42,22 @@ extension EncodePresetX on EncodePreset {
       };
 
   /// Physical pixels the host actually captures (logical size × scaleFactor).
-  String get resolutionLabel =>
-      '${(width * scaleFactor).round()}×${(height * scaleFactor).round()}';
+  String get resolutionLabel => resolutionLabelFor(_lastPanel);
+
+  String resolutionLabelFor(ClientPanel panel) =>
+      '${(widthFor(panel) * scaleFactor).round()}×'
+      '${(heightFor(panel) * scaleFactor).round()}';
 
   /// Bitrate in Mbps, e.g. "20 Mbps".
-  String get bitrateLabel => '${(bitrate / 1000000).round()} Mbps';
+  String get bitrateLabel => bitrateLabelFor(_lastPanel);
+
+  String bitrateLabelFor(ClientPanel panel) =>
+      '${(bitrateFor(panel) / 1000000).round()} Mbps';
 
   // The last client panel a HELLO reported (persisted), for the getters
-  // below that take none: the labels Settings shows. A session sizes its
-  // capture from its own tablet's panel with the `…For` variants.
+  // that take none. A session sizes its capture from its own tablet's panel,
+  // and Settings labels the presets with the focused tablet's, both with the
+  // `…For` variants.
   static ClientPanel get _lastPanel => Get.find<SettingsService>().lastClientPanel;
 
   // Quality's density (20 Mbps at native 60 Hz) in bits per pixel per frame,
@@ -106,6 +113,49 @@ extension EncodePresetX on EncodePreset {
         EncodePreset.performance => 120,
         EncodePreset.custom => 60,
       };
+
+  /// What a session captures and encodes for a tablet with [panel] under this
+  /// preset ([custom] holds the custom preset's values; the fixed presets
+  /// ignore it). Reads no settings, so it can be worked out for any tablet.
+  ///
+  /// The desktop is always the panel's logical size (panel ÷ 2, HiDPI);
+  /// custom's width is the *physical* encode width, so it only changes the
+  /// scale, kept between half and double the logical size.
+  DisplayConfigModel configFor(
+    ClientPanel panel, {
+    CustomPreset custom = const CustomPreset(),
+    required DisplayMode mode,
+    required CodecType codec,
+  }) {
+    final isCustom = this == EncodePreset.custom;
+    final logicalWidth = panel.width ~/ 2;
+    return DisplayConfigModel(
+      width: logicalWidth,
+      height: panel.height ~/ 2,
+      scaleFactor: isCustom
+          ? (custom.width / logicalWidth).clamp(0.5, 2.0).toDouble()
+          : scaleFactor,
+      refreshRate: isCustom ? custom.refreshRate : refreshRateFor(panel),
+      bitrate: isCustom ? custom.bitrateMbps * 1000000 : bitrateFor(panel),
+      mode: mode,
+      codec: codec,
+      adaptiveFps: this == EncodePreset.max,
+    );
+  }
+}
+
+/// The custom preset's values as Settings keeps them: the physical encode
+/// width, the bitrate in Mbps and the refresh rate.
+class CustomPreset {
+  const CustomPreset({
+    this.width = 1920,
+    this.bitrateMbps = 12,
+    this.refreshRate = 60,
+  });
+
+  final int width;
+  final int bitrateMbps;
+  final int refreshRate;
 }
 
 class DisplayConfigModel {
@@ -118,6 +168,12 @@ class DisplayConfigModel {
   final int bitrate;
   // Let the native encoder step [refreshRate] down if it can't keep up (Max).
   final bool adaptiveFps;
+  // The highest rate this session may run at while other tablets share the
+  // encoder (EncodeBudget), below [refreshRate]; null when nothing limits
+  // it. Kept apart from [refreshRate] because the native side starts its
+  // adaptive ladder from that, and a ceiling that is raised later must leave
+  // room to climb back.
+  final int? fpsCeiling;
 
   const DisplayConfigModel({
     required this.width,
@@ -128,6 +184,7 @@ class DisplayConfigModel {
     required this.codec,
     required this.bitrate,
     this.adaptiveFps = false,
+    this.fpsCeiling,
   });
 
   // Logical desktop @ 2x HiDPI → captures at the client's native panel
@@ -152,6 +209,7 @@ class DisplayConfigModel {
     CodecType? codec,
     int? bitrate,
     bool? adaptiveFps,
+    int? fpsCeiling,
   }) =>
       DisplayConfigModel(
         width: width ?? this.width,
@@ -162,7 +220,28 @@ class DisplayConfigModel {
         codec: codec ?? this.codec,
         bitrate: bitrate ?? this.bitrate,
         adaptiveFps: adaptiveFps ?? this.adaptiveFps,
+        fpsCeiling: fpsCeiling ?? this.fpsCeiling,
       );
+
+  /// This config held to [ceiling]: the ceiling when it is below
+  /// [refreshRate], else none.
+  DisplayConfigModel withFpsCeiling(int ceiling) => DisplayConfigModel(
+        width: width,
+        height: height,
+        refreshRate: refreshRate,
+        scaleFactor: scaleFactor,
+        mode: mode,
+        codec: codec,
+        bitrate: bitrate,
+        adaptiveFps: adaptiveFps,
+        fpsCeiling: ceiling < refreshRate ? ceiling : null,
+      );
+
+  // What the encoder is handed: logical size × scale, rounded down to even
+  // numbers, exactly as ScreenCapturePlugin.swift's startCapture does it.
+  int get encodedWidth => (width * scaleFactor).toInt() & ~1;
+  int get encodedHeight => (height * scaleFactor).toInt() & ~1;
+  int get encodedPixels => encodedWidth * encodedHeight;
 
   Map<String, dynamic> toMap() => {
         'width': width,
@@ -173,5 +252,6 @@ class DisplayConfigModel {
         'codec': codec == CodecType.h265 ? 'h265' : 'h264',
         'bitrate': bitrate,
         'adaptiveFps': adaptiveFps,
+        if (fpsCeiling != null) 'fpsCeiling': fpsCeiling,
       };
 }

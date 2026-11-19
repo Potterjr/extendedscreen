@@ -83,23 +83,37 @@ class AdbService extends GetxService {
     }
   }
 
-  /// Returns list of connected ADB devices.
-  Future<List<DeviceModel>> listDevices() async {
+  /// Returns list of connected ADB devices; empty when adb could not be
+  /// asked.
+  Future<List<DeviceModel>> listDevices() async =>
+      await listDevicesOrNull() ?? [];
+
+  /// The connected ADB devices, or null when adb could not be asked (no
+  /// binary, a failed or timed-out `adb devices`): unlike an empty list,
+  /// that says nothing about which tablets are attached.
+  Future<List<DeviceModel>?> listDevicesOrNull() async {
     try {
       final result =
           await _channel.invokeMethod<List<dynamic>>('listDevices') ?? [];
       return result.map((d) {
         final map = Map<String, dynamic>.from(d as Map);
+        final transport = map['transport'] as String?;
         return DeviceModel(
           serial: map['serial'] as String,
           model: map['model'] as String?,
           product: map['product'] as String?,
+          transportId: transport == null || transport.isEmpty ? null : transport,
           status: DeviceStatus.connected,
         );
       }).toList();
+    } on PlatformException catch (e) {
+      // adb missing, failed or timed out: expected now and then, and asked
+      // again by whoever polls.
+      _log.w('ADB: devices not listed: ${e.message}');
+      return null;
     } catch (e, st) {
       _log.e('ADB listDevices failed', e, st);
-      return [];
+      return null;
     }
   }
 

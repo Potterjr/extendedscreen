@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:flutter/services.dart' show PlatformException;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:get/get.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -10,6 +11,7 @@ import 'package:extendedscreen/modules/extended_screen/host/screen_capture_chann
 import 'package:extendedscreen/shared/connection/adb_service.dart';
 import 'package:extendedscreen/shared/connection/connection_state.dart';
 import 'package:extendedscreen/shared/connection/debug/synthetic_tablet.dart';
+import 'package:extendedscreen/shared/connection/encode_budget.dart';
 import 'package:extendedscreen/shared/connection/host_connection_manager.dart';
 import 'package:extendedscreen/shared/connection/host_session.dart';
 import 'package:extendedscreen/shared/connection/pipeline_queue.dart';
@@ -17,6 +19,7 @@ import 'package:extendedscreen/shared/connection/socket_service.dart';
 import 'package:extendedscreen/shared/models/client_panel.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
 import 'package:extendedscreen/shared/models/link_type.dart';
+import 'package:extendedscreen/shared/models/session_mode.dart';
 import 'package:extendedscreen/shared/models/touch_event_model.dart';
 import 'package:extendedscreen/shared/services/logger_service.dart';
 import 'package:extendedscreen/shared/services/settings_service.dart';
@@ -36,25 +39,44 @@ class _QuietLogger extends LoggerService {
 }
 
 /// ScreenCaptureKit, stood in for: the test pushes "frames" itself, and the
-/// configs every start was given are kept.
+/// configs every start was given are kept, with the serial number and name
+/// of every virtual display made. What a display or a start gives back, and
+/// whether a start fails, is the test's to say; [startGate] holds starts.
 class _Capture extends ScreenCaptureChannel {
   final frames = StreamController<Uint8List>.broadcast();
   final starts = <DisplayConfigModel>[];
+  final displays = <({int serialNum, String name})>[];
+  VirtualDisplayResult display =
+      const VirtualDisplayResult(displayId: 5, applied: true);
+  CaptureStart started = const CaptureStart(displayId: 5);
+  PlatformException? startError;
+  Completer<void>? startGate;
 
   @override
   Stream<Uint8List> framesFor(int session) => frames.stream;
   @override
   Future<bool> requestPermission() async => true;
   @override
-  Future<bool> createVirtualDisplay(DisplayConfigModel config,
-          {required int session,
-          int serialNum = 1,
-          String name = 'Extended Screen'}) async =>
-      true;
+  Future<VirtualDisplayResult> createVirtualDisplay(DisplayConfigModel config,
+      {required int session,
+      int serialNum = 1,
+      String name = 'Extended Screen'}) async {
+    displays.add((serialNum: serialNum, name: name));
+    return display;
+  }
+
   @override
-  Future<void> startCapture(DisplayConfigModel config,
-          {required int session}) async =>
-      starts.add(config);
+  Future<CaptureStart> startCapture(DisplayConfigModel config,
+      {required int session}) async {
+    await startGate?.future;
+    starts.add(config);
+    final error = startError;
+    if (error != null) throw error;
+    return started;
+  }
+
+  @override
+  Future<void> setFrameRateCeiling(int fps, {required int session}) async {}
   @override
   Future<void> stopCapture({required int session}) async {}
   @override
@@ -112,7 +134,8 @@ void main() {
   /// A hub whose adb is [adb], torn down after the test.
   HostConnectionManager hubWith(SynthAdb adb) {
     Get.put<AdbService>(adb);
-    final hub = HostConnectionManager(adb: adb);
+    final hub = HostConnectionManager(
+        adb: adb, devicePollInterval: null, hostGranted: () async => true);
     addTearDown(hub.disconnect);
     return hub;
   }
@@ -164,7 +187,8 @@ void main() {
     });
 
     test("an unplugged tablet's session waits for that tablet, and picking "
-        'another one ends it', () async {
+        'another one ends it (one tablet at a time)', () async {
+      await settings.setMaxTablets(1);
       final first = FakeTablet('FIRST');
       final second = FakeTablet('SECOND');
       addTearDown(first.hangUp);
@@ -231,7 +255,9 @@ void main() {
     });
 
     test('two quick picks while a session is ending make one session, and '
-        'nothing keeps running after Disconnect', () async {
+        'nothing keeps running after Disconnect (one tablet at a time)',
+        () async {
+      await settings.setMaxTablets(1);
       final first = FakeTablet('FIRST');
       final second = FakeTablet('SECOND');
       final third = FakeTablet('THIRD');
@@ -288,7 +314,8 @@ void main() {
     });
 
     test('with no tablet attached, Connect waits for one and takes the one '
-        'that is plugged in', () async {
+        'that is plugged in (one tablet at a time)', () async {
+      await settings.setMaxTablets(1);
       final tablet = FakeTablet('NEW');
       addTearDown(tablet.hangUp);
       final adb = SynthAdb([tablet])..unplugged.add('NEW');
@@ -342,6 +369,533 @@ void main() {
       expect(hub.focused, same(session));
       expect(capture.starts, hasLength(2));
     });
+  });
+
+  group('several tablets over USB', () {
+    /// A hub whose encoder takes four big tablets with room to spare.
+    Future<HostConnectionManager> roomyHub(SynthAdb adb) async {
+      final hub = hubWith(adb);
+      await hub.hostInfoReady;
+      hub.budget.estimate = const EncoderEstimate(
+          engines: 4, h264PerEngine: 4000, h265PerEngine: 4000);
+      return hub;
+    }
+
+    List<FakeTablet> tablets(List<String> serials) {
+      final made = [for (final serial in serials) FakeTablet(serial)];
+      for (final t in made) {
+        addTearDown(t.hangUp);
+      }
+      return made;
+    }
+
+    /// [hub] with A streaming and C refused by the encoder (its start found
+    /// another session's encoder in the way).
+    Future<void> refuseC(HostConnectionManager hub) async {
+      await hub.connect(serial: 'A');
+      capture.startError = PlatformException(code: 'ENCODER_BUSY');
+      await hub.connect(serial: 'C');
+      capture.startError = null;
+      expect(hub.sessions['C']!.refused.value, isTrue);
+      expect(hub.sessions['C']!.phase.value, ConnectionPhase.error);
+    }
+
+    test('one tablet at a time: a pick of another while one streams is '
+        'refused, as it always was', () async {
+      await settings.setMaxTablets(1);
+      final adb = SynthAdb(tablets(['A', 'B']));
+      final hub = await roomyHub(adb);
+      expect(hub.cap, 1);
+
+      await hub.connect(serial: 'A');
+      final a = hub.focused!;
+      await hub.connect(serial: 'B');
+      expect(hub.sessions.keys, ['A']);
+      expect(hub.focused, same(a));
+      expect(hub.phase.value, ConnectionPhase.streaming);
+      expect(adb.keysDelivered, {'A': 1});
+    });
+
+    test('picking B while A streams adds B, and A keeps streaming', () async {
+      final [tabletA, tabletB] = tablets(['A', 'B']);
+      final adb = SynthAdb([tabletA, tabletB]);
+      final hub = await roomyHub(adb);
+      expect(hub.cap, 4);
+
+      await hub.connect(serial: 'A');
+      final a = hub.focused!;
+      expect(hub.canAdd, isTrue);
+      await hub.connect(serial: 'B');
+      final b = hub.focused!;
+      expect(b.key, 'B', reason: 'the new session is focused');
+      expect(hub.sessions.keys.toSet(), {'A', 'B'});
+      expect(hub.sessions['A'], same(a));
+      expect(a.phase.value, ConnectionPhase.streaming);
+      expect(b.phase.value, ConnectionPhase.streaming);
+      expect(hub.activeDevice.value?.serial, 'B');
+      expect(tabletA.trusted && tabletB.trusted, isTrue);
+      expect(adb.reverses.keys.toSet(), {'A', 'B'});
+      expect(hub.usbSessionCount, 2);
+      expect(hub.anyActive, isTrue);
+      expect(hub.freeDevices, isEmpty);
+    });
+
+    test('two quick picks of one tablet make one session', () async {
+      final adb = SynthAdb(tablets(['A']));
+      final hub = await roomyHub(adb);
+
+      await Future.wait([hub.connect(serial: 'A'), hub.connect(serial: 'A')]);
+      expect(hub.sessions.keys, ['A']);
+      expect(adb.keysDelivered, {'A': 1});
+      expect(hub.phase.value, ConnectionPhase.streaming);
+    });
+
+    test("ending A alone leaves B, remembers that A was stopped, and the hub "
+        "shows B's session; ending the last one shows disconnected", () async {
+      final [tabletA, tabletB] = tablets(['A', 'B']);
+      final adb = SynthAdb([tabletA, tabletB]);
+      final hub = await roomyHub(adb);
+      await hub.connect(serial: 'A');
+      await hub.connect(serial: 'B');
+      final b = hub.sessions['B']!;
+      hub.focus('A');
+      expect(hub.activeDevice.value?.serial, 'A');
+
+      await hub.disconnectSession('A', userStopped: true);
+      expect(hub.sessions.keys, ['B']);
+      expect(hub.stoppedDevices, {'A'});
+      expect(hub.focused, same(b));
+      expect(hub.activeDevice.value?.serial, 'B');
+      expect(hub.phase.value, ConnectionPhase.streaming);
+      expect(tabletB.trusted, isTrue);
+      expect(adb.reverses.keys, ['B']);
+
+      // The hub follows B now: B's lost link is the hub's.
+      adb.unplugged.add('B');
+      await tabletB.hangUp();
+      await _until(() => hub.phase.value == ConnectionPhase.error);
+      expect(b.phase.value, ConnectionPhase.error);
+
+      await hub.disconnectSession('B');
+      expect(hub.sessions, isEmpty);
+      expect(hub.phase.value, ConnectionPhase.disconnected);
+      expect(hub.errorMessage.value, isEmpty);
+      expect(hub.activeDevice.value, isNull);
+      expect(hub.stoppedDevices, {'A'}, reason: 'B was not stopped by the user');
+      hub.allowDevice('A');
+      expect(hub.stoppedDevices, isEmpty);
+    });
+
+    test('one tablet at a time, a replace shows a connecting phase '
+        'throughout, never disconnected', () async {
+      await settings.setMaxTablets(1);
+      final all = tablets(['FIRST', 'SECOND']);
+      final first = all.first;
+      final adb = SynthAdb(all);
+      final hub = await roomyHub(adb);
+      await hub.connect(serial: 'FIRST');
+      adb.unplugged.add('FIRST');
+      await first.hangUp();
+      await _until(() => hub.phase.value == ConnectionPhase.error);
+
+      // Ending FIRST takes a while.
+      adb.removeDelay = const Duration(milliseconds: 300);
+      final phases = <ConnectionPhase>[];
+      final worker = ever<ConnectionPhase>(hub.phase, phases.add);
+      addTearDown(worker.dispose);
+      await hub.connect(serial: 'SECOND');
+      expect(hub.sessions.keys, ['SECOND']);
+      expect(phases.first, ConnectionPhase.detectingDevice);
+      expect(phases.last, ConnectionPhase.streaming);
+      expect(phases, isNot(contains(ConnectionPhase.disconnected)));
+    });
+
+    test('in remote control a second pick replaces the session, as it always '
+        'did', () async {
+      await settings.setSessionMode(SessionMode.remoteControl);
+      await settings.setRemoteDirection(RemoteDirection.tabControlsMac);
+      final all = tablets(['A', 'B']);
+      final a = all.first;
+      final adb = SynthAdb(all);
+      final hub = await roomyHub(adb);
+      expect(hub.cap, 1);
+
+      await hub.connect(serial: 'A');
+      final first = hub.focused!;
+      await hub.connect(serial: 'B');
+      expect(hub.sessions.keys, ['A'], reason: 'A is live: refused');
+
+      adb.unplugged.add('A');
+      await a.hangUp();
+      await _until(() => hub.phase.value == ConnectionPhase.error);
+      await hub.connect(serial: 'B');
+      expect(hub.sessions.keys, ['B']);
+      expect(hub.phase.value, ConnectionPhase.streaming);
+      expect(first.phase.value, ConnectionPhase.disconnected);
+    });
+
+    test('a pick past the cap is refused', () async {
+      final adb = SynthAdb(tablets(['A', 'B', 'C', 'D', 'E']));
+      final hub = await roomyHub(adb);
+      for (final serial in ['A', 'B', 'C', 'D']) {
+        await hub.connect(serial: serial);
+        expect(hub.sessions[serial]?.phase.value, ConnectionPhase.streaming);
+      }
+      expect(hub.canAdd, isFalse);
+      await hub.connect(serial: 'E');
+      expect(hub.sessions.keys.toSet(), {'A', 'B', 'C', 'D'});
+      expect(adb.keysDelivered['E'], isNull);
+      expect(hub.activeDevice.value?.serial, 'D');
+      expect(hub.phase.value, ConnectionPhase.streaming);
+    });
+
+    test('lowering Maximum tablets under the live count keeps them all and '
+        'refuses another', () async {
+      final adb = SynthAdb(tablets(['A', 'B', 'C']));
+      final hub = await roomyHub(adb);
+      await hub.connect(serial: 'A');
+      await hub.connect(serial: 'B');
+
+      await settings.setMaxTablets(1);
+      await hub.connect(serial: 'C');
+      await hub.connect(serial: 'A');
+      expect(hub.sessions.keys.toSet(), {'A', 'B'});
+      expect(adb.keysDelivered, {'A': 1, 'B': 1});
+      for (final s in hub.sessions.values) {
+        expect(s.phase.value, ConnectionPhase.streaming);
+      }
+    });
+
+    test('lowering Maximum tablets under the live count stops nobody at '
+        'their next reconnect or retry either', () async {
+      final all = tablets(['A', 'B', 'C']);
+      final tabletB = all[1];
+      final adb = SynthAdb(all);
+      final hub = await roomyHub(adb);
+      await hub.connect(serial: 'A');
+      await hub.connect(serial: 'B');
+
+      await settings.setMaxTablets(1);
+      // A settings change: every tablet reconnects, each admitted again.
+      await hub.reconnect();
+      for (final key in ['A', 'B']) {
+        final s = hub.sessions[key]!;
+        expect(s.phase.value, ConnectionPhase.streaming, reason: key);
+        expect(s.refused.value, isFalse, reason: key);
+      }
+
+      // B's link drops, and its retry comes back under the cap of one.
+      final b = hub.sessions['B']!;
+      await tabletB.hangUp();
+      await _until(() => b.phase.value == ConnectionPhase.error);
+      await _until(() => b.phase.value == ConnectionPhase.streaming);
+      expect(b.refused.value, isFalse);
+      expect(hub.budget.count, 2);
+
+      // A tablet new to the hub is still refused.
+      await hub.connect(serial: 'C');
+      expect(hub.sessions.keys.toSet(), {'A', 'B'});
+    });
+
+    test("a running tablet's return keeps its resolution beside the place "
+        'of a tablet that is unplugged, which still comes back, past a '
+        'lowered cap', () async {
+      const panel = ClientPanel(2960, 1848, 60);
+      final tabletA = FakeTablet('A', panel: panel);
+      final tabletB = FakeTablet('B', panel: panel);
+      addTearDown(tabletA.hangUp);
+      addTearDown(tabletB.hangUp);
+      final adb = SynthAdb([tabletA, tabletB]);
+      final hub = hubWith(adb);
+      await hub.hostInfoReady;
+      hub.budget.estimate = EncoderEstimate.forChip('Apple M3');
+      await settings.setMaxTablets(2);
+      await settings.setEncodePreset(EncodePreset.balanced);
+      await settings.setCodec(CodecType.h265);
+
+      // Both native on H.265, sharing by rate.
+      await hub.connect(serial: 'A');
+      await hub.connect(serial: 'B');
+      final a = hub.sessions['A']!;
+      final b = hub.sessions['B']!;
+      expect(a.granted.value?.width, 2960);
+      expect(b.granted.value?.width, 2960);
+
+      // B's cable comes out: its session waits for it, keeping its place.
+      adb.unplugged.add('B');
+      await tabletB.hangUp();
+      await _until(() => b.errorKey.value == 'error_device_gone');
+      expect(hub.budget.holds(b.nativeId), isTrue);
+
+      // H.264 (two native tablets no longer fit) and a cap of one: A, the
+      // only tablet running, comes back as it was, not at a size that would
+      // leave room for B.
+      await settings.setMaxTablets(1);
+      await settings.setCodec(CodecType.h264);
+      await hub.reconnect();
+      expect(a.phase.value, ConnectionPhase.streaming);
+      expect(a.granted.value?.width, 2960);
+      expect(b.errorKey.value, 'error_device_gone');
+
+      // B plugged back in: a return, so neither the cap nor the encoder
+      // refuses it; it fits beside A at a lower resolution.
+      adb.unplugged.clear();
+      await hub.retryNow('B');
+      expect(b.phase.value, ConnectionPhase.streaming);
+      expect(b.refused.value, isFalse);
+      expect(b.granted.value!.width, lessThan(2960));
+      expect(a.granted.value?.width, 2960);
+      expect(hub.budget.count, 2);
+    });
+
+    test('a pick of a tablet whose session is still ending waits for the end, '
+        'then connects it anew', () async {
+      final [tablet] = tablets(['A']);
+      final adb = SynthAdb([tablet]);
+      final hub = await roomyHub(adb);
+      await hub.connect(serial: 'A');
+      final old = hub.focused!;
+
+      adb.removeDelay = const Duration(milliseconds: 300);
+      var ended = false;
+      final ending = hub.disconnectSession('A').then((_) => ended = true);
+      final picking = hub.connect(serial: 'A');
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      expect(hub.sessions['A'], isNull, reason: 'A is still ending');
+      expect(hub.phase.value, ConnectionPhase.disconnected);
+      await picking;
+      expect(ended, isTrue);
+      await ending;
+      final renewed = hub.sessions['A']!;
+      expect(renewed, isNot(same(old)));
+      expect(renewed.nativeId, isNot(old.nativeId));
+      expect(hub.phase.value, ConnectionPhase.streaming);
+      expect(adb.keysDelivered, {'A': 2});
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+      expect(adb.reverses['A'], isNotNull, reason: 'the old end removed nothing');
+    });
+
+    test('a settings reconnect restarts the live sessions and one waiting to '
+        'retry, each the same session, and leaves a refused one', () async {
+      final all = tablets(['A', 'B', 'C']);
+      final tabletB = all[1];
+      final adb = SynthAdb(all);
+      final hub = await roomyHub(adb);
+      await refuseC(hub);
+      await hub.connect(serial: 'B');
+      final a = hub.sessions['A']!;
+      final b = hub.sessions['B']!;
+      final ids = (a.nativeId, b.nativeId);
+
+      // B's cable comes out; its retries wait for it (seconds apart by now).
+      adb.unplugged.add('B');
+      await tabletB.hangUp();
+      await _until(() => b.errorKey.value == 'error_device_gone');
+      adb.unplugged.clear();
+      final starts = capture.starts.length;
+
+      final started = DateTime.now();
+      await hub.reconnect();
+      expect(DateTime.now().difference(started),
+          lessThan(const Duration(seconds: 1)),
+          reason: "B did not wait for its retry");
+      expect(hub.sessions['A'], same(a));
+      expect(hub.sessions['B'], same(b));
+      expect((a.nativeId, b.nativeId), ids);
+      expect(a.phase.value, ConnectionPhase.streaming);
+      expect(b.phase.value, ConnectionPhase.streaming);
+      expect(capture.starts.length, starts + 2);
+      final c = hub.sessions['C']!;
+      expect(c.refused.value, isTrue);
+      expect(c.phase.value, ConnectionPhase.error);
+      expect(adb.keysDelivered['C'], 1);
+    });
+
+    test('a retry run now skips a refused session and runs a pending one',
+        () async {
+      final all = tablets(['A', 'B', 'C']);
+      final tabletB = all[1];
+      final adb = SynthAdb(all);
+      final hub = await roomyHub(adb);
+      await refuseC(hub);
+
+      await hub.retryNow('C');
+      expect(hub.sessions['C']!.refused.value, isTrue);
+      expect(hub.sessions['C']!.phase.value, ConnectionPhase.error);
+      expect(adb.keysDelivered['C'], 1);
+
+      await hub.connect(serial: 'B');
+      final b = hub.sessions['B']!;
+      adb.unplugged.add('B');
+      await tabletB.hangUp();
+      await _until(() => b.errorKey.value == 'error_device_gone');
+      adb.unplugged.clear();
+      await hub.retryNow('B');
+      expect(b.phase.value, ConnectionPhase.streaming);
+      expect(hub.sessions['B'], same(b));
+    });
+
+    test('a link change ends the idle sessions, not while one is live, and '
+        'does not listen after a refused one', () async {
+      final adb = SynthAdb(tablets(['A', 'C']));
+      final hub = await roomyHub(adb);
+      await refuseC(hub);
+
+      // Live: nothing ends.
+      await settings.setLinkType(LinkType.wifi);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(hub.sessions.keys.toSet(), {'A', 'C'});
+      await settings.setLinkType(LinkType.usb);
+
+      await hub.disconnectSession('A');
+      await settings.setLinkType(LinkType.wifi);
+      await _until(() => hub.sessions.isEmpty);
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      expect(hub.sessions, isEmpty, reason: 'C retried nothing, so no listen');
+      expect(hub.phase.value, ConnectionPhase.disconnected);
+    });
+
+    test('a paused auto-connect, or a stopped Wi-Fi session, connects '
+        'nothing', () async {
+      final adb = SynthAdb(tablets(['A']));
+      final hub = await roomyHub(adb);
+
+      hub.pauseAutoConnect();
+      await hub.connectIfUnambiguous();
+      expect(hub.sessions, isEmpty, reason: 'one tablet, but paused');
+
+      await settings.setLinkType(LinkType.wifi);
+      await hub.connectIfUnambiguous();
+      expect(hub.sessions, isEmpty);
+      hub.allowDevice(HostConnectionManager.wifiKey);
+      hub.stoppedDevices.add(HostConnectionManager.wifiKey);
+      await hub.connectIfUnambiguous();
+      expect(hub.sessions, isEmpty);
+      expect(hub.phase.value, ConnectionPhase.disconnected);
+
+      // Back on USB, nothing paused: the one tablet connects (started, not
+      // waited for).
+      await settings.setLinkType(LinkType.usb);
+      await hub.connectIfUnambiguous();
+      expect(hub.sessions.keys, ['A']);
+      await _until(() => hub.phase.value == ConnectionPhase.streaming);
+    });
+  });
+
+  group('the encoder and the virtual display', () {
+    test('a lone tablet gets what its preset asks for, unshared', () async {
+      final tablet = FakeTablet('SYN-1', panel: ultra);
+      addTearDown(tablet.hangUp);
+      final hub = hubWith(SynthAdb([tablet]));
+
+      await hub.connect(serial: 'SYN-1');
+      final session = hub.focused!;
+      expect(hub.phase.value, ConnectionPhase.streaming);
+      expect(capture.starts.single.fpsCeiling, isNull);
+      expect(hub.refreshRateHz.value, 120, reason: '0xFB as today');
+      expect(session.granted.value,
+          const GrantedCapture(width: 2960, height: 1848, fps: 120, shared: false));
+      expect(hub.budget.contains(session.nativeId), isTrue);
+
+      await hub.disconnect();
+      expect(hub.budget.count, 0, reason: 'its share went with it');
+      expect(session.granted.value, isNull);
+    });
+
+    test("the tablet that was last used before keeps the virtual display's "
+        "serial 1 and today's name; a new one gets a serial of its own, saved "
+        'once it is live', () async {
+      SharedPreferences.setMockInitialValues(
+          {'last_device': 'OLD', 'last_device_name': 'SM_X920'});
+      final upgraded = SettingsService();
+      await upgraded.init();
+      Get.delete<SettingsService>(force: true);
+      settings = Get.put(upgraded);
+
+      final old = FakeTablet('OLD');
+      final fresh = FakeTablet('NEW', model: 'SM_X710');
+      addTearDown(old.hangUp);
+      addTearDown(fresh.hangUp);
+      final hub = hubWith(SynthAdb([old, fresh]));
+
+      await hub.connect(serial: 'OLD');
+      expect(hub.phase.value, ConnectionPhase.streaming);
+      expect(capture.displays.single,
+          (serialNum: 1, name: 'Extended Screen'));
+      await hub.disconnect();
+
+      final expected = SettingsService.fnv1a32('NEW') | 0x10000;
+      await hub.refreshDevices();
+      capture.startGate = Completer<void>();
+      final connecting = hub.connect(serial: 'NEW');
+      await _until(() => capture.displays.length == 2);
+      expect(capture.displays.last,
+          (serialNum: expected, name: 'Extended Screen – SM X710'));
+      expect(settings.knownDevice('NEW'), isNull,
+          reason: 'nothing is saved before the session is live');
+      capture.startGate!.complete();
+      await connecting;
+      expect(hub.phase.value, ConnectionPhase.streaming);
+      expect(settings.knownDevice('NEW')?.vdSerial, expected);
+      expect(settings.knownDevice('OLD')?.vdSerial, 1);
+      expect(settings.lastDeviceSerial, 'NEW');
+    });
+
+    test('Extend that falls back to the main display, or whose display was '
+        'never made, says so', () async {
+      final tablet = FakeTablet('SYN-1');
+      addTearDown(tablet.hangUp);
+      final hub = hubWith(SynthAdb([tablet]));
+
+      capture.started = const CaptureStart(displayId: 1, fellBack: true);
+      await hub.connect(serial: 'SYN-1');
+      expect(hub.phase.value, ConnectionPhase.streaming);
+      expect(hub.focused!.notice.value, 'error_extend_unavailable');
+
+      await hub.disconnect();
+      capture
+        ..started = const CaptureStart(displayId: 1)
+        ..display = const VirtualDisplayResult(displayId: 0, applied: false);
+      await hub.connect(serial: 'SYN-1');
+      expect(hub.focused!.notice.value, 'error_extend_unavailable');
+
+      await hub.disconnect();
+      capture.display = const VirtualDisplayResult(displayId: 5, applied: true);
+      await hub.connect(serial: 'SYN-1');
+      expect(hub.focused!.notice.value, isNull);
+    });
+
+    test('a capture that may show another display says so on its session',
+        () async {
+      final tablet = FakeTablet('SYN-1');
+      addTearDown(tablet.hangUp);
+      final hub = hubWith(SynthAdb([tablet]));
+      await hub.connect(serial: 'SYN-1');
+
+      capture.onCaptureMismatch!(hub.focused!.nativeId + 1000);
+      expect(hub.focused!.notice.value, isNull, reason: 'another session');
+      capture.onCaptureMismatch!(hub.focused!.nativeId);
+      expect(hub.focused!.notice.value, 'error_extend_wrong_display');
+    });
+
+    for (final code in ['ENCODER_BUSY', 'ENCODER_FAILED']) {
+      test('a lone tablet whose encoder fails to start ($code) still goes '
+          'live, as it always has, and holds no share of the encoder',
+          () async {
+        final tablet = FakeTablet('SYN-1');
+        addTearDown(tablet.hangUp);
+        final hub = hubWith(SynthAdb([tablet]));
+        capture.startError = PlatformException(code: code);
+
+        await hub.connect(serial: 'SYN-1');
+        final session = hub.focused!;
+        expect(hub.phase.value, ConnectionPhase.streaming);
+        expect(session.refused.value, isFalse);
+        expect(hub.errorKey.value, isNull);
+        expect(hub.budget.contains(session.nativeId), isFalse);
+        expect(session.granted.value, isNull);
+      });
+    }
   });
 
   group('retries', () {

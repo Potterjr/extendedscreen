@@ -57,15 +57,17 @@ class _FakeCapture extends ScreenCaptureChannel {
   @override
   Future<bool> requestPermission() async => true;
   @override
-  Future<bool> createVirtualDisplay(DisplayConfigModel config,
+  Future<VirtualDisplayResult> createVirtualDisplay(DisplayConfigModel config,
           {required int session,
           int serialNum = 1,
           String name = 'Extended Screen'}) async =>
-      true;
+      const VirtualDisplayResult(displayId: 5, applied: true);
   @override
-  Future<void> startCapture(DisplayConfigModel config,
-          {required int session}) async =>
-      started = true;
+  Future<CaptureStart> startCapture(DisplayConfigModel config,
+      {required int session}) async {
+    started = true;
+    return const CaptureStart(displayId: 5);
+  }
   /// How long the native side takes to stop, when a test needs a teardown
   /// that is still running while something else happens.
   Duration stopDelay = Duration.zero;
@@ -170,7 +172,7 @@ class _NoAdb extends AdbService {
   }
 
   @override
-  Future<List<DeviceModel>> listDevices() async {
+  Future<List<DeviceModel>?> listDevicesOrNull() async {
     calls++;
     return devices;
   }

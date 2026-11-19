@@ -34,6 +34,7 @@ class AppTranslations extends Translations {
     'common_open': 'Open',
     'common_refresh': 'Refresh',
     'common_back': 'Back',
+    'common_retry': 'Retry',
 
     // ── App / brand ─────────────────────────────────────────────────────
     'app_name': 'Extended Screen',
@@ -63,6 +64,11 @@ class AppTranslations extends Translations {
     'error_device_gone':
         'This tablet is not attached over USB any more. Plug it in again; '
             'the Mac keeps trying.',
+    'error_encode_limit': 'Not started: this Mac\'s encoder is full',
+    'error_extend_unavailable': 'Extend unavailable, mirroring',
+    'error_extend_wrong_display':
+        'Extend may be showing another display. Disconnect and connect '
+            'this tablet again.',
     'error_wifi_identity':
         'Could not create this Mac\'s Wi-Fi identity (openssl failed).',
     'error_usb_unverified_client':
@@ -136,6 +142,27 @@ class AppTranslations extends Translations {
     'home_sharing': 'Sharing your screen',
     'home_sharing_hint':
         'The Mac can now see and control this tablet. Disconnect to stop.',
+    'home_add_tablet': 'Add a tablet',
+    'home_tablets_count': '@n of @cap tablet slots in use',
+    'home_encoder_load': 'encoder @load% (@codec)',
+    'home_appbar_tablets': '@n tablets',
+    'home_at_limit': 'No room for another tablet right now',
+    'home_disconnecting': 'Disconnecting…',
+    'home_remote_single': 'Remote control works with one tablet at a time',
+    'home_all_attached_connected': 'Every attached tablet is connected',
+    'session_granted': 'Encoding @size at up to @fps fps',
+    'session_granted_shared':
+        'Encoding @size at up to @fps fps, sharing this Mac\'s encoder',
+    'session_unplugged':
+        'Unplugged. Plug it in again; the Mac keeps trying.',
+
+    // ── Loopback preview (host, debug builds with SYNTH_TABLETS) ────────
+    'loopback_preview_title': 'Loopback preview',
+    'loopback_preview_start': 'Start',
+    'loopback_preview_stop': 'Stop',
+    'loopback_preview_no_stream': 'No stream',
+    'loopback_preview_display': 'display @id',
+    'loopback_preview_fell_back': 'fell back to the main display',
 
     // ── Connection card ─────────────────────────────────────────────────
     'conn_card_active_subtitle': '@link  •  @codec',
@@ -185,6 +212,17 @@ class AppTranslations extends Translations {
     'settings_section_wifi': 'Wi-Fi',
     'settings_section_permissions': 'Permissions',
     'settings_section_info': 'Info',
+    'settings_section_tablets': 'Tablets',
+
+    // ── Settings: several tablets (host) ────────────────────────────────
+    'settings_max_tablets': 'Maximum tablets',
+    'settings_max_tablets_desc':
+        'How many tablets may connect at once over USB in Extended Screen '
+            'mode. This Mac\'s encoder can allow fewer. Tablets already '
+            'connected stay connected.',
+    'settings_encoder': 'Encoder',
+    'settings_encoder_estimated': '@mpx Mpx/s (estimated)',
+    'settings_encoder_measured': '@mpx Mpx/s (measured)',
 
     // ── Settings: Wi-Fi pairing (host) ──────────────────────────────────
     'settings_wifi_reset': 'Reset Wi-Fi pairing',
@@ -323,6 +361,7 @@ class AppTranslations extends Translations {
     'common_open': 'เปิด',
     'common_refresh': 'รีเฟรช',
     'common_back': 'กลับ',
+    'common_retry': 'ลองอีกครั้ง',
 
     // ── App / brand ─────────────────────────────────────────────────────
     'app_name': 'Extended Screen',
@@ -352,6 +391,11 @@ class AppTranslations extends Translations {
     'error_device_gone':
         'ไม่พบแท็บเล็ตเครื่องนี้ทาง USB แล้ว ให้เสียบสายใหม่ '
             'Mac จะลองเชื่อมต่อต่อไปเอง',
+    'error_encode_limit': 'ยังไม่เริ่ม: ตัวเข้ารหัสวิดีโอของ Mac เครื่องนี้เต็มแล้ว',
+    'error_extend_unavailable': 'ใช้โหมดขยายจอไม่ได้ จึงสะท้อนจอแทน',
+    'error_extend_wrong_display':
+        'โหมดขยายจออาจกำลังแสดงจออื่นอยู่ ให้ตัดการเชื่อมต่อแท็บเล็ตเครื่องนี้'
+            'แล้วเชื่อมต่อใหม่',
     'error_wifi_identity':
         'สร้างข้อมูลยืนยันตัวตน Wi-Fi ของ Mac เครื่องนี้ไม่สำเร็จ (openssl ล้มเหลว)',
     'error_usb_unverified_client':
@@ -420,6 +464,26 @@ class AppTranslations extends Translations {
     'home_sharing': 'กำลังแชร์หน้าจอ',
     'home_sharing_hint':
         'ตอนนี้ Mac เห็นและควบคุมแท็บเล็ตนี้ได้แล้ว ตัดการเชื่อมต่อเพื่อหยุด',
+    'home_add_tablet': 'เพิ่มแท็บเล็ต',
+    'home_tablets_count': 'ใช้ช่องแท็บเล็ตไปแล้ว @n จาก @cap ช่อง',
+    'home_encoder_load': 'ตัวเข้ารหัส @load% (@codec)',
+    'home_appbar_tablets': '@n เครื่อง',
+    'home_at_limit': 'ตอนนี้เพิ่มแท็บเล็ตอีกเครื่องไม่ได้',
+    'home_disconnecting': 'กำลังตัดการเชื่อมต่อ…',
+    'home_remote_single': 'ควบคุมระยะไกลใช้ได้ทีละเครื่อง',
+    'home_all_attached_connected': 'แท็บเล็ตที่เสียบอยู่เชื่อมต่อครบทุกเครื่องแล้ว',
+    'session_granted': 'เข้ารหัสที่ @size สูงสุด @fps fps',
+    'session_granted_shared':
+        'เข้ารหัสที่ @size สูงสุด @fps fps ใช้ตัวเข้ารหัสของ Mac ร่วมกัน',
+    'session_unplugged': 'ถอดสายอยู่ เสียบใหม่ได้เลย Mac จะลองเชื่อมต่อต่อไป',
+
+    // ── Loopback preview (host, debug builds with SYNTH_TABLETS) ────────
+    'loopback_preview_title': 'พรีวิวสตรีมวนกลับ',
+    'loopback_preview_start': 'เริ่ม',
+    'loopback_preview_stop': 'หยุด',
+    'loopback_preview_no_stream': 'ไม่มีสตรีม',
+    'loopback_preview_display': 'จอ @id',
+    'loopback_preview_fell_back': 'ถอยไปจับภาพจอหลักแทน',
 
     // ── Connection card ─────────────────────────────────────────────────
     'conn_card_active_subtitle': '@link  •  @codec',
@@ -469,6 +533,17 @@ class AppTranslations extends Translations {
     'settings_section_wifi': 'Wi-Fi',
     'settings_section_permissions': 'สิทธิ์การเข้าถึง',
     'settings_section_info': 'ข้อมูล',
+    'settings_section_tablets': 'แท็บเล็ต',
+
+    // ── Settings: several tablets (host) ────────────────────────────────
+    'settings_max_tablets': 'จำนวนแท็บเล็ตสูงสุด',
+    'settings_max_tablets_desc':
+        'จำนวนแท็บเล็ตที่เชื่อมต่อพร้อมกันได้ผ่าน USB ในโหมดจอเสริม '
+            'ตัวเข้ารหัสวิดีโอของ Mac เครื่องนี้อาจรับได้น้อยกว่านี้ '
+            'แท็บเล็ตที่เชื่อมต่ออยู่แล้วจะยังเชื่อมต่อต่อไป',
+    'settings_encoder': 'ตัวเข้ารหัสวิดีโอ',
+    'settings_encoder_estimated': '@mpx Mpx/s (ประมาณการ)',
+    'settings_encoder_measured': '@mpx Mpx/s (วัดจริง)',
 
     // ── Settings: Wi-Fi pairing (host) ──────────────────────────────────
     'settings_wifi_reset': 'รีเซ็ตการจับคู่ Wi-Fi',

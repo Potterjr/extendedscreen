@@ -1,6 +1,6 @@
 # extendedscreen
 
-Use an Android tablet as a second monitor for a Mac, over a USB cable or over Wi-Fi. The Mac captures a display, encodes it as H.264 or H.265, and streams it to the tablet: through an `adb reverse` TCP tunnel on USB, or over TLS on the local network on Wi-Fi. Touches on the tablet come back as mouse input. The same link also offers a Remote Control mode, in either direction over USB and tablet-to-Mac over Wi-Fi.
+Use an Android tablet as a second monitor for a Mac, over a USB cable or over Wi-Fi, or several tablets at once over USB. The Mac captures a display, encodes it as H.264 or H.265, and streams it to the tablet: through an `adb reverse` TCP tunnel on USB, or over TLS on the local network on Wi-Fi. Touches on the tablet come back as mouse input. The same link also offers a Remote Control mode, in either direction over USB and tablet-to-Mac over Wi-Fi.
 
 One Flutter codebase builds both sides: on macOS it is the **host**, on Android the **client**. Nothing is tied to a tablet model. The tablet reports its panel size and top refresh rate when it connects, and the Mac sizes the stream to match.
 
@@ -47,13 +47,37 @@ flutter run -d <device-id>
 ## Using it
 
 1. Open the app on the tablet. It dials the Mac by itself, retries every 5 seconds, and dials at once when the Mac starts a session. A red "Waiting for Mac host…" banner is the normal state until the Mac side is up.
-2. On the Mac, the tablet appears under **Android client**. The list is not live: if you plugged the tablet in or authorised it after the Mac app started, click the refresh icon on that card first (it shows a spinner while the Mac looks). Click the tablet to connect. The Mac has no Connect button: you connect by picking a device. If both permissions are granted and exactly one physical device is attached, the Mac connects without a click.
+2. On the Mac, the tablet appears under **Add a tablet**. The Mac looks for attached tablets every 3 seconds by itself; the refresh icon on that card looks at once (it shows a spinner while the Mac looks). Click the tablet to connect. The Mac has no Connect button: you connect by picking a device. If both permissions are granted and exactly one physical device is attached, the Mac connects without a click; with several tablets, see *Several tablets*.
 3. The Mac steps through *Detecting device*, *Forwarding port*, *Handshaking* and *Configuring display*. It waits on *Handshaking* until the tablet app is running, with no timeout. Before anything is streamed the two apps check each other (see *USB sessions* under Over Wi-Fi), which needs the same generation of the app on both sides: an older build on either end is refused, with a message on the newer one.
 4. The tablet opens the full-screen display by itself (Session modes lists one exception). In the default Extend mode a new display appears on the Mac; arrange it in System Settings → Displays and drag windows onto it.
 
-Press **Disconnect** on the Mac's Home screen to stop. The Mac then stays disconnected until you pick a device yourself. The tablet keeps its display open under a "Reconnecting…" overlay and goes on redialling. The overlay has two buttons: **Back** returns to the tablet's Home screen and keeps redialling (the display reopens by itself once the Mac is back), and **Disconnect** stops redialling.
+Each connected tablet has its own card on the Mac's Home screen. Press **Disconnect** on it to stop that tablet. The Mac then leaves that tablet alone until you pick it again. The tablet keeps its display open under a "Reconnecting…" overlay and goes on redialling. The overlay has two buttons: **Back** returns to the tablet's Home screen and keeps redialling (the display reopens by itself once the Mac is back), and **Disconnect** stops redialling.
 
 Disconnect on the tablet only drops the link. The Mac returns to *Handshaking* and streams again as soon as the tablet dials in (tap **Connect** there, or switch back to the app), so press **Cancel** on the Mac as well.
+
+### Several tablets
+
+Over USB in Extended Screen, the Mac can drive several tablets at once, each as a display of its own (in Mirror, each shows the main display).
+
+- **Adding one.** The **Add a tablet** card stays on Home while tablets are connected, and lists the attached tablets that have no card yet. Its header says how many tablet slots are in use out of how many there are (every tablet with a card holds one, including one that is connecting, waiting to retry or was not started; its card's **Cancel** or **Disconnect** frees it), and while any is streaming, how busy the Mac's video encoder is. Click a tablet to add it beside the others. A tablet whose card shows an error and is waiting to retry has **Retry** beside **Cancel**: it tries again at once instead of waiting.
+- **Connecting by themselves.** With **Maximum tablets** above 1, a tablet that has been connected to this Mac before connects again by itself whenever it is plugged in (or the app starts with it attached), up to the limit. A tablet the Mac has never seen waits for a click, unless it is the only one attached and nothing is connected. A tablet you disconnected on its card stays disconnected until you pick it again or restart the app.
+- **Maximum tablets** (Settings → Tablets, 1 to 8, 4 by default) caps how many may be connected at once. The Mac's encoder can allow fewer: Settings → Tablets → Encoder shows what the Mac thinks its encoder can do: an estimate by chip at first ("estimated"), and on a Mac it does not recognise it allows two. Once the tablets streaming with the Max preset have run at their full frame rates for 10 seconds, the encoder really encoding every frame of a screen that was changing (a still desktop proves nothing), the Mac knows its encoder can do at least that ("measured"), remembers it, and gives later tablets more room (the busy figure in the **Add a tablet** header goes down to match). With several tablets that alone never shows more than the Mac already allows, so it then tries one tablet a step faster (its rate climbs only once its encoder has kept up for a while, 10 seconds or more), and if 10 more seconds go by without the encoder falling behind, that is what it learns. If the encoder then falls behind while several tablets share it, the Mac lowers that figure again, never below its estimate. Lowering the setting disconnects nobody, not even when a tablet reconnects later (a settings change, an unplugged cable); it only stops new tablets.
+- **Sharing the encoder.** Every tablet's stream is encoded on the same Mac. A tablet alone gets exactly what its preset asks for. With several, the Mac lowers the frame rate of the busiest streams until they fit (and a tablet that joins may be encoded at a lower resolution, as may one plugged back in: while its cable is out, the others are not held back for it); this happens live, without reconnecting anyone. Each card says what its tablet gets ("Encoding 2960×1848 at up to 60 fps, sharing this Mac's encoder"), and the rates climb back when a tablet leaves.
+- **A short blip on the others.** Whenever a tablet's display is added while another tablet extends (a tablet joining, a cable replugged, a tablet reconnecting) and its picture has started, the Mac removes every tablet's display and makes them again in a fixed order, so each extending tablet's picture stops for about a second, once per change. A tablet the encoder has no room for leaves the others alone. This works around a macOS bug that can otherwise show one tablet another tablet's display. Tablets in Mirror are not touched.
+- **One tablet per USB port.** Tablets behind one USB 2.0 hub share its 480 Mbps. Plug each tablet into a port of its own on the Mac.
+- **Clicking a card** makes it the focused tablet, which the Settings labels follow.
+- **Remote Control and Wi-Fi** take one tablet at a time (over Wi-Fi, Home lists no tablets at all), and so does Extended Screen with **Maximum tablets** set to 1: while a tablet is connecting or connected the others can't be picked, and picking another while it is not (waiting to retry, say) replaces it. The mode and link selectors on Home show only while at most one tablet has a card and nothing is connecting or connected.
+- **Settings changes** (Mode, preset, codec, custom values) reconnect every tablet.
+
+What the messages on Home mean:
+
+| Message | Meaning |
+|---|---|
+| No room for another tablet right now | Shown under a tablet in **Add a tablet**, which can't be clicked: the Mac already has **Maximum tablets** connected, or by its estimate the encoder could not take this tablet even at a lower frame rate and resolution. Disconnect another tablet first, or raise **Maximum tablets**. |
+| Remote control works with one tablet at a time | The same, in Remote Control with a tablet connected. |
+| Not started: this Mac's encoder is full | On a tablet's card. There was no room for this tablet's stream: by the Mac's estimate (it connected by itself, or another tablet started first), or because the encoder itself refused to start another stream beside the others. Its display and tunnel are removed and the Mac does not retry by itself: press **Retry** once another tablet has left, or use a lighter preset, or **Cancel** to remove its card and free its slot. On a tablet that is still connected, the encoder refused it when its capture was rebuilt (after the Mac woke, for example). |
+| Extend unavailable, mirroring | On a tablet's card. Its virtual display could not be made, or never showed up for screen capture, so the tablet mirrors the Mac's main display. Disconnect the tablet and pick it again. |
+| Extend may be showing another display | On a tablet's card. With several tablets extending, macOS can hand a new capture another tablet's display instead of the one asked for. When the Mac notices (the picture does not fill the frame), it rebuilds every tablet's display in order by itself, up to twice in a row; this message means that did not help, or the tablet is the only one with a display. Disconnect this tablet and connect it again. A display of the same shape cannot be told apart this way. |
 
 ### Over Wi-Fi
 
@@ -129,11 +153,12 @@ All stream settings are on the Mac, behind the gear icon. The tablet's Settings 
 | Performance Overlay | Off by default | Flutter's performance graphs, drawn on both devices. |
 | Show HUD | On by default | The numbers on the tablet's HUD bar. When off, the bar keeps only Back and Disconnect. |
 | Keep the Mac cursor in place | On by default | Under Touch. Taps and drags on the tablet give the Mac's cursor back as the finger lifts; scrolls and pinches hand it straight back (see *On the tablet*). |
+| Maximum tablets | 1 to 8 (4 by default) | Under Tablets. How many tablets may be connected at once over USB in Extended Screen (see *Several tablets*). Saved without reconnecting anyone. The Encoder line below it shows what the Mac takes its video encoder to manage: its estimate, or what it measured (see *Several tablets*). |
 | Reset Wi-Fi pairing | (an action) | Under Wi-Fi. Asks first, then gives the Mac a new Wi-Fi identity: every paired tablet has to connect over USB once before it can use Wi-Fi again (see *Over Wi-Fi*). |
 
-Changing the Mode, preset, codec or a custom value drops the link and reconnects to apply it. The two overlay switches and the cursor switch apply live.
+Changing the Mode, preset, codec or a custom value drops the link of every connected tablet and reconnects it to apply the change. The two overlay switches, the cursor switch and Maximum tablets apply live.
 
-Preset resolutions are relative to the connected tablet's panel:
+Preset resolutions are relative to each tablet's own panel:
 
 | Preset | Resolution | Bitrate | Refresh rate |
 |---|---|---|---|
@@ -145,7 +170,7 @@ Preset resolutions are relative to the connected tablet's panel:
 
 - **Max adapts its frame rate.** If the Mac's encoder cannot keep up for 3 seconds, the rate drops to the highest step of 30/45/60/90/120 that fits what it actually achieved. After 10 healthy seconds it tries one step up again. Each time a step-up fails within 30 seconds, that wait doubles, up to 5 minutes.
 - **Custom is driven by width.** The height follows the tablet panel's aspect ratio, so 1920×1200 is only exact on a 16:10 panel.
-- Until a tablet has connected once, the picker assumes a 2560×1600 panel at 60 Hz.
+- Until a tablet has connected once, the Mac assumes the panel of the last tablet that did (2560×1600 at 60 Hz before any has).
 
 ## How it works
 
@@ -162,7 +187,7 @@ CGEvent injection  ◄──────── MOUSE_EVENT ───────
 
 - **Connection.** The Mac listens on a loopback port of its own for each tablet and runs `adb reverse tcp:7001 tcp:<that port>` (`adb reverse --list` shows something like `tcp:7001 tcp:52341`); the tablet dials its own `127.0.0.1:7001`. When the session ends, the Mac removes only this rule, so other tools' reverse rules on the tablet stay. With the tunnel up, the Mac makes a random 32-byte key for this attempt and hands it to the app on the tablet through `adb` (a broadcast that only the shell may send, to this app); the app dials as soon as it has it. The tablet's first packet is a hello: a fresh nonce and an HMAC-SHA256 of it under the key. The Mac checks it (it waits 3 seconds), answers with its own HMAC of that nonce, and from then on trusts that connection; the tablet trusts the connection once the answer checks out (it waits 2 seconds). A hello made without the key, which is what a tablet app opened after the Mac started waiting sends, is turned away, and the Mac hands the key over again. Then comes HELLO, with the tablet's panel size and top refresh rate. The Mac waits up to 3 seconds for it, starts capture, and announces the session mode, codec and refresh rate.
 - **Wi-Fi.** The Mac listens on TCP 7001 on every interface with a self-signed TLS certificate, and answers a UDP probe on port 7001, which the tablet broadcasts and also sends directly to the addresses it knows for the Mac. The certificate and a random 32-byte token reach the tablet on every USB session, through `adb` (a broadcast that only the shell may send, to this app) and never over the link. Over Wi-Fi the tablet accepts only that certificate and sends the token first; until the Mac has checked it (it waits 3 seconds), it reads nothing else from that connection. The Mac also caps how much it queues for the network: a frame that would wait more than about 120 ms is dropped, and sending resumes from the next keyframe.
-- **Extend** uses the private `CGVirtualDisplay` API to create a HiDPI display whose pixel size equals the tablet's panel. If screen capture cannot find the new display within about 1.5 seconds, the Mac removes it and mirrors its main display instead. **Mirror** captures the Mac's main display (the one with the menu bar).
+- **Extend** uses the private `CGVirtualDisplay` API to create a HiDPI display whose pixel size equals the tablet's panel, one per tablet. macOS remembers where a display goes by its serial number, which each tablet keeps from its first connection. If screen capture cannot find the new display within about 1.5 seconds, the Mac removes it and mirrors its main display instead, and the tablet's card says *Extend unavailable, mirroring*. **Mirror** captures the Mac's main display (the one with the menu bar).
 - **Picture shape.** The stream always has the tablet's shape: its full panel size, or a scaled copy with Performance (half size) and most Custom sizes. A Mac display of another shape (a notched MacBook, a 16:9 monitor) is shown whole with black bars, and the Mac maps touches onto the picture: a tap on a bar goes to the nearest edge of the screen.
 - **Falling behind.** If the tablet decodes more slowly than the Mac sends, it keeps only a few frames waiting: about 100 ms at 60 fps and above, never fewer than 6 frames (so up to 200 ms at 30 fps). Beyond that it skips ahead to the next keyframe, asking the Mac for one at most every 0.75 seconds, so the picture freezes briefly instead of lagging. A new decoder also waits for a keyframe. Skipped frames count in the HUD's drops.
 - **Liveness.** Both sides send a heartbeat every 2 seconds, which is also the latency measurement. Six seconds of silence counts as a dead link. The Mac then tears everything down and retries after 1 second, the tablet after 5.
@@ -219,7 +244,9 @@ Every packet has a 17-byte big-endian header followed by the payload:
 | The tablet lists the same Mac twice | The Mac's Wi-Fi pairing was reset and the tablet paired again. The older entry no longer works: forget it. |
 | On Wi-Fi the picture freezes briefly now and then | The network's capacity drops suddenly (another device starts a large transfer, the tablet moves away, the Mac or tablet scans for networks) and the Mac drops frames until the bitrate has come down. If it keeps happening, see *For the steadiest link* under *Over Wi-Fi*. |
 | On Wi-Fi the picture is soft | The Mac lowered the bitrate to what the network carries (the rate is shown next to *Wi-Fi* on the Mac's Home screen). It climbs back on its own once the network has room. |
-| Extend is selected, but the tablet shows the Mac's main display and no new display appears in System Settings → Displays | The virtual display did not show up for screen capture within about 1.5 seconds, so the Mac fell back to its main display. The unified log below has a `WARNING: virtual display` line. Disconnect and pick the tablet again to retry. |
+| Extend is selected, but the tablet shows the Mac's main display and no new display appears in System Settings → Displays | The virtual display did not show up for screen capture within about 1.5 seconds, so the Mac fell back to its main display; the tablet's card says *Extend unavailable, mirroring*. The unified log below has a `WARNING: virtual display` line. Disconnect the tablet and pick it again to retry. |
+| A tablet is greyed out under **Add a tablet** | **Maximum tablets** are connected, or the Mac's encoder has no room for it (see *Several tablets*). |
+| With several tablets the frame rate is lower than the preset's | The tablets share the Mac's video encoder, which lowers the busiest streams' rates so they all fit. The rate comes back when a tablet leaves. H.265 leaves more room than H.264. |
 
 Capture and encode diagnostics go to the unified log, two lines per second while capturing (`loopRate=` and `diag:`), plus every adaptive rate change, a `Content rect in frame:` line (where the picture sits in the stream) at each capture start and whenever it changes, and the Extend fallback warning:
 
@@ -237,6 +264,8 @@ flutter test           # unit and widget tests in test/
 flutter build macos    # release .app
 ```
 
+`flutter run -d macos --dart-define=SYNTH_TABLETS=3` adds three stand-in tablets (`synth-1` to `synth-3`) to a debug build of the Mac app. Each speaks the tablet's side of a USB session inside the Mac app, so the Mac makes real virtual displays and encodes real streams for them: a way to see how many tablets this Mac can take without having them. They are listed under **Add a tablet** but never connect by themselves, and nothing about them is saved. The grid icon in Home's title bar opens the **Loopback preview**, which decodes each one's stream on the Mac and has a Start/Stop button per tablet. Profile and release builds contain none of this.
+
 Before giving a build to someone else:
 
 - The Mac app is not sandboxed and uses a private API, because it has to run `adb`, post input events and create a virtual display. That rules out the Mac App Store.
@@ -252,7 +281,8 @@ Before giving a build to someone else:
 - No keyboard input and no right-click from the tablet.
 - Mirror, which Remote Control (Tablet → Mac) always uses, keeps the Mac display's shape: on a tablet of another shape the picture has black bars.
 - Split-screen and freeform windows on the tablet are not supported, though Android does not stop you from using them: the stream is always sized for the whole screen.
-- One tablet at a time.
+- Several tablets only over USB in Extended Screen. Remote Control and Wi-Fi take one tablet at a time.
+- With several tablets, how many the Mac takes comes from an estimate of its encoder by chip, raised only by what it has seen a Max-preset tablet sustain: the Mac never tries a higher load to find the real limit.
 - Over Wi-Fi: no Remote Control from Mac to tablet. The bitrate adapts, but the resolution and frame rate do not, so on a very slow network the picture can get coarse.
 - The Mac cannot unpair one tablet and keep the others: **Reset Wi-Fi pairing** unpairs them all.
 - The Mac's menus, the Mac's connection error messages (such as "Exception: No ADB device detected") and the Android notifications are English only; the rest of the UI is in English and Thai.

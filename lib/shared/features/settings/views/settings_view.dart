@@ -3,6 +3,7 @@ import 'package:get/get.dart';
 import 'package:extendedscreen/shared/features/settings/controllers/settings_controller.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
 import 'package:extendedscreen/shared/services/app_translations.dart';
+import 'package:extendedscreen/shared/services/settings_service.dart';
 import 'package:extendedscreen/shared/widgets/confirm_dialog.dart';
 
 class SettingsView extends GetView<SettingsController> {
@@ -130,6 +131,21 @@ class SettingsView extends GetView<SettingsController> {
                   )
                 : const SizedBox.shrink()),
             const SizedBox(height: 16),
+            _SectionHeader('settings_section_tablets'.tr),
+            _SettingsCard(children: [
+              Obx(() => _ChoiceRow(
+                    label: 'settings_max_tablets'.tr,
+                    description: 'settings_max_tablets_desc'.tr,
+                    value: '${controller.maxTablets.value}',
+                    onTap: () => _showMaxTabletsPicker(context),
+                  )),
+              const Divider(height: 1, color: Colors.white12),
+              Obx(() => _InfoRow(
+                    label: 'settings_encoder'.tr,
+                    value: controller.encoderSummary,
+                  )),
+            ]),
+            const SizedBox(height: 16),
             _SectionHeader('settings_section_wifi'.tr),
             _SettingsCard(children: [
               Obx(() => _ActionRow(
@@ -228,7 +244,7 @@ class SettingsView extends GetView<SettingsController> {
             const Divider(height: 1, color: Colors.white12),
             Obx(() => _InfoRow(
                 label: 'settings_target_device'.tr,
-                value: controller.targetDeviceName)),
+                value: controller.targetDeviceNames)),
             const Divider(height: 1, color: Colors.white12),
             _InfoRow(label: 'settings_host'.tr, value: 'macOS 13+'),
           ]),
@@ -253,6 +269,20 @@ class SettingsView extends GetView<SettingsController> {
     Get.bottomSheet(
       _PresetPickerSheet(controller: controller),
       isScrollControlled: true,
+    );
+  }
+
+  void _showMaxTabletsPicker(BuildContext context) {
+    final counts = [
+      for (var n = 1; n <= SettingsService.maxTabletsLimit; n++) n,
+    ];
+    Get.bottomSheet(
+      _PickerSheet(
+        title: 'settings_max_tablets'.tr,
+        items: counts.map((n) => '$n').toList(),
+        selected: counts.indexOf(controller.maxTablets.value),
+        onSelected: (i) => controller.setMaxTablets(counts[i]),
+      ),
     );
   }
 
@@ -362,12 +392,14 @@ class _SegmentRow extends StatelessWidget {
 
 class _ChoiceRow extends StatelessWidget {
   final String label;
+  final String? description;
   final String value;
   final bool enabled;
   final VoidCallback onTap;
 
   const _ChoiceRow({
     required this.label,
+    this.description,
     required this.value,
     required this.onTap,
     this.enabled = true,
@@ -382,9 +414,23 @@ class _ChoiceRow extends StatelessWidget {
           child: Row(
             children: [
               Expanded(
-                child: Text(label,
-                    style: const TextStyle(color: Colors.white, fontSize: 15)),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(label,
+                        style:
+                            const TextStyle(color: Colors.white, fontSize: 15)),
+                    if (description != null) ...[
+                      const SizedBox(height: 2),
+                      Text(description!,
+                          style: TextStyle(
+                              color: Colors.white.withValues(alpha: 0.45),
+                              fontSize: 12)),
+                    ],
+                  ],
+                ),
               ),
+              const SizedBox(width: 12),
               Text(value,
                   style: TextStyle(
                     color: Colors.white.withValues(alpha: 0.45),
@@ -502,11 +548,20 @@ class _InfoRow extends StatelessWidget {
               child: Text(label,
                   style: const TextStyle(color: Colors.white, fontSize: 15)),
             ),
-            Text(value,
-                style: TextStyle(
-                  color: Colors.white.withValues(alpha: 0.45),
-                  fontSize: 15,
-                )),
+            const SizedBox(width: 12),
+            // Up to two thirds of the row, on one line: the Encoder line and
+            // several tablets' names can be longer than the card is wide.
+            Flexible(
+              flex: 2,
+              child: Text(value,
+                  textAlign: TextAlign.end,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.45),
+                    fontSize: 15,
+                  )),
+            ),
           ],
         ),
       );
@@ -569,15 +624,9 @@ class _PresetPickerSheet extends StatelessWidget {
                         _PresetOption(
                           preset: p,
                           isSelected: p == controller.encodePreset.value,
-                          resolutionLabel: p == EncodePreset.custom
-                              ? controller.customResolutionLabel
-                              : p.resolutionLabel,
-                          bitrateLabel: p == EncodePreset.custom
-                              ? controller.customBitrateLabel
-                              : p.bitrateLabel,
-                          refreshRate: p == EncodePreset.custom
-                              ? controller.customRefreshRate.value
-                              : p.refreshRate,
+                          resolutionLabel: controller.resolutionLabelFor(p),
+                          bitrateLabel: controller.bitrateLabelFor(p),
+                          refreshRate: controller.refreshRateFor(p),
                           onTap: () {
                             controller.setEncodePreset(p);
                             Get.back();
@@ -965,23 +1014,29 @@ class _PickerSheet extends StatelessWidget {
               )),
           const SizedBox(height: 16),
           // Scroll the list so long option sets never overflow the sheet.
+          // The tiles paint their ink on a Material of their own: the
+          // sheet's coloured box would hide it.
           Flexible(
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  ...items.asMap().entries.map((e) => ListTile(
-                        title: Text(e.value,
-                            style: const TextStyle(color: Colors.white)),
-                        trailing: e.key == selected
-                            ? const Icon(Icons.check, color: Color(0xFF00C8FF))
-                            : null,
-                        onTap: () {
-                          onSelected(e.key);
-                          Get.back();
-                        },
-                      )),
-                ],
+            child: Material(
+              type: MaterialType.transparency,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    ...items.asMap().entries.map((e) => ListTile(
+                          title: Text(e.value,
+                              style: const TextStyle(color: Colors.white)),
+                          trailing: e.key == selected
+                              ? const Icon(Icons.check,
+                                  color: Color(0xFF00C8FF))
+                              : null,
+                          onTap: () {
+                            onSelected(e.key);
+                            Get.back();
+                          },
+                        )),
+                  ],
+                ),
               ),
             ),
           ),

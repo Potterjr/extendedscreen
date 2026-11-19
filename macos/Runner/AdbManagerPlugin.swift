@@ -302,11 +302,14 @@ class AdbManagerPlugin: NSObject {
 
     private func listDevices(result: @escaping FlutterResult) {
         // Bounded: a wedged adb must not hold up the picker, a USB attempt's
-        // detectingDevice step or the launch's auto-connect for ever (a
-        // terminated adb answers as no devices).
+        // detectingDevice step or the launch's auto-connect for ever. A
+        // terminated or failed adb answers an error, not an empty list: it
+        // says nothing about which tablets are attached (Dart's
+        // listDevicesOrNull gives null for it, listDevices no devices).
         adbRun(args: ["devices", "-l"], timeout: 10) { output, error in
             guard error == nil, let out = output else {
-                result([])
+                result(FlutterError(code: "ADB_FAILED", message: error ?? "no output",
+                                    details: nil))
                 return
             }
             let devices = out.components(separatedBy: "\n")
@@ -319,7 +322,13 @@ class AdbManagerPlugin: NSObject {
                                        .map { String($0.dropFirst(6)) }
                     let product = parts.first(where: { $0.hasPrefix("product:") })
                                        .map { String($0.dropFirst(8)) }
-                    return ["serial": serial, "model": model ?? "", "product": product ?? ""]
+                    // adb's id for this connection of the device: a new one
+                    // after every replug, when the device's reverse rules
+                    // are gone.
+                    let transport = parts.first(where: { $0.hasPrefix("transport_id:") })
+                                       .map { String($0.dropFirst(13)) }
+                    return ["serial": serial, "model": model ?? "", "product": product ?? "",
+                            "transport": transport ?? ""]
                 }
             result(devices)
         }

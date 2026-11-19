@@ -105,6 +105,53 @@ void main() {
     await b.cancel();
   });
 
+  test('the frame stream is listened to once, for good: listeners come and '
+      'go, and a disposed session gets nothing more', () async {
+    late MockStreamHandlerEventSink sink;
+    var listens = 0, cancels = 0;
+    messenger.setMockStreamHandler(
+        frames,
+        MockStreamHandler.inline(onListen: (_, events) {
+          listens++;
+          sink = events;
+        }, onCancel: (_) => cancels++));
+    final channel = ScreenCaptureChannel();
+    final one = <List<int>>[], two = <List<int>>[];
+    final first = channel.framesFor(1).listen(one.add);
+    await pumpEventQueue();
+    sink.success(tagged(1, [0x65]));
+    await pumpEventQueue();
+    // The session's encoder is rebuilt: its listener goes, and in between
+    // another session starts listening.
+    await first.cancel();
+    final other = channel.framesFor(2).listen(two.add);
+    await pumpEventQueue();
+    sink.success(tagged(2, [0x41]));
+    final again = channel.framesFor(1).listen(one.add);
+    sink.success(tagged(1, [0x67, 0x65]));
+    await pumpEventQueue();
+
+    expect(listens, 1);
+    expect(cancels, 0);
+    expect(one, [
+      [0x65],
+      [0x67, 0x65]
+    ]);
+    expect(two, [
+      [0x41]
+    ]);
+
+    var closed = false;
+    channel.framesFor(2).listen(two.add, onDone: () => closed = true);
+    await channel.disposeSession(session: 2);
+    sink.success(tagged(2, [0x42]));
+    await pumpEventQueue();
+    expect(closed, isTrue);
+    expect(two, hasLength(1), reason: 'a disposed session is dropped');
+    await other.cancel();
+    await again.cancel();
+  });
+
   test('every capture call names its session, and the mode goes along',
       () async {
     final channel = ScreenCaptureChannel();
@@ -133,32 +180,126 @@ void main() {
 
   test('a virtual display with no id counts as not made', () async {
     final channel = ScreenCaptureChannel();
-    expect(
-        await channel.createVirtualDisplay(DisplayConfigModel.defaultConfig,
-            session: 2, serialNum: 0x10002, name: 'Extended Screen – Tab'),
-        isFalse);
+    final made = await channel.createVirtualDisplay(
+        DisplayConfigModel.defaultConfig,
+        session: 2, serialNum: 0x10002, name: 'Extended Screen – Tab');
+    expect(made.ok, isFalse);
+    expect(made.applied, isTrue);
+    expect(made.displayId, 0);
     final args = calls.single.arguments as Map;
     expect(args['session'], 2);
     expect(args['serialNum'], 0x10002);
     expect(args['name'], 'Extended Screen – Tab');
   });
 
+  test('a made virtual display, and a start, say what they got', () async {
+    messenger.setMockMethodCallHandler(capture, (call) async {
+      calls.add(call);
+      return switch (call.method) {
+        'createVirtualDisplay' => {'applied': true, 'displayID': 9},
+        'startCapture' => {'displayID': 1, 'hardware': false, 'fellBack': true},
+        _ => null,
+      };
+    });
+    final channel = ScreenCaptureChannel();
+    final made = await channel
+        .createVirtualDisplay(DisplayConfigModel.defaultConfig, session: 2);
+    expect((made.ok, made.displayId), (true, 9));
+
+    final started = await channel
+        .startCapture(DisplayConfigModel.defaultConfig, session: 2);
+    expect((started.displayId, started.hardware, started.fellBack),
+        (1, false, true));
+    expect((calls.last.arguments as Map).containsKey('fpsCeiling'), isFalse,
+        reason: 'no ceiling: the encoder runs at the config rate, as before');
+
+    await channel.startCapture(
+        DisplayConfigModel.defaultConfig.copyWith(fpsCeiling: 45),
+        session: 2);
+    expect((calls.last.arguments as Map)['fpsCeiling'], 45);
+  });
+
+  test('a start that fails still throws its code', () async {
+    messenger.setMockMethodCallHandler(
+        capture, (call) async => throw PlatformException(code: 'ENCODER_BUSY'));
+    final channel = ScreenCaptureChannel();
+    await expectLater(
+        channel.startCapture(DisplayConfigModel.defaultConfig, session: 2),
+        throwsA(isA<PlatformException>()
+            .having((e) => e.code, 'code', 'ENCODER_BUSY')));
+  });
+
+  test('a frame-rate ceiling names its session and its rate', () async {
+    final channel = ScreenCaptureChannel();
+    await channel.setFrameRateCeiling(45, session: 3);
+    expect(calls.single.method, 'setFrameRateCeiling');
+    expect(calls.single.arguments, {'fps': 45, 'session': 3});
+  });
+
+  test("the Mac's chip and macOS version, or null when nobody answers",
+      () async {
+    messenger.setMockMethodCallHandler(
+        capture,
+        (call) async => call.method == 'getHostInfo'
+            ? {'chip': 'Apple M3 Pro', 'os': '26.1.0'}
+            : null);
+    final channel = ScreenCaptureChannel();
+    final info = await channel.getHostInfo();
+    expect((info?.chip, info?.os), ('Apple M3 Pro', '26.1.0'));
+
+    messenger.setMockMethodCallHandler(capture, null);
+    expect(await channel.getHostInfo(), isNull);
+    messenger.setMockMethodCallHandler(
+        capture, (call) async => throw PlatformException(code: 'X'));
+    expect(await channel.getHostInfo(), isNull);
+  });
+
   test('native callbacks say which session they are about', () async {
     final channel = ScreenCaptureChannel();
-    final restarts = <int?>[];
+    final restarts = <(int?, bool)>[];
     final rates = <(int, int)>[];
-    channel.onCaptureRestartNeeded = restarts.add;
+    final terminated = <(int, int)>[];
+    final mismatched = <int>[];
+    final matched = <int>[];
+    channel.onCaptureRestartNeeded =
+        (s, {bool asleep = false}) => restarts.add((s, asleep));
     channel.onFrameRateChanged = (s, fps) => rates.add((s, fps));
+    final events = <String>[];
+    channel.onEncoderOverload = (s, achieved) => events.add('$s over $achieved');
+    channel.onVirtualDisplayTerminated = (s, d) => terminated.add((s, d));
+    channel.onCaptureMismatch = mismatched.add;
+    channel.onCaptureMatched = matched.add;
 
     await fromNative('extended_screen/screen_capture', 'onStreamStopped',
         {'session': 3, 'error': 'gone'});
+    await fromNative('extended_screen/screen_capture', 'onStreamStopped',
+        {'session': 4, 'error': 'gone', 'asleep': true});
     await fromNative(
         'extended_screen/screen_capture', 'onCaptureNeedsRestart', null);
     await fromNative('extended_screen/screen_capture', 'onFrameRateChanged',
         {'session': 3, 'fps': 45});
+    // An overload step-down says what the encoder managed, before the rate.
+    channel.onFrameRateChanged = (s, fps) {
+      rates.add((s, fps));
+      events.add('$s at $fps');
+    };
+    await fromNative('extended_screen/screen_capture', 'onFrameRateChanged',
+        {'session': 4, 'fps': 60, 'achieved': 71.5});
+    await fromNative('extended_screen/screen_capture',
+        'onVirtualDisplayTerminated', {'session': 3, 'displayID': 12});
+    await fromNative('extended_screen/screen_capture', 'onCaptureMismatch',
+        {'session': 4, 'x': 0.0, 'y': 0.1, 'w': 1.0, 'h': 0.8});
+    await fromNative('extended_screen/screen_capture', 'onCaptureMatched',
+        {'session': 3});
 
-    expect(restarts, [3, null], reason: 'a wake is about every session');
-    expect(rates, [(3, 45)]);
+    expect(restarts, [(3, false), (4, true), (null, false)],
+        reason: 'a wake is about every session');
+    expect(rates, [(3, 45), (4, 60)]);
+    expect(events, ['4 over 71.5', '4 at 60'],
+        reason: 'only the overload carries what was achieved');
+    expect(terminated, [(3, 12)]);
+    expect(mismatched, [4]);
+    expect(matched, [3]);
   });
 
   test("a frame for the tablet's decoder goes behind its session's id, and "
@@ -283,6 +424,30 @@ void main() {
           'extended_screen/screen_capture', 'onCaptureNeedsRestart', null);
       await pumpEventQueue();
       expect(starts, 2);
+    });
+
+    test('alone, a wake rebuilds through the session itself: stop, remove '
+        'the display, make it again, start, keyframe', () async {
+      native();
+      await host.rebuildCapture();
+      calls.clear();
+      await fromNative(
+          'extended_screen/screen_capture', 'onCaptureNeedsRestart', null);
+      await pumpEventQueue();
+      const steps = {
+        'stopCapture',
+        'removeVirtualDisplay',
+        'createVirtualDisplay',
+        'startCapture',
+        'requestIdr',
+      };
+      expect(calls.map((c) => c.method).where(steps.contains), [
+        'stopCapture',
+        'removeVirtualDisplay',
+        'createVirtualDisplay',
+        'startCapture',
+        'requestIdr',
+      ]);
     });
 
     test('a wake after the session ended rebuilds nothing', () async {

@@ -3,6 +3,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
 import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
+import 'package:extendedscreen/shared/connection/connection_state.dart';
+import 'package:extendedscreen/shared/connection/host_connection_manager.dart';
+import 'package:extendedscreen/shared/models/client_panel.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
 import 'package:extendedscreen/shared/models/link_type.dart';
 import 'package:extendedscreen/shared/platform/permissions_channel.dart';
@@ -40,11 +43,40 @@ class SettingsController extends GetxController {
   String get customResolutionLabel => '${customWidth.value}×${customHeight.value}';
   String get customBitrateLabel => '${customBitrateMbps.value} Mbps';
 
-  /// Resolution options offered for the custom preset, derived from the
-  /// connected device's native panel (native, 80%, common sizes, half).
+  /// The panel the preset labels and the custom resolutions are worked out
+  /// for: the focused tablet's on the host, else the last one a HELLO
+  /// reported. Presets stay app-wide, and each tablet gets them at its own
+  /// panel; the labels show what the tablet Home has focused gets.
+  ClientPanel get panelForLabels {
+    // Read first so an Obx also follows the global panel, which every HELLO
+    // updates: the focused tablet's own panel is not observable.
+    final last = _settings.lastClientPanel;
+    final cm = _cm;
+    if (cm is! HostConnectionManager) return last;
+    final key = cm.focusedKey.value;
+    return (key == null ? null : cm.sessions[key])?.panel ?? last;
+  }
+
+  /// What [preset] encodes at, for [panelForLabels] (custom: its own values).
+  String resolutionLabelFor(EncodePreset preset) =>
+      preset == EncodePreset.custom
+          ? customResolutionLabel
+          : preset.resolutionLabelFor(panelForLabels);
+
+  String bitrateLabelFor(EncodePreset preset) => preset == EncodePreset.custom
+      ? customBitrateLabel
+      : preset.bitrateLabelFor(panelForLabels);
+
+  int refreshRateFor(EncodePreset preset) => preset == EncodePreset.custom
+      ? customRefreshRate.value
+      : preset.refreshRateFor(panelForLabels);
+
+  /// Resolution options offered for the custom preset, derived from
+  /// [panelForLabels] (native, 80%, common sizes, half).
   List<({int w, int h})> get customResolutions {
-    final pw = _settings.clientPanelWidth.value;
-    final ph = _settings.clientPanelHeight.value;
+    final panel = panelForLabels;
+    final pw = panel.width;
+    final ph = panel.height;
     ({int w, int h}) even(double w, double h) =>
         (w: (w / 2).round() * 2, h: (h / 2).round() * 2);
     final options = [
@@ -74,9 +106,49 @@ class SettingsController extends GetxController {
   /// The link this device is set to use (picked on Home), for the Info rows.
   bool get isWifi => _settings.linkTypeRx.value == LinkType.wifi;
 
-  /// Name of the target (client) device: the connected device's model, else
-  /// the last connected one, else a generic fallback.
-  String get targetDeviceName {
+  /// Host: how many tablets may be connected at once (USB, Extended
+  /// screen; the encoder estimate can allow fewer).
+  RxInt get maxTablets => _settings.maxTabletsRx;
+
+  /// Saved only: the hub reads it at the next pick or admission, and a
+  /// lower cap ends no tablet already connected, so nothing reconnects.
+  void setMaxTablets(int n) {
+    if (maxTablets.value == n) return;
+    _settings.setMaxTablets(n);
+  }
+
+  /// Host: the Encoder line, the chip the budget estimates from, the codec
+  /// and what the encoder is taken to manage with it (all engines), marked
+  /// as an estimate, or as measured once this Mac's encoder was seen to
+  /// manage more ([EncodeBudget.isLearned]). A dash without a hub.
+  String get encoderSummary {
+    final cm = _cm;
+    if (cm is! HostConnectionManager) return '—';
+    cm.capacityChanges.value;
+    final chip = cm.hostInfo.value?.chip ?? '';
+    final c = codec.value;
+    return [
+      if (chip.isNotEmpty) chip,
+      c == CodecType.h265 ? 'H.265' : 'H.264',
+      (cm.budget.isLearned(c)
+              ? 'settings_encoder_measured'
+              : 'settings_encoder_estimated')
+          .trParams({'mpx': '${cm.budget.capacity(c).round()}'}),
+    ].join(' · ');
+  }
+
+  /// Names of the target (client) devices: the models of the live tablets,
+  /// else the connected device's model, else the last connected one, else a
+  /// generic fallback.
+  String get targetDeviceNames {
+    final cm = _cm;
+    if (cm is HostConnectionManager) {
+      final models = [
+        for (final s in cm.sessions.values)
+          if (s.phase.value.isActive) s.activeDevice.value?.model ?? '',
+      ].where((m) => m.isNotEmpty);
+      if (models.isNotEmpty) return models.join(', ');
+    }
     final connected = _cm.activeDevice.value?.model;
     if (connected != null && connected.isNotEmpty) return connected;
     final last = _settings.lastDeviceName;

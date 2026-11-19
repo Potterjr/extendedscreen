@@ -75,6 +75,22 @@ final class CaptureContentRect {
     }
 }
 
+/// What this Mac is, for sizing how much several tablets can encode at once:
+/// {chip, os}. `chip` is the CPU brand string ("Apple M3 Pro"), empty if
+/// sysctl has none; `os` the macOS version as major.minor.patch.
+private func hostInfo() -> [String: Any] {
+    var chip = ""
+    var size = 0
+    if sysctlbyname("machdep.cpu.brand_string", nil, &size, nil, 0) == 0, size > 0 {
+        var buffer = [CChar](repeating: 0, count: size)
+        if sysctlbyname("machdep.cpu.brand_string", &buffer, &size, nil, 0) == 0 {
+            chip = String(cString: buffer)
+        }
+    }
+    let v = ProcessInfo.processInfo.operatingSystemVersion
+    return ["chip": chip, "os": "\(v.majorVersion).\(v.minorVersion).\(v.patchVersion)"]
+}
+
 // Registers a stub on older macOS and the real implementation on 12.3+
 class ScreenCapturePlugin: NSObject {
     static func register(with messenger: FlutterBinaryMessenger) {
@@ -84,8 +100,11 @@ class ScreenCapturePlugin: NSObject {
             let ch = FlutterMethodChannel(name: "extended_screen/screen_capture",
                                           binaryMessenger: messenger)
             ch.setMethodCallHandler { call, result in
-                if call.method == "requestPermission" { result(false) }
-                else { result(FlutterMethodNotImplemented) }
+                switch call.method {
+                case "requestPermission": result(false)
+                case "getHostInfo": result(hostInfo())
+                default: result(FlutterMethodNotImplemented)
+                }
             }
         }
     }
@@ -257,6 +276,16 @@ private class ScreenCapturePluginImpl: NSObject, FlutterStreamHandler {
                 sessions[id]?.requestBitrate(bps)
             }
             result(nil)
+        case "setFrameRateCeiling":
+            // Looked up, never made: session(id) would bring a disposed id
+            // back (and with it the wake forwarding). Applied like setBitrate,
+            // by the timer thread before its next encode.
+            if let fps = args["fps"] as? Int, fps > 0 {
+                sessions[id]?.requestCeiling(fps)
+            }
+            result(nil)
+        case "getHostInfo":
+            result(hostInfo())
         case "createVirtualDisplay":
             session(id).createVirtualDisplay(args: args, result: result)
         case "removeVirtualDisplay":
@@ -314,6 +343,12 @@ private final class TimerRun {
     private var running = true
     let done = DispatchSemaphore(value: 0)
     let inFlight = EncodeCounter()
+    // Frames the encoder handed back without error (its callbacks count
+    // them), and how many of those the last diag second had seen (timer
+    // thread only): what onEncoderStats reports, so Dart can tell a rate
+    // actually encoded from one only asked for.
+    let returned = EncodeCounter()
+    var returnedSeen: Int32 = 0
     var reportedEncodeError = false  // timer thread only
 
     var isRunning: Bool {
@@ -371,6 +406,16 @@ private final class CaptureSession: NSObject, SCStreamDelegate, SCStreamOutput {
     // 0: nothing waiting. [encoderBitrate] is what the encoder runs at.
     private var requestedBitrate = 0
     private var encoderBitrate = 0
+    // Several tablets share this Mac's encoder, so Dart can hold a capture
+    // below its own rate (setFrameRateCeiling): the timer thread applies the
+    // ceiling left here before its next encode. 0: nothing waiting.
+    private var requestedCeiling = 0
+
+    // Main thread: the newest ceiling Dart asked for, in the order the calls
+    // came (a start's own fpsCeiling, or a setFrameRateCeiling after it); nil
+    // for none. A start that first has to wait for a stop uses it, so a
+    // ceiling sent meanwhile is not lost.
+    private var ceiling: Int?
 
     // Timer-thread state: set on the main thread before the thread starts
     // (startCapture runs only once the previous thread has ended), then the
@@ -380,6 +425,10 @@ private final class CaptureSession: NSObject, SCStreamDelegate, SCStreamOutput {
     // rate when this Mac's encoder can't keep up, and back up once it
     // recovers (see adaptFrameRate).
     private var adaptiveFps = false
+    // The rate this capture was started for, and the highest it may run at
+    // now: [startFps] held to the frame-rate ceiling. A raised ceiling can
+    // climb back to [startFps], never past it.
+    private var startFps = 60
     private var maxFps = 60
     private var overloadStreak = 0
     // Sum of the timer's ticks/s over the current overload streak — while the
@@ -403,6 +452,10 @@ private final class CaptureSession: NSObject, SCStreamDelegate, SCStreamOutput {
     private var latestPixelBuffer: CVPixelBuffer?
     private let bufferLock = NSLock()
     private var frameCount = 0  // capture queue only
+    // Capture queue only: set (the start's generation and the display) when
+    // this capture shows the session's own virtual display, until a frame's
+    // content rect has been checked against it (see checkShowsOwnDisplay).
+    private var ownDisplayCheck: (generation: Int, display: CGDirectDisplayID)?
 
     // Diagnostic counters.
     private var diagSckCount: Int32 = 0
@@ -438,6 +491,11 @@ private final class CaptureSession: NSObject, SCStreamDelegate, SCStreamOutput {
 
     func requestBitrate(_ bps: Int) {
         lock.lock(); requestedBitrate = min(bps, Int(Int32.max)); lock.unlock()
+    }
+
+    func requestCeiling(_ fps: Int) {
+        ceiling = fps
+        lock.lock(); requestedCeiling = fps; lock.unlock()
     }
 
     // MARK: - Virtual Display (Extend Mode)
@@ -476,11 +534,21 @@ private final class CaptureSession: NSObject, SCStreamDelegate, SCStreamOutput {
             // different one per tablet keeps two of them apart.
             descriptor.serialNum = UInt32(truncatingIfNeeded: max(serial, 1))
             let tag = self.tag
-            descriptor.terminationHandler = { _, _ in
+            let id = self.id
+            // Set once the display exists; read on the main thread only.
+            var madeID: CGDirectDisplayID = 0
+            // Only reported: whether macOS also calls this for a display we
+            // released ourselves is not known yet.
+            descriptor.terminationHandler = { [weak plugin = self.plugin] _, _ in
                 esLog("\(tag) virtual display terminated")
+                DispatchQueue.main.async {
+                    plugin?.invoke("onVirtualDisplayTerminated",
+                                   ["session": id, "displayID": Int(madeID)])
+                }
             }
 
             let display = CGVirtualDisplay(descriptor: descriptor)
+            madeID = display.displayID
 
             let settings = CGVirtualDisplaySettings()
             settings.hiDPI = 1  // 2x Retina: logical w×h → physical pw×ph
@@ -543,9 +611,17 @@ private final class CaptureSession: NSObject, SCStreamDelegate, SCStreamOutput {
 
     /// Starts capturing. `mode` 0 is Extend (this session's virtual display)
     /// and 1 Mirror (the main display, whatever other displays exist).
-    /// Answers {displayID, hardware, fellBack} or an error: ENCODER_BUSY,
-    /// NO_ENCODER and ENCODER_FAILED when no encoder could be made.
+    /// `fpsCeiling` (optional) holds the encode rate below `refreshRate`
+    /// while other tablets share the encoder; setFrameRateCeiling moves it
+    /// later. Answers {displayID, hardware, fellBack} or an error:
+    /// ENCODER_BUSY, NO_ENCODER and ENCODER_FAILED when no encoder could be
+    /// made.
     func startCapture(args: [String: Any], result: @escaping FlutterResult) {
+        ceiling = (args["fpsCeiling"] as? Int).flatMap { $0 > 0 ? $0 : nil }
+        beginCapture(args: args, result: result)
+    }
+
+    private func beginCapture(args: [String: Any], result: @escaping FlutterResult) {
         if stream != nil || timerRun != nil || compressionSession != nil {
             // Still running (or a start is under way): stop it first, then
             // start, so two pipelines never run for one session. A stop or
@@ -556,7 +632,7 @@ private final class CaptureSession: NSObject, SCStreamDelegate, SCStreamOutput {
                     result(FlutterError(code: "CANCELLED", message: "Capture stopped before it started", details: nil))
                     return
                 }
-                self.startCapture(args: args, result: result)
+                self.beginCapture(args: args, result: result)
             }
             return
         }
@@ -573,8 +649,13 @@ private final class CaptureSession: NSObject, SCStreamDelegate, SCStreamOutput {
         let extend = (args["mode"] as? Int ?? 0) == 0
         let requireHardware = (args["requireHardware"] as? Bool ?? false)
             || (plugin?.otherSessionEncodes(than: id) ?? false)
-        targetFps = fps
-        maxFps = fps
+        // Capture runs at the full rate so a raised ceiling can climb back;
+        // the timer and the encoder run at the ceiling. The ceiling waiting
+        // for the timer thread is in [ceiling] already.
+        startFps = fps
+        maxFps = min(fps, ceiling ?? fps)
+        targetFps = maxFps
+        lock.lock(); requestedCeiling = 0; lock.unlock()
         adaptiveFps = args["adaptiveFps"] as? Bool ?? false
         overloadStreak = 0
         overloadTickSum = 0
@@ -582,7 +663,8 @@ private final class CaptureSession: NSObject, SCStreamDelegate, SCStreamOutput {
         stepUpDelay = 10
         lastStepUpAt = nil
 
-        let (hardware, encoderError) = setupEncoder(width: w, height: h, fps: fps, bitrate: br,
+        let (hardware, encoderError) = setupEncoder(width: w, height: h, fps: fps,
+                                                    expectedFps: targetFps, bitrate: br,
                                                     codec: codec, requireHardware: requireHardware)
         if let error = encoderError {
             result(error)
@@ -600,6 +682,7 @@ private final class CaptureSession: NSObject, SCStreamDelegate, SCStreamOutput {
         captureQueue.async { [weak self] in
             guard let self = self else { return }
             self.frameCount = 0
+            self.ownDisplayCheck = nil
             self.bufferLock.lock(); self.latestPixelBuffer = nil; self.bufferLock.unlock()
         }
 
@@ -610,6 +693,14 @@ private final class CaptureSession: NSObject, SCStreamDelegate, SCStreamOutput {
             guard let self = self else { result(error); return }
             esLog("\(self.tag) Capture not started: \(error.code) \(error.message ?? "")")
             self.stopCapture { result(error) }
+        }
+
+        // Extend with no virtual display at all (it was never made): the
+        // main display is all there is, and Dart is told so, as for one
+        // that never showed up.
+        let noVirtualDisplay = extend && virtualDisplayID == 0
+        if noVirtualDisplay {
+            esLog("\(tag) WARNING: Extend asked for, but this session has no virtual display (it could not be made); capturing the main display. Extend is NOT active.")
         }
 
         // Called back on the main thread, where the stream is set up so the
@@ -647,6 +738,16 @@ private final class CaptureSession: NSObject, SCStreamDelegate, SCStreamOutput {
             let newStream = SCStream(filter: filter, configuration: config, delegate: self)
             self.stream = newStream
 
+            // The new stream's first measured frame is checked against its
+            // own virtual display (see checkShowsOwnDisplay). Set on the
+            // capture queue before the stream starts, so before its samples.
+            let showsOwnDisplay = extend && self.virtualDisplayID != 0
+                && targetDisplay.displayID == self.virtualDisplayID
+            let displayID = targetDisplay.displayID
+            self.captureQueue.async { [weak self] in
+                self?.ownDisplayCheck = showsOwnDisplay ? (generation, displayID) : nil
+            }
+
             do {
                 try newStream.addStreamOutput(self, type: .screen, sampleHandlerQueue: self.captureQueue)
                 newStream.startCapture { [weak self] err in
@@ -675,7 +776,7 @@ private final class CaptureSession: NSObject, SCStreamDelegate, SCStreamOutput {
                         result([
                             "displayID": Int(targetDisplay.displayID),
                             "hardware": hardware,
-                            "fellBack": fellBack,
+                            "fellBack": fellBack || noVirtualDisplay,
                         ])
                     }
                 }
@@ -851,14 +952,30 @@ private final class CaptureSession: NSObject, SCStreamDelegate, SCStreamOutput {
             let drp  = OSAtomicAdd32(0, &diagDropCount); OSAtomicAnd32(0, &diagDropCount)
             let tick = OSAtomicAdd32(0, &diagTickCount); OSAtomicAnd32(0, &diagTickCount)
             let pendingNow = run.inFlight.current
-            esLog("\(tag) diag: tick=\(tick)/s  SCK=\(sck)/s  encoded=\(enc)/s  skipped=\(drp)/s  pending=\(pendingNow)")
+            let returnedNow = run.returned.current
+            let ok = returnedNow &- run.returnedSeen
+            run.returnedSeen = returnedNow
+            esLog("\(tag) diag: tick=\(tick)/s  SCK=\(sck)/s  encoded=\(enc)/s  returned=\(ok)/s  skipped=\(drp)/s  pending=\(pendingNow)")
             diagLastLog = now
             if adaptiveFps {
                 adaptFrameRate(encoder, ticksPerSec: Double(tick) / diagElapsed,
                                skipped: drp, pending: pendingNow)
+                // The evidence Dart's capacity learning needs: frames that
+                // came back encoded, and frames the screen delivered (none
+                // while nothing on it changes), a second. Ticks alone look
+                // healthy when the encoder refuses every frame.
+                let args: [String: Any] = [
+                    "session": id,
+                    "encoded": Double(max(ok, 0)) / diagElapsed,
+                    "captured": Double(sck) / diagElapsed,
+                ]
+                DispatchQueue.main.async { [weak self] in
+                    self?.plugin?.invoke("onEncoderStats", args)
+                }
             }
         }
         applyRequestedBitrate(encoder)
+        applyRequestedCeiling(encoder)
 
         bufferLock.lock()
         let pixelBuffer = latestPixelBuffer
@@ -890,6 +1007,7 @@ private final class CaptureSession: NSObject, SCStreamDelegate, SCStreamOutput {
 
         OSAtomicIncrement32(&diagEncCount)
         let counter = run.inFlight
+        let returned = run.returned
         counter.increment()
         // Call VT directly on the timer thread — no serial queue bottleneck.
         // VTCompressionSessionEncodeFrame submits to the hardware and fires
@@ -904,6 +1022,7 @@ private final class CaptureSession: NSObject, SCStreamDelegate, SCStreamOutput {
         ) { [weak self] status, _, encodedBuffer in
             counter.decrement()
             guard status == noErr, let encoded = encodedBuffer else { return }
+            returned.increment()
             self?.handleEncodedFrame(encoded)
         }
         // Refused outright (an encoder a sleep invalidated, say): its handler
@@ -945,7 +1064,7 @@ private final class CaptureSession: NSObject, SCStreamDelegate, SCStreamOutput {
         }
         healthyStreak = !overloaded && pending <= 4 ? healthyStreak + 1 : 0
 
-        let rates = Set(Self.adaptiveRates + [maxFps]).filter { $0 <= maxFps }.sorted()
+        let rates = ladder
         let achieved = overloadStreak > 0 ? overloadTickSum / Double(overloadStreak) : 0
         let fits = rates.last(where: { $0 < targetFps && Double($0) <= achieved * 0.95 })
         if overloadStreak >= 3, let lower = fits ?? rates.first(where: { $0 < targetFps }) {
@@ -953,11 +1072,42 @@ private final class CaptureSession: NSObject, SCStreamDelegate, SCStreamOutput {
                 stepUpDelay = min(stepUpDelay * 2, 300)
             }
             setAdaptiveRate(encoder, lower,
-                            reason: String(format: "encoder can't keep up (%.0f fps achieved)", achieved))
+                            reason: String(format: "encoder can't keep up (%.0f fps achieved)", achieved),
+                            achieved: achieved)
         } else if healthyStreak >= stepUpDelay,
                   let higher = rates.first(where: { $0 > targetFps }) {
             lastStepUpAt = Date()
             setAdaptiveRate(encoder, higher, reason: "encoder recovered")
+        }
+    }
+
+    /// The rates the encoder may run at now (timer thread): the ladder and
+    /// [maxFps] itself, none above it.
+    private var ladder: [Int] {
+        Set(Self.adaptiveRates + [maxFps]).filter { $0 <= maxFps }.sorted()
+    }
+
+    /// Timer thread: applies a ceiling setFrameRateCeiling left waiting.
+    /// Lowered below the running rate, the encoder steps straight down to
+    /// the highest rate under it; raised, an adaptive ("Max") encoder climbs
+    /// back through adaptFrameRate as its health allows, and a fixed one
+    /// steps straight up to its start rate or the ceiling. Like an adaptive
+    /// step, this changes no resolution and forces no keyframe, and Dart is
+    /// told the new rate (onFrameRateChanged).
+    private func applyRequestedCeiling(_ encoder: VTCompressionSession) {
+        lock.lock()
+        let requested = requestedCeiling
+        requestedCeiling = 0
+        lock.unlock()
+        guard requested > 0 else { return }
+        let newMax = min(startFps, requested)
+        guard newMax != maxFps else { return }
+        esLog("\(tag) frame-rate ceiling \(requested) fps: at most \(newMax) fps (was \(maxFps))")
+        maxFps = newMax
+        if targetFps > maxFps {
+            setAdaptiveRate(encoder, ladder.last ?? maxFps, reason: "frame-rate ceiling lowered")
+        } else if !adaptiveFps, targetFps < maxFps {
+            setAdaptiveRate(encoder, maxFps, reason: "frame-rate ceiling raised")
         }
     }
 
@@ -983,7 +1133,11 @@ private final class CaptureSession: NSObject, SCStreamDelegate, SCStreamOutput {
         }
     }
 
-    private func setAdaptiveRate(_ encoder: VTCompressionSession, _ fps: Int, reason: String) {
+    /// [achieved] (an overload step-down only): the ticks a second the
+    /// encoder managed over the overload, which Dart's budget learns the
+    /// encoder's capacity from.
+    private func setAdaptiveRate(_ encoder: VTCompressionSession, _ fps: Int, reason: String,
+                                 achieved: Double? = nil) {
         overloadStreak = 0
         overloadTickSum = 0
         healthyStreak = 0
@@ -992,8 +1146,11 @@ private final class CaptureSession: NSObject, SCStreamDelegate, SCStreamOutput {
                              value: NSNumber(value: fps))
         esLog("\(tag) adaptive: \(reason) — now \(fps) fps (next step-up after \(stepUpDelay)s healthy)")
         let id = self.id
+        var report: [String: Any] = ["session": id, "fps": fps]
+        if let achieved = achieved, achieved.isFinite, achieved > 0 { report["achieved"] = achieved }
+        let args = report
         DispatchQueue.main.async { [weak self] in
-            self?.plugin?.invoke("onFrameRateChanged", ["session": id, "fps": fps])
+            self?.plugin?.invoke("onFrameRateChanged", args)
         }
     }
 
@@ -1008,7 +1165,11 @@ private final class CaptureSession: NSObject, SCStreamDelegate, SCStreamOutput {
         if frameCount == 0 {
             esLog("\(tag) First frame pixel size: \(pw)x\(ph)")
         }
-        trackContentRect(sampleBuffer, pixelWidth: pw, pixelHeight: ph)
+        let measured = trackContentRect(sampleBuffer, pixelWidth: pw, pixelHeight: ph)
+        if let check = ownDisplayCheck, let rect = measured {
+            ownDisplayCheck = nil
+            checkShowsOwnDisplay(rect, display: check.display, generation: check.generation)
+        }
         frameCount += 1
         OSAtomicIncrement32(&diagSckCount)
 
@@ -1025,13 +1186,16 @@ private final class CaptureSession: NSObject, SCStreamDelegate, SCStreamOutput {
     /// point factor, so rect × scaleFactor is in the buffer's pixels. Should a
     /// macOS release report pixels instead, the scaled rect overflows the
     /// frame and the unscaled one is used. Runs on the capture queue.
-    private func trackContentRect(_ sampleBuffer: CMSampleBuffer, pixelWidth: Int, pixelHeight: Int) {
+    /// Returns the rect it measured (nil when the frame carries none).
+    @discardableResult
+    private func trackContentRect(_ sampleBuffer: CMSampleBuffer, pixelWidth: Int,
+                                  pixelHeight: Int) -> CGRect? {
         guard pixelWidth > 0, pixelHeight > 0,
               let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false),
               let info = (attachments as NSArray).firstObject as? NSDictionary,
               let rectDict = info[SCStreamFrameInfo.contentRect.rawValue] as? NSDictionary,
               let raw = CGRect(dictionaryRepresentation: rectDict as CFDictionary),
-              raw.width > 0, raw.height > 0 else { return }
+              raw.width > 0, raw.height > 0 else { return nil }
         var scale = (info[SCStreamFrameInfo.scaleFactor.rawValue] as? NSNumber)?.doubleValue ?? 1
         if !scale.isFinite || scale <= 0 { scale = 1 }
         let fw = CGFloat(pixelWidth), fh = CGFloat(pixelHeight)
@@ -1043,7 +1207,7 @@ private final class CaptureSession: NSObject, SCStreamDelegate, SCStreamOutput {
             guard r.minX >= -tolerance, r.minY >= -tolerance,
                   r.maxX <= 1 + tolerance, r.maxY <= 1 + tolerance else { continue }
             let normalized = r.intersection(unit)
-            guard !normalized.isNull, normalized.width > 0, normalized.height > 0 else { return }
+            guard !normalized.isNull, normalized.width > 0, normalized.height > 0 else { return nil }
             if contentRect.update(normalized) {
                 esLog(String(format: "%@ Content rect in frame: x=%.4f y=%.4f w=%.4f h=%.4f (SCK %.1f,%.1f %.1fx%.1f pt, scaleFactor %.2f, frame %ldx%ld)",
                              tag,
@@ -1052,7 +1216,41 @@ private final class CaptureSession: NSObject, SCStreamDelegate, SCStreamOutput {
                              Double(raw.minX), Double(raw.minY), Double(raw.width), Double(raw.height),
                              scale, pixelWidth, pixelHeight))
             }
+            return normalized
+        }
+        return nil
+    }
+
+    /// Capture queue, on a capture of this session's own virtual display:
+    /// that display has the frame's aspect ratio, so its picture fills the
+    /// frame (within 2%). A picture with bars is another display's. With
+    /// several virtual displays macOS can hand a new stream the most recently
+    /// added display instead of the one asked for (FB17797423); a display of
+    /// the same size as ours cannot be told apart this way. Reported once
+    /// per start, either way: onCaptureMismatch, or onCaptureMatched. Dart
+    /// decides what to do (with several displays, rebuild them all in order).
+    private func checkShowsOwnDisplay(_ rect: CGRect, display: CGDirectDisplayID, generation: Int) {
+        let tolerance: CGFloat = 0.02
+        let id = self.id
+        let fills = rect.minX <= tolerance && rect.minY <= tolerance
+            && rect.width >= 1 - tolerance && rect.height >= 1 - tolerance
+        if fills {
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self, generation == self.captureGeneration else { return }
+                self.plugin?.invoke("onCaptureMatched", ["session": id])
+            }
             return
+        }
+        esLog(String(format: "%@ WARNING: the capture of virtual display %u does not fill the frame (x=%.4f y=%.4f w=%.4f h=%.4f): it may be showing another display",
+                     tag, display, Double(rect.minX), Double(rect.minY),
+                     Double(rect.width), Double(rect.height)))
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, generation == self.captureGeneration else { return }
+            self.plugin?.invoke("onCaptureMismatch", [
+                "session": id,
+                "x": Double(rect.minX), "y": Double(rect.minY),
+                "w": Double(rect.width), "h": Double(rect.height),
+            ])
         }
     }
 
@@ -1060,7 +1258,13 @@ private final class CaptureSession: NSObject, SCStreamDelegate, SCStreamOutput {
         let id = self.id
         let message = error.localizedDescription
         DispatchQueue.main.async { [weak self] in
-            self?.plugin?.invoke("onStreamStopped", ["session": id, "error": message])
+            // ScreenCaptureKit stops every stream as the displays go to
+            // sleep; Dart can tell that stop from a failure by this.
+            self?.plugin?.invoke("onStreamStopped", [
+                "session": id,
+                "error": message,
+                "asleep": CGDisplayIsAsleep(CGMainDisplayID()) != 0,
+            ])
         }
     }
 
@@ -1069,7 +1273,10 @@ private final class CaptureSession: NSObject, SCStreamDelegate, SCStreamOutput {
     /// Makes this session's encoder. Returns whether it runs on the
     /// hardware, or an error: ENCODER_BUSY (the hardware encoder is taken),
     /// NO_ENCODER (none fits) or ENCODER_FAILED.
-    private func setupEncoder(width: Int, height: Int, fps: Int, bitrate: Int, codec: String,
+    /// [fps] is the capture's own rate, [expectedFps] the one it starts at
+    /// (lower under a frame-rate ceiling).
+    private func setupEncoder(width: Int, height: Int, fps: Int, expectedFps: Int, bitrate: Int,
+                              codec: String,
                               requireHardware: Bool) -> (hardware: Bool, error: FlutterError?) {
         var session: VTCompressionSession?
         let isHEVC = codec == "h265"
@@ -1111,8 +1318,13 @@ private final class CaptureSession: NSObject, SCStreamDelegate, SCStreamOutput {
             VTSessionSetProperty(s, key: kVTCompressionPropertyKey_H264EntropyMode,  value: kVTH264EntropyMode_CAVLC)
         }
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_MaxKeyFrameInterval,  value: NSNumber(value: fps))
+        // A keyframe at least every second also when the rate drops (an
+        // adaptive step-down or a ceiling): the interval in frames above is
+        // never updated, and alone it would stretch with a lower rate.
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration,
+                             value: NSNumber(value: 1))
         VTSessionSetProperty(s, key: kVTCompressionPropertyKey_AverageBitRate,       value: NSNumber(value: bitrate))
-        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ExpectedFrameRate,    value: NSNumber(value: fps))
+        VTSessionSetProperty(s, key: kVTCompressionPropertyKey_ExpectedFrameRate,    value: NSNumber(value: expectedFps))
         VTCompressionSessionPrepareToEncodeFrames(s)
 
         var usingHardware: CFTypeRef?
@@ -1128,7 +1340,7 @@ private final class CaptureSession: NSObject, SCStreamDelegate, SCStreamOutput {
         forceKeyframe = true
         lock.unlock()
         compressionSession = s
-        esLog("\(tag) Encoder: \(isHEVC ? "HEVC" : "H264") \(width)x\(height) \(fps)fps \(bitrate/1000)kbps hardware=\(hardware)")
+        esLog("\(tag) Encoder: \(isHEVC ? "HEVC" : "H264") \(width)x\(height) \(expectedFps)fps (capture \(fps)) \(bitrate/1000)kbps hardware=\(hardware)")
         return (hardware, nil)
     }
 
