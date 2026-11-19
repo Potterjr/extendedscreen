@@ -11,8 +11,11 @@ import 'package:extendedscreen/modules/remote_screen/host/remote_video_channel.d
 import 'package:extendedscreen/shared/connection/adb_service.dart';
 import 'package:extendedscreen/shared/connection/connection_state.dart';
 import 'package:extendedscreen/shared/connection/host_connection_manager.dart';
+import 'package:extendedscreen/shared/connection/host_session.dart';
+import 'package:extendedscreen/shared/connection/pipeline_queue.dart';
 import 'package:extendedscreen/shared/connection/socket_service.dart';
 import 'package:extendedscreen/shared/models/device_model.dart';
+import 'package:extendedscreen/shared/models/link_type.dart';
 import 'package:extendedscreen/shared/models/packet_model.dart';
 import 'package:extendedscreen/shared/models/session_mode.dart';
 import 'package:extendedscreen/shared/services/logger_service.dart';
@@ -75,7 +78,7 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   late SettingsService settings;
   late _Adb adb;
-  late HostConnectionManager host;
+  late HostSession host;
 
   /// A live Mac-controls-tablet session over USB, as far as the host's
   /// state goes, without a socket.
@@ -97,7 +100,13 @@ void main() {
     Get.put<ScreenCaptureChannel>(_Capture());
     Get.put<InputInjectChannel>(_Input());
     Get.put<RemoteVideoChannel>(_Remote());
-    host = HostConnectionManager(socket: SocketService());
+    host = HostSession(
+      key: 'TABLET',
+      link: LinkType.usb,
+      serial: 'TABLET',
+      pipeline: PipelineQueue(),
+      socket: SocketService(),
+    );
   });
 
   tearDown(Get.reset);
@@ -107,7 +116,7 @@ void main() {
     live();
     expect(await host.setTabletScreenOff(true), isNotNull);
     expect(adb.calls, isEmpty);
-    expect(settings.tabletScreenOff.value, isFalse);
+    expect(settings.tabletScreenOffFor('TABLET'), isFalse);
   });
 
   test('the toggle turns the panel off and on, and is remembered', () async {
@@ -118,17 +127,17 @@ void main() {
 
     expect(await host.setTabletScreenOff(true), isNull);
     expect(host.tabletScreenOff.value, isTrue);
-    expect(settings.tabletScreenOff.value, isTrue);
+    expect(settings.tabletScreenOffFor('TABLET'), isTrue);
 
     expect(await host.setTabletScreenOff(false), isNull);
     expect(host.tabletScreenOff.value, isFalse);
-    expect(settings.tabletScreenOff.value, isFalse);
+    expect(settings.tabletScreenOffFor('TABLET'), isFalse);
     expect(adb.calls, ['hold TABLET', 'release TABLET']);
   });
 
   test('chosen last time, it goes dark again once the picture arrives, once',
       () async {
-    await settings.setTabletScreenOff(true);
+    await settings.setTabletScreenOffFor('TABLET', true);
     live();
     host.onRolePacket(_frame);
     await pumpEventQueue();
@@ -140,7 +149,7 @@ void main() {
   });
 
   test('the end of the session lights it again', () async {
-    await settings.setTabletScreenOff(true);
+    await settings.setTabletScreenOffFor('TABLET', true);
     live();
     host.onRolePacket(_frame);
     await pumpEventQueue();
@@ -150,7 +159,7 @@ void main() {
     expect(adb.calls.last, 'release TABLET');
     expect(host.tabletScreenOff.value, isFalse);
     expect(host.tabletStreaming.value, isFalse);
-    expect(settings.tabletScreenOff.value, isTrue,
+    expect(settings.tabletScreenOffFor('TABLET'), isTrue,
         reason: 'the choice stays for the next session');
   });
 
@@ -172,9 +181,9 @@ void main() {
     live();
     host.onRolePacket(_frame);
     await host.setTabletScreenOff(true);
-    adb.onTabletScreenRestored!('SOMEONE-ELSE');
+    host.onTabletScreenRestored('SOMEONE-ELSE');
     expect(host.tabletScreenOff.value, isTrue);
-    adb.onTabletScreenRestored!('TABLET');
+    host.onTabletScreenRestored('TABLET');
     expect(host.tabletScreenOff.value, isFalse);
   });
 
@@ -185,14 +194,14 @@ void main() {
     adb.holdError = 'error: ClassNotFoundException';
     expect(await host.setTabletScreenOff(true), contains('ClassNotFound'));
     expect(host.tabletScreenOff.value, isFalse);
-    expect(settings.tabletScreenOff.value, isFalse,
+    expect(settings.tabletScreenOffFor('TABLET'), isFalse,
         reason: 'what failed is not remembered for the next session');
     expect(host.changingTabletScreen.value, isFalse);
   });
 
   test('while the remembered choice is being applied the toggle waits: no '
       'second hold, and no answer before the first one has one', () async {
-    await settings.setTabletScreenOff(true);
+    await settings.setTabletScreenOffFor('TABLET', true);
     adb.holdDelay = Completer<void>();
     live();
     host.onRolePacket(_frame);
@@ -211,7 +220,7 @@ void main() {
 
   test('a picture that arrives before the session is live is darkened once '
       'it is', () async {
-    await settings.setTabletScreenOff(true);
+    await settings.setTabletScreenOffFor('TABLET', true);
     live();
     host.phase.value = ConnectionPhase.configuring;
     host.onRolePacket(_frame);
@@ -251,5 +260,46 @@ void main() {
     host.tabletStreaming.value = true;
     expect(await host.setTabletScreenOff(true), isNotNull);
     expect(adb.calls, isEmpty);
+  });
+
+  test('the choice is kept per tablet', () async {
+    await settings.setTabletScreenOffFor('OTHER', true);
+    expect(settings.tabletScreenOffFor('TABLET'), isFalse);
+    expect(settings.tabletScreenOffFor('OTHER'), isTrue);
+  });
+
+  test('the choice made before it was kept per tablet becomes the last-used '
+      "tablet's, and no other tablet inherits it later", () async {
+    SharedPreferences.setMockInitialValues(
+        {'tablet_screen_off': true, 'last_device': 'OLD'});
+    final upgraded = SettingsService();
+    await upgraded.init();
+    expect(upgraded.tabletScreenOffFor('OLD'), isTrue);
+    await upgraded.setLastDevice('NEW');
+    expect(upgraded.tabletScreenOffFor('NEW'), isFalse);
+
+    // And it happens once: turning OLD's screen back on is not undone.
+    await upgraded.setTabletScreenOffFor('OLD', false);
+    final again = SettingsService();
+    await again.init();
+    expect(again.tabletScreenOffFor('OLD'), isFalse);
+  });
+
+  test("the hub's toggle answers with what its session did, and a panel that "
+      "came back on reaches that tablet's session", () async {
+    final hub = HostConnectionManager(socket: SocketService());
+    expect(adb.onTabletScreenRestored, isNotNull,
+        reason: 'the hub, not a session, owns the callback');
+    hub.adopt(host);
+    live();
+    host.onRolePacket(_frame);
+    expect(await hub.setTabletScreenOff(true), isNull);
+    expect(hub.tabletScreenOff.value, isTrue);
+    adb.onTabletScreenRestored!('SOMEONE-ELSE');
+    expect(hub.tabletScreenOff.value, isTrue);
+    adb.onTabletScreenRestored!('TABLET');
+    expect(host.tabletScreenOff.value, isFalse);
+    expect(hub.tabletScreenOff.value, isFalse);
+    expect(await hub.setTabletScreenOff(false), isNull);
   });
 }

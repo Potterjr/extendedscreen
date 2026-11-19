@@ -60,6 +60,9 @@ class AppTranslations extends Translations {
             'USB to pair again.',
     'error_wifi_unpaired_client':
         'A device that is not paired with this Mac tried to connect.',
+    'error_device_gone':
+        'This tablet is not attached over USB any more. Plug it in again; '
+            'the Mac keeps trying.',
     'error_wifi_identity':
         'Could not create this Mac\'s Wi-Fi identity (openssl failed).',
     'error_usb_unverified_client':
@@ -346,6 +349,9 @@ class AppTranslations extends Translations {
             'หนึ่งครั้งเพื่อจับคู่ใหม่',
     'error_wifi_unpaired_client':
         'มีอุปกรณ์ที่ยังไม่ได้จับคู่กับ Mac เครื่องนี้พยายามเชื่อมต่อ',
+    'error_device_gone':
+        'ไม่พบแท็บเล็ตเครื่องนี้ทาง USB แล้ว ให้เสียบสายใหม่ '
+            'Mac จะลองเชื่อมต่อต่อไปเอง',
     'error_wifi_identity':
         'สร้างข้อมูลยืนยันตัวตน Wi-Fi ของ Mac เครื่องนี้ไม่สำเร็จ (openssl ล้มเหลว)',
     'error_usb_unverified_client':

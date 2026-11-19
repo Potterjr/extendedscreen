@@ -326,6 +326,7 @@ class TouchGestureRecognizer {
   }
 
   static int _wallClockUs() => DateTime.now().microsecondsSinceEpoch;
+
   double _nx(Offset p) =>
       _view.width <= 0 ? 0 : (p.dx / _view.width).clamp(0.0, 1.0);
   double _ny(Offset p) =>

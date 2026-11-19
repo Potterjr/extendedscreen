@@ -1,0 +1,1390 @@
+import 'dart:async';
+import 'dart:collection';
+import 'dart:math' as math;
+import 'dart:typed_data';
+import 'package:flutter/foundation.dart' show visibleForTesting;
+import 'package:get/get.dart';
+import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
+import 'package:extendedscreen/shared/connection/connection_state.dart';
+import 'package:extendedscreen/shared/models/client_panel.dart';
+import 'package:extendedscreen/shared/models/device_model.dart';
+import 'package:extendedscreen/shared/models/display_config_model.dart';
+import 'package:extendedscreen/shared/models/link_type.dart';
+import 'package:extendedscreen/shared/models/packet_model.dart';
+import 'package:extendedscreen/shared/models/session_spec.dart';
+import 'package:extendedscreen/shared/models/touch_event_model.dart';
+import 'package:extendedscreen/shared/platform/host_name.dart';
+import 'package:extendedscreen/shared/protocol/annexb.dart';
+import 'package:extendedscreen/shared/protocol/packet_codec.dart';
+import 'package:extendedscreen/modules/extended_screen/host/screen_capture_channel.dart';
+import 'package:extendedscreen/modules/extended_screen/host/input_inject_channel.dart';
+import 'package:extendedscreen/modules/remote_screen/host/remote_video_channel.dart';
+import 'package:extendedscreen/shared/connection/adb_service.dart';
+import 'package:extendedscreen/shared/connection/bitrate_adapter.dart';
+import 'package:extendedscreen/shared/connection/pipeline_queue.dart';
+import 'package:extendedscreen/shared/connection/usb_session_service.dart';
+import 'package:extendedscreen/shared/connection/wifi_discovery_service.dart';
+import 'package:extendedscreen/shared/connection/wifi_pairing_service.dart';
+
+/// One tablet's session on the HOST (macOS), as the hub
+/// ([HostConnectionManager]) keeps one per tablet: its link to that tablet
+/// and everything that runs for it. Over USB it binds a loopback port of its
+/// own and has adb join the tablet's 127.0.0.1:7001 to it (adb reverse, from
+/// the tablet's tcp:7001 to that port); it captures and encodes the screen via
+/// ScreenCaptureKit/VideoToolbox and injects the touch/mouse/key events the
+/// tablet sends. Stream settings are edited only on the host; the tablet's
+/// HELLO reports its native panel size and top refresh rate, which the
+/// session waits for (3 s timeout) before sizing and starting capture.
+///
+/// Over Wi-Fi ([LinkType.wifi]) there is no adb: the server listens on the
+/// LAN with TLS, answers discovery probes, and treats the client as a
+/// stranger until it presents the pairing token (see [WifiPairingService]).
+///
+/// Over USB the client is a stranger too, until it proves it holds the key
+/// this attempt handed to the tablet app through adb (see
+/// [UsbSessionService]): anything on the tablet can dial the tunnel, and
+/// anything on this Mac the loopback server.
+///
+/// It keeps its own copy of the link's state machine (phase, attempts,
+/// retry, heartbeat; [BaseConnectionManager]), so ending or failing one
+/// tablet's session never touches another's. It is never registered with
+/// Get, so it adds no app-lifecycle observer: the hub forwards what it
+/// needs, along with the native plugins' callbacks for it
+/// ([captureNeedsRestart], [frameRateChanged], [displayBoundsChanged],
+/// [decoderWantsKeyframe], [onTabletScreenRestored]).
+class HostSession extends BaseConnectionManager {
+  HostSession({
+    required this.key,
+    required this.link,
+    this.serial,
+    required PipelineQueue pipeline,
+    TabletTunnels? tunnels,
+    AdbService? adb,
+    super.socket,
+    super.port,
+  })  : assert(link == LinkType.wifi || serial != null),
+        _pipeline = pipeline,
+        _tunnels = tunnels,
+        _adb = adb ?? Get.find<AdbService>() {
+    _phaseWorker = ever<ConnectionPhase>(phase, (p) {
+      if (p != ConnectionPhase.streaming) return;
+      // Live again: the next failure is a first one.
+      _failures = 0;
+      // A capture left running from the last session can send its picture
+      // before this one is live; the remembered choice waits for that too.
+      _darkenTabletIfChosen();
+    });
+  }
+
+  /// The hub's name for this session: the adb serial over USB, 'wifi' for
+  /// the one Wi-Fi session.
+  final String key;
+
+  /// How this session reaches its tablet. Fixed for its life.
+  final LinkType link;
+
+  /// The tablet's adb serial (USB), fixed for the session's life: its
+  /// retries look for this device and no other. Null over Wi-Fi.
+  final String? serial;
+
+  /// This session's id in the native capture, input and decode plugins:
+  /// its virtual display, stream, encoder, mouse state and remote decoder are
+  /// kept under it, and its encoded frames come back tagged with it. Never
+  /// reused within a run of the app, so a late callback for an old one
+  /// finds nothing.
+  final int nativeId = _nextNativeId++;
+  static int _nextNativeId = 1;
+
+  final PipelineQueue _pipeline;
+  final TabletTunnels? _tunnels;
+  final AdbService _adb;
+  late final Worker _phaseWorker;
+
+  // The hub has ended this session ([retire]): it never connects again.
+  bool _retired = false;
+
+  /// Whether this session may still change its tablet's adb rule and screen
+  /// hold: not once the hub has made a newer session for that tablet (an
+  /// adb call of this one's that returns late must not undo the newer
+  /// one's tunnel).
+  bool _ownsTunnel(String serial) => _tunnels?.owns(serial, this) ?? true;
+
+  /// Runs [operation] on [serial]'s adb rule in turn with every other
+  /// session's for that tablet, in the order they were asked for.
+  Future<T> _onTunnel<T>(String serial, Future<T> Function() operation) =>
+      _tunnels?.run(serial, operation) ?? operation();
+
+  /// What this session is (mode, direction, display mode), as of the start
+  /// of its last connect attempt; the live settings before its first.
+  SessionSpec get spec => _spec ?? SessionSpec.of(settings, link);
+  SessionSpec? _spec;
+
+  /// The tablet's panel: what its HELLO reported this attempt, else what it
+  /// reported last time, else the last panel any tablet reported.
+  ClientPanel get panel =>
+      _panel ?? settings.clientPanelFor(key) ?? settings.lastClientPanel;
+  ClientPanel? _panel;
+
+  /// The bitrate this session's capture was started at (its preset at its
+  /// panel), which the Wi-Fi adaptation moves from.
+  int _captureBitrate = 0;
+
+  // The native plugins' callbacks reach this session through the hub, and
+  // only between the start of its capture (or decoder) and its teardown:
+  // a callback landing after that must not resurrect anything.
+  bool _captureWired = false;
+  bool _remoteWired = false;
+
+  // Consecutive failures since the session was last live: how long the next
+  // retry waits ([nextRetryDelay]).
+  int _failures = 0;
+  static final _jitter = math.Random();
+  WifiPairingService get _pairing => Get.find<WifiPairingService>();
+  WifiDiscoveryService get _discovery => Get.find<WifiDiscoveryService>();
+  ScreenCaptureChannel get _capture => Get.find<ScreenCaptureChannel>();
+  InputInjectChannel get _input => Get.find<InputInjectChannel>();
+  RemoteVideoChannel get _remote => Get.find<RemoteVideoChannel>();
+
+  @override
+  bool get isHost => true;
+
+  // The host is the server — once torn down there's nothing to wait for, so
+  // re-listen quickly and let the tablet's own retry find us.
+  @override
+  Duration get reconnectDelay => const Duration(seconds: 1);
+
+  /// The first retry after a second, as always. Over USB, if that fails too,
+  /// after 2, 5 and then every 10 s (each ±20%), until the session is live
+  /// again: when adb restarts it drops every tablet's tunnel at once, and
+  /// the retries must not all hit it together, each with its own `adb
+  /// reverse`, once a second. Over Wi-Fi the Mac only listens again, and
+  /// the tablet redials: always after a second.
+  @override
+  Duration nextRetryDelay() {
+    final failures = _failures++;
+    if (failures == 0 || link == LinkType.wifi) return reconnectDelay;
+    const steps = [2, 5, 10];
+    final seconds = steps[math.min(failures - 1, steps.length - 1)];
+    return Duration(
+        milliseconds: (seconds * 1000 * (0.8 + 0.4 * _jitter.nextDouble()))
+            .round());
+  }
+
+  /// The hub is ending this session for good: from now on [connect] does
+  /// nothing, whoever calls it (a retry timer, a resume).
+  void retire() => _retired = true;
+
+  /// Lets go of what the session holds outside itself once the hub has
+  /// ended it for good (after its [disconnect]).
+  void dispose() {
+    _phaseWorker.dispose();
+    _stopBitrateAdaptation();
+    _captureWired = false;
+    _remoteWired = false;
+  }
+
+  /// Texture id of the decoded tablet stream (reverse remote: Mac controls the
+  /// tablet). Null unless a reverse-remote session is live; the remote-view
+  /// widget renders a `Texture` from it.
+  final remoteTextureId = Rxn<int>();
+
+  /// Reverse remote: the tablet's picture has started to arrive this session
+  /// (its user approved screen capture), so its panel may go dark now.
+  final tabletStreaming = false.obs;
+
+  /// Reverse remote: the tablet's panel is held off ([setTabletScreenOff]).
+  final tabletScreenOff = false.obs;
+
+  /// A [setTabletScreenOff] is under way, the user's or the remembered
+  /// choice's: the toggle waits for it, and another call is refused.
+  final changingTabletScreen = false.obs;
+
+  /// Bumped by every [setTabletScreenOff] and by teardown: a call that finds
+  /// it moved on after its await was superseded, and changes nothing.
+  int _tabletScreenSeq = 0;
+
+  // Actual display bounds (updated after capture starts in extend/mirror mode).
+  Map<String, double> _displayBounds = {'x': 0, 'y': 0, 'w': 0, 'h': 0};
+
+  StreamSubscription? _frameSub;
+
+  // A capture rebuild is under way; [_restartAgain]: another was asked for
+  // meanwhile and runs once it ends. That second request matters: a rebuild
+  // started as the displays went to sleep (ScreenCaptureKit stops the stream
+  // when they do) cannot work, and the wake's request may come while it is
+  // still trying.
+  bool _restarting = false;
+  bool _restartAgain = false;
+
+  // Completed when the client's HELLO arrives (it carries the panel size the
+  // capture resolution is derived from).
+  Completer<void>? _helloReceived;
+
+  bool get _wifiSession => link == LinkType.wifi;
+
+  // Until the client has proved itself (over Wi-Fi with the pairing token,
+  // over USB with the session key), [admitPacket] drops everything it sends
+  // and [_sendToClient] sends it nothing, so neither an unpaired machine on
+  // the network nor another app on the tablet can inject input or see the
+  // screen.
+  //
+  // What is remembered is the connection that authenticated
+  // ([SocketService.connectionId]), not a flag: the server accepts whoever
+  // dials next as soon as a client drops, and that must never inherit the
+  // previous client's standing, however teardown and accept interleave.
+  WifiIdentity? _identity;
+  int? _authedConnection;
+  Completer<_Proof>? _proof;
+
+  // USB only: what this attempt's client has to prove it holds. Made once
+  // the adb tunnel is up, handed to the tablet app through adb and to
+  // nothing else, and good for one session: cleared when a client proves it,
+  // and at teardown.
+  Uint8List? _usbKey;
+  // When the tablet app last confirmed taking [_usbKey].
+  DateTime _keyTakenAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+  // The most a client that has not proved itself may announce: its proof and
+  // a HELLO are a few dozen bytes.
+  static const _untrustedPayloadLimit = 1024;
+
+  // Hellos made without the key that one USB attempt puts up with before it
+  // fails. One is normal (the tablet app was opened after this Mac started
+  // waiting); more means something else on the tablet keeps dialling.
+  static const _maxKeylessHellos = 8;
+
+  // The connect() that built the live USB session, so a pairing offered
+  // later in it (after an identity reset) can tell the session is still that
+  // one.
+  int _usbSessionSeq = 0;
+
+  @override
+  bool get peerTrusted =>
+      _authedConnection != null && _authedConnection == socket.connectionId;
+
+  /// Every packet this host sends to the client goes through here.
+  void _sendToClient(Packet packet) {
+    if (peerTrusted) socket.send(packet);
+  }
+
+  // Starting, restarting and stopping the media pipeline never overlap, for
+  // this session or any other: each waits for the one before it
+  // ([PipelineQueue]).
+  Future<T> _exclusive<T>(Future<T> Function() operation) =>
+      _pipeline.run(operation);
+
+  // Wi-Fi only: a frame was dropped because the link fell behind, and the
+  // frames after it reference the dropped one. Nothing is sent until the next
+  // keyframe.
+  bool _resyncing = false;
+  bool _streamHevc = false;
+  DateTime _lastResyncIdr = DateTime.fromMillisecondsSinceEpoch(0);
+
+  // Wi-Fi only: fits the encoder's bitrate to the link while a capture runs
+  // (see [_startBitrateAdaptation]). Null when nothing is being adapted.
+  BitrateAdapter? _bitrate;
+  Timer? _bitrateTimer;
+  final _bitrateClock = Stopwatch()..start();
+  // The link's queue at its lowest since the last sample, read just before
+  // each frame is written: the point of the frame cycle where a link that
+  // keeps up has delivered everything. A timer alone samples one fixed phase
+  // of that cycle (50 ms is a whole number of frames at 60 fps).
+  int? _queueTrough;
+  // Round trips the heartbeat measured lately, one a second, for the lowest:
+  // what the link holds in flight with no queue at all.
+  final _roundTrips = ListQueue<int>();
+
+  /// Whether the encoder's bitrate is being fitted to the link right now
+  /// (the tests' view of it, through the hub).
+  bool get adaptingBitrate => _bitrateTimer?.isActive ?? false;
+
+  /// How often the link's queue is looked at. Well inside
+  /// [BitrateAdapter.window], so the smallest of several samples is judged.
+  static const _bitrateSampleEvery = Duration(milliseconds: 50);
+
+  /// Choosing what to connect is the hub's ([HostConnectionManager]).
+  @override
+  Future<void> autoConnect() async {}
+
+  @override
+  void sendUiFlags() {
+    if (!phase.value.isActive) return;
+    // 0xFA + performanceOverlay(0/1) + showHud(0/1).
+    _sendToClient(Packet(
+      type: PacketType.control,
+      timestampUs: DateTime.now().microsecondsSinceEpoch,
+      payload: Uint8List.fromList([
+        0xFA,
+        settings.showPerformanceOverlay.value ? 1 : 0,
+        settings.showHudOverlay.value ? 1 : 0,
+      ]),
+    ));
+  }
+
+  /// Connects this session's tablet ([serial] is ignored: the session's own
+  /// is fixed). Only from `disconnected` or `error`.
+  @override
+  Future<void> connect({String? serial}) async {
+    if (_retired || phase.value.isConnecting || phase.value.isActive) return;
+    final attempt = currentAttempt;
+    final seq = beginConnect();
+    final wifi = _wifiSession;
+    _spec = SessionSpec.of(settings, link);
+    _panel = null;
+    _authedConnection = null;
+    _usbKey = null;
+    // The device whose adb tunnel this attempt set up (USB only), so a
+    // cancelled attempt knows which one to remove.
+    String? tunnelled;
+    Future<void> abandon() => _abandon(tunnelled, seq);
+    try {
+      if (wifi) {
+        // No device to detect and no port to forward: listen, then wait for
+        // the tablet to find this Mac and dial in.
+        setPhase(ConnectionPhase.handshaking);
+        final WifiIdentity identity;
+        try {
+          identity = await _pairing.ensureIdentity();
+        } catch (e, st) {
+          log.e('Host: no Wi-Fi identity', e, st);
+          throw const LinkError('error_wifi_identity');
+        }
+        if (isCancelled(attempt)) return abandon();
+        _identity = identity;
+        // Listening for the proof before a tablet can connect: the awaits
+        // below (the responder reads the Computer Name from a process) leave
+        // time for a tablet dialling a known address to finish TLS and send
+        // its token, and a packet nobody listens for is gone for good.
+        _helloReceived = Completer<void>();
+        _proof = Completer<_Proof>();
+        startPacketLoop();
+        await socket.startSecureServer(linkPort, identity.serverContext());
+        if (isCancelled(attempt)) return abandon();
+        try {
+          await _startDiscoveryResponder(identity, attempt);
+        } catch (e) {
+          // Not fatal: the tablet can still dial a typed address.
+          log.w('Host: discovery responder not started ($e)');
+        }
+        if (isCancelled(attempt)) return abandon();
+        log.i('Host: listening on Wi-Fi, waiting for the tablet…');
+        await socket.waitForClient();
+        if (isCancelled(attempt)) return abandon();
+        activeDevice.value = DeviceModel(
+          serial: socket.remoteAddress ?? LinkType.wifi.chipLabel,
+          status: DeviceStatus.connected,
+        );
+      } else {
+        setPhase(ConnectionPhase.detectingDevice);
+        final devices = await _adb.listDevices();
+        if (isCancelled(attempt)) return;
+        availableDevices.value = devices;
+        if (devices.isEmpty) throw Exception('No ADB device detected');
+        // This session's tablet and no other: a retry while it is unplugged
+        // waits for it instead of taking whatever else is attached.
+        final device =
+            devices.firstWhereOrNull((d) => d.serial == this.serial);
+        if (device == null) throw const LinkError('error_device_gone');
+        activeDevice.value = device;
+        log.i('Host: using device ${device.serial}');
+
+        setPhase(ConnectionPhase.portForwarding);
+        // A port of this session's own on the Mac, which adb joins the
+        // tablet's 127.0.0.1:[linkPort] to: the port says which tablet
+        // dialled (the key still proves it).
+        await socket.startServer(BaseConnectionManager.host, 0,
+            untrustedPayloadLimit: _untrustedPayloadLimit);
+        if (isCancelled(attempt)) return abandon();
+        final macPort = socket.serverPort;
+        if (macPort == null) throw Exception('Port forwarding failed');
+        tunnelled = device.serial;
+        // Reverse tunnel: tablet tcp:7001 → this Mac's tcp:<macPort>. Once
+        // per attempt (see below).
+        final forwarded = await _onTunnel(
+            device.serial,
+            () => _adb.reverseForward(
+                  serial: device.serial,
+                  localPort: macPort,
+                  remotePort: linkPort,
+                ));
+        if (isCancelled(attempt)) return abandon();
+        if (!forwarded) throw Exception('Port forwarding failed');
+
+        setPhase(ConnectionPhase.handshaking);
+        // Only now, with this attempt's tunnel up: the tablet app dials as
+        // soon as it has the key, and what it then reaches on its port 7001
+        // is adb. Not awaited: the app can be here before adb has reported.
+        final key = UsbSessionService.newKey();
+        _usbKey = key;
+        _keyTakenAt = DateTime.fromMillisecondsSinceEpoch(0);
+        unawaited(_deliverSessionKey(device.serial, key));
+        log.i('Host: waiting for tablet to connect…');
+        await socket.waitForClient();
+        if (isCancelled(attempt)) return abandon();
+      }
+
+      if (!wifi) {
+        // Over Wi-Fi these have been waiting since before the server was up.
+        _helloReceived = Completer<void>();
+        _proof = Completer<_Proof>();
+        startPacketLoop();
+      }
+
+      setPhase(ConnectionPhase.configuring);
+      // Whoever connected is a stranger until it proves otherwise. Over Wi-Fi
+      // the TLS handshake proved this Mac to the client, not the client to
+      // this Mac: anything on the network can get this far. Over USB anything
+      // on the tablet can dial the tunnel.
+      var keylessHellos = 0;
+      while (true) {
+        final proof = await _proof!.future.timeout(const Duration(seconds: 3),
+            onTimeout: () => _Proof.none);
+        if (isCancelled(attempt)) return abandon();
+        if (proof == _Proof.given) break;
+        if (wifi) throw const LinkError('error_wifi_unpaired_client');
+        // Silence, or anything but a hello: an older tablet build, or
+        // something else on the tablet.
+        final key = _usbKey;
+        final device = tunnelled;
+        if (proof == _Proof.none ||
+            key == null ||
+            device == null ||
+            ++keylessHellos > _maxKeylessHellos) {
+          throw const LinkError('error_usb_unverified_client');
+        }
+        // A hello made without this attempt's key. From the tablet app that
+        // means the key has not reached it: it was opened after the key was
+        // sent, or it dialled just before the key arrived. Turn this
+        // connection away, hand the key over (again), and go on waiting: the
+        // app dials anew as soon as it has it.
+        socket.dropClient();
+        _proof = Completer<_Proof>();
+        setPhase(ConnectionPhase.handshaking);
+        // Taken a moment ago: the dial and the delivery crossed.
+        if (DateTime.now().difference(_keyTakenAt) >
+            const Duration(seconds: 1)) {
+          final delivery = await _deliverSessionKey(device, key);
+          if (isCancelled(attempt)) {
+            await abandon();
+            return;
+          }
+          if (delivery != AdbDelivery.stored) {
+            throw const LinkError('error_usb_key_not_delivered');
+          }
+        }
+        await socket.waitForClient();
+        if (isCancelled(attempt)) {
+          await abandon();
+          return;
+        }
+        setPhase(ConnectionPhase.configuring);
+      }
+      // Wait for the client's HELLO so the capture resolution matches its
+      // panel; on timeout fall back to the last-known (persisted) panel.
+      try {
+        await _helloReceived!.future.timeout(const Duration(seconds: 3));
+      } on TimeoutException {
+        log.w('Host: no HELLO from client — using last-known panel $panel');
+      }
+      if (isCancelled(attempt)) return abandon();
+
+      // Start the media pipeline. Reverse-remote (Mac controls tablet) decodes
+      // the tablet's stream; every other mode captures + encodes the Mac. Both
+      // are non-fatal so the link stays up even if the pipeline can't start.
+      try {
+        await _exclusive(() => spec.isReverseRemote
+            ? _startRemoteReceive()
+            : _startCapture(attempt));
+      } catch (e, st) {
+        log.e('Host: media pipeline not started (permission?)', e, st);
+      }
+      if (isCancelled(attempt)) return abandon();
+
+      setPhase(ConnectionPhase.streaming);
+      startHeartbeat();
+      if (!wifi) {
+        final device = activeDevice.value;
+        // Remember the device only once the link is actually live — saving it
+        // on every attempt let a failed retry (e.g. falling back to an
+        // emulator while the tablet was unplugged) overwrite the real
+        // last-used device.
+        if (device != null) {
+          await settings.setLastDevice(device.serial);
+          if (device.model != null && device.model!.isNotEmpty) {
+            await settings.setLastDeviceName(device.model!);
+          }
+        }
+        _usbSessionSeq = seq;
+        unawaited(_offerWifiPairing(seq));
+      }
+      log.i('Host: link live (streaming)');
+    } catch (e, st) {
+      if (isCancelled(attempt)) return; // cancelled mid-attempt: no retry
+      log.e('Host connection failed', e, st);
+      errorMessage.value = e.toString();
+      await handleLinkFailure();
+    }
+  }
+
+  /// Answers discovery probes under the name the tablet shows for this Mac:
+  /// its Computer Name ([macDisplayName]), not `Platform.localHostname`,
+  /// which is whatever the current network calls the machine.
+  ///
+  /// [attempt] can end while the name is being read; then nothing is started
+  /// (the caller's own check follows and abandons the attempt).
+  Future<void> _startDiscoveryResponder(
+      WifiIdentity identity, int attempt) async {
+    final name = await macDisplayName();
+    if (isCancelled(attempt)) return;
+    await _discovery.startResponder(
+      hostId: identity.hostId,
+      name: name,
+      tcpPort: linkPort,
+    );
+  }
+
+  /// Hands [key] to the tablet app through adb, and to nothing else
+  /// ([AdbService.deliverUsbSessionKey]).
+  Future<AdbDelivery> _deliverSessionKey(String serial, Uint8List key) async {
+    final delivery = await _adb.deliverUsbSessionKey(serial: serial, key: key);
+    // adb can report after the session the key was for has begun, or ended.
+    if (!identical(key, _usbKey)) return delivery;
+    switch (delivery) {
+      case AdbDelivery.stored:
+        _keyTakenAt = DateTime.now();
+        log.i('Host: USB session key delivered to the tablet through adb');
+      case AdbDelivery.refused:
+        log.w('Host: the tablet app refused the USB session key');
+      case AdbDelivery.notDelivered:
+        log.w('Host: the tablet did not take the USB session key (the app is '
+            'not open, an older build, or adb failed)');
+    }
+    return delivery;
+  }
+
+  /// Every USB session hands the tablet what it needs to find and trust this
+  /// Mac over Wi-Fi later. It goes through adb, to this app on the tablet
+  /// ([AdbService.deliverWifiPairing]), and never on the socket: the pairing
+  /// carries the token that lets its holder drive this Mac over Wi-Fi, a
+  /// credential that outlives the session and has no business on a link.
+  /// Nothing is offered on a Wi-Fi session.
+  Future<void> _offerWifiPairing(int seq) async {
+    try {
+      final identity = await _pairing.ensureIdentity();
+      // Where this Mac is right now, so the tablet can ask it directly later
+      // (a broadcast does not cross into another subnet).
+      final addresses = await WifiDiscoveryService.lanAddresses();
+      // The Computer Name: what the tablet will show as the Mac it is paired
+      // with.
+      final name = await macDisplayName();
+      final device = activeDevice.value;
+      if (!isLatestConnect(seq) ||
+          _wifiSession ||
+          !phase.value.isActive ||
+          device == null) {
+        return;
+      }
+      final delivery = await _adb.deliverWifiPairing(
+        serial: device.serial,
+        payload: WifiPairingService.buildPairingPayload(identity, name,
+            addresses: addresses),
+      );
+      switch (delivery) {
+        case AdbDelivery.stored:
+          log.i('Host: Wi-Fi pairing delivered to the tablet through adb');
+        case AdbDelivery.refused:
+          log.w('Host: the tablet refused the Wi-Fi pairing (it knows this '
+              'Mac under another identity: forget it on the tablet)');
+        case AdbDelivery.notDelivered:
+          log.w('Host: the tablet did not take the Wi-Fi pairing (an older '
+              'app build, or adb failed)');
+      }
+    } catch (e) {
+      log.w('Host: Wi-Fi pairing not offered ($e)');
+    }
+  }
+
+  /// This Mac's Wi-Fi identity was discarded (Settings → Reset Wi-Fi
+  /// pairing; the hub resets it, then tells every session).
+  ///
+  /// A Wi-Fi server that is up still presents the old certificate, and a
+  /// tablet on it got in with the old token, so that session or wait ends and
+  /// the host listens again with the new identity. A live USB session carries
+  /// on, and its tablet is handed the new identity at once.
+  Future<void> identityWasReset() async {
+    _identity = null;
+    final p = phase.value;
+    if (_wifiSession) {
+      // In `error` the pending retry makes its own identity; idle, the next
+      // connect does.
+      if (p.isConnecting || p.isActive) {
+        await disconnect();
+        // Not awaited: over Wi-Fi a connect lasts until a tablet arrives.
+        unawaited(connect());
+      }
+    } else if (p.isActive) {
+      unawaited(_offerWifiPairing(_usbSessionSeq));
+    }
+  }
+
+  /// Cancel landed while this attempt was mid-await: disconnect() already tore
+  /// down what existed then, so undo whatever the attempt set up since (tunnel,
+  /// server, capture). Every step is safe to repeat — but skip it entirely if
+  /// the user already started a newer attempt, which now owns those resources.
+  /// [tunnelled] is the device whose adb tunnel the attempt created, if any.
+  ///
+  /// Ownership is checked again after every await: a newer attempt can start
+  /// while this one is still cleaning up (reconnect() is disconnect() followed
+  /// at once by connect(), and over Wi-Fi the new attempt is listening within
+  /// microtasks), and closing the socket then would close *its* listener.
+  Future<void> _abandon(String? tunnelled, int seq) async {
+    log.i('Host: connect attempt cancelled');
+    if (!isLatestConnect(seq)) return;
+    await onTeardown();
+    if (!isLatestConnect(seq)) return;
+    if (tunnelled != null && _ownsTunnel(tunnelled)) {
+      await _onTunnel(tunnelled,
+          () => _adb.removeForward(serial: tunnelled, remotePort: linkPort));
+      if (!isLatestConnect(seq)) return;
+    }
+    await socket.disconnect();
+  }
+
+  /// A lost link invalidates the whole session (capture, virtual display,
+  /// adb tunnel), so rebuild from scratch rather than resume a half-alive one.
+  @override
+  Future<void> onLinkLost() => onTeardown();
+
+  /// [attempt] is the session this start belongs to. That session can end at
+  /// any await below; the teardown that ends it stops whatever was started,
+  /// after this returns (see [_exclusive]), so all this has to do then is not
+  /// go on: no further native calls, no packets, no frame subscription.
+  Future<void> _startCapture(int attempt) async {
+    bool stale() => isCancelled(attempt);
+    if (stale()) return;
+    // From here the native wake/stream-stop callbacks the hub routes here
+    // may rebuild the pipeline (a wake, or this session's stream stopping),
+    // display rearrangements refresh the bounds, and the Max preset's rate
+    // changes are announced (see the routing methods below).
+    _captureWired = true;
+
+    final p = panel;
+    final config = DisplayConfigModel.defaultConfig.copyWith(
+      width: settings.captureWidthFor(p),
+      height: settings.captureHeightFor(p),
+      scaleFactor: settings.captureScaleFactorFor(p),
+      refreshRate: settings.refreshRateFor(p),
+      bitrate: settings.captureBitrateFor(p),
+      // Remote-control sessions always mirror the real desktop; extended-screen
+      // honours the user's Extend/Mirror choice.
+      mode: spec.displayMode,
+      codec: settings.codec,
+      adaptiveFps: settings.encodePreset == EncodePreset.max,
+    );
+    _captureBitrate = config.bitrate;
+
+    await _capture.requestPermission();
+    await _input.requestAccessibility();
+    if (stale()) return;
+
+    if (config.mode == DisplayMode.extend) {
+      if (!await _capture.createVirtualDisplay(config, session: nativeId)) {
+        log.w('Host: virtual display settings not applied — capture falls '
+            'back to the main display if it never appears');
+      }
+      if (stale()) return;
+    }
+    await _capture.startCapture(config, session: nativeId);
+    if (stale()) return;
+
+    // Fetch the captured display's bounds so touch injection lands on the
+    // screen the tablet shows.
+    _displayBounds = await _capture.getDisplayBounds(session: nativeId);
+    if (stale()) return;
+    if ((_displayBounds['w'] ?? 0) <= 0 || (_displayBounds['h'] ?? 0) <= 0) {
+      // Bounds query failed — fall back to the logical size we configured.
+      _displayBounds = {
+        'x': 0,
+        'y': 0,
+        'w': config.width.toDouble(),
+        'h': config.height.toDouble(),
+      };
+    }
+    log.i('Display bounds: $_displayBounds');
+
+    // Announce the active session mode + direction so the client knows its role.
+    _sendSessionMode();
+
+    // Tell client which codec we're using so it can initialize the right decoder.
+    // 0xFC + 0x00 = H264, 0xFC + 0x01 = H265/HEVC.
+    _sendToClient(Packet(
+      type: PacketType.control,
+      timestampUs: DateTime.now().microsecondsSinceEpoch,
+      payload: Uint8List.fromList([0xFC, config.codec == CodecType.h265 ? 1 : 0]),
+    ));
+
+    // Tell the client the capture refresh rate so its display mode + HUD match.
+    _announceRefreshRate(config.refreshRate);
+
+    // Sync the overlay/HUD toggles so a fresh client matches the host.
+    sendUiFlags();
+
+    _streamHevc = config.codec == CodecType.h265;
+    _resyncing = false;
+    if (_wifiSession) _limitSendBufferFor(config.bitrate);
+
+    // Forward each encoded NAL unit from native → socket as FRAME_DATA.
+    _frameSub = _capture.framesFor(nativeId).listen(_forwardFrame);
+    if (_wifiSession) _startBitrateAdaptation(config.bitrate);
+  }
+
+  /// Wi-Fi: from now until the capture stops, the encoder's bitrate follows
+  /// what the link carries ([BitrateAdapter]), starting at the preset's.
+  void _startBitrateAdaptation(int presetBitrate) {
+    _stopBitrateAdaptation();
+    final adapter = _bitrate = BitrateAdapter(ceiling: presetBitrate);
+    streamBitrate.value = adapter.bitrate;
+    var ticks = 0;
+    _bitrateTimer = Timer.periodic(_bitrateSampleEvery, (_) {
+      if (!identical(adapter, _bitrate) || !peerTrusted) return;
+      if (ticks++ % 20 == 0) _noteRoundTrip();
+      final queued = socket.unackedBytes;
+      final trough = _queueTrough;
+      _queueTrough = null;
+      final next = adapter.sample(
+        nowUs: _bitrateClock.elapsedMicroseconds,
+        queuedBytes: trough == null ? queued : math.min(trough, queued),
+        deliveredBytes: socket.bytesSent - queued,
+        inFlight: _inFlight,
+      );
+      if (next == null) return;
+      log.i('Host: Wi-Fi link → encoder at ${next ~/ 1000} kbps');
+      streamBitrate.value = next;
+      _limitSendBufferFor(next);
+      _capture.setBitrate(next, session: nativeId);
+    });
+  }
+
+  /// The kernel's send buffer, as 400 ms of stream at [bitrate]. Room for a
+  /// keyframe (a quarter second of stream or so) on top of what is in
+  /// flight: a buffer smaller than one keeps the keyframe waiting in this
+  /// process past the congestion limit, and every keyframe on a link near
+  /// the rate becomes refused frames. And no more than that: what the
+  /// kernel holds is latency the adapter can no longer cut once at its
+  /// floor, so the buffer follows the rate down. Without a cap it grows to
+  /// megabytes and hides a slow link for seconds.
+  void _limitSendBufferFor(int bitrate) => socket.limitSendBuffer(
+      (bitrate / 8 * 0.4).round().clamp(64 * 1024, 2 * 1024 * 1024));
+
+  /// Keeps the last 30 s of heartbeat round trips (one a second).
+  void _noteRoundTrip() {
+    final ms = latencyMs.value;
+    if (ms <= 0) return;
+    _roundTrips.addLast(ms);
+    while (_roundTrips.length > 30) {
+      _roundTrips.removeFirst();
+    }
+  }
+
+  /// What a link that keeps up holds unacknowledged anyway: one round trip of
+  /// stream. The heartbeat's lowest recent round trip, which is the network's
+  /// without a queue (a queue delays the heartbeat too); 10 ms until one has
+  /// been measured. Never more than 40 ms, more than any healthy Wi-Fi LAN
+  /// needs: on a link that has been congested since the start every
+  /// heartbeat waited behind the queue, and the queue must still be judged.
+  Duration get _inFlight => Duration(
+      milliseconds:
+          _roundTrips.isEmpty ? 10 : math.min(_roundTrips.reduce(math.min), 40));
+
+  /// Synchronous, so a teardown can call it before its first await: nothing
+  /// may change the encoder's rate for a session that is ending.
+  void _stopBitrateAdaptation() {
+    _bitrateTimer?.cancel();
+    _bitrateTimer = null;
+    _bitrate = null;
+    _queueTrough = null;
+    _roundTrips.clear();
+    streamBitrate.value = null;
+  }
+
+  /// Sends one encoded frame. Over USB that is all it does. Over Wi-Fi the
+  /// socket refuses a frame when the link has fallen behind; from then on
+  /// every frame is dropped until the link has drained and the encoder has
+  /// produced a keyframe, so the tablet shows a short freeze instead of a
+  /// picture that lags further and further.
+  void _forwardFrame(Uint8List nal) {
+    if (!peerTrusted) return;
+    if (_resyncing) {
+      // Drained means the kernel too, not only this process's queue: the
+      // keyframe that resumes the picture is the largest frame there is, and
+      // behind a full kernel buffer it waits past the congestion limit and
+      // is refused in turn, again and again on a link near its capacity.
+      if (socket.isCongested || socket.unackedBytes > _resumeBelow) return;
+      if (!isKeyframeAccessUnit(nal, hevc: _streamHevc)) {
+        final now = DateTime.now();
+        if (now.difference(_lastResyncIdr) >
+            const Duration(milliseconds: 500)) {
+          _lastResyncIdr = now;
+          _capture.requestIdr(session: nativeId);
+        }
+        return;
+      }
+      _resyncing = false;
+      log.i('Host: link caught up — resuming from a keyframe');
+    }
+    if (_bitrate != null) {
+      final queued = socket.unackedBytes;
+      final trough = _queueTrough;
+      if (trough == null || queued < trough) _queueTrough = queued;
+    }
+    final sent = socket.sendFrame(Packet(
+      type: PacketType.frameData,
+      timestampUs: DateTime.now().microsecondsSinceEpoch,
+      payload: nal,
+    ));
+    if (!sent) {
+      _resyncing = true;
+      _bitrate?.frameRefused();
+      log.w('Host: Wi-Fi link is behind — dropping frames until it catches up');
+    }
+  }
+
+  /// What may still be unacknowledged when the picture resumes after a
+  /// refusal: about 30 ms of stream, at least 64 KB.
+  int get _resumeBelow => math.max(
+      64 * 1024, (streamBitrate.value ?? _captureBitrate) ~/ 8 * 3 ~/ 100);
+
+  /// 0xFB + refreshRate (Hz, single byte): the rate the host is encoding at.
+  void _announceRefreshRate(int hz) {
+    refreshRateHz.value = hz;
+    _sendToClient(Packet(
+      type: PacketType.control,
+      timestampUs: DateTime.now().microsecondsSinceEpoch,
+      payload: Uint8List.fromList([0xFB, hz.clamp(0, 255)]),
+    ));
+  }
+
+  /// Rebuilds the capture pipeline after the native side reports it died — the
+  /// Mac woke from sleep (ScreenCaptureKit, the CGVirtualDisplay and the
+  /// VideoToolbox session are all invalidated by a sleep/wake cycle) or the
+  /// SCStream stopped with an error. The ADB-reverse socket survives sleep, so
+  /// nothing else would recover — unless the link sat silent past the
+  /// heartbeat's 6 s timeout, in which case the reconnect path rebuilds the
+  /// whole session instead.
+  Future<void> _restartCapture() async {
+    if (!phase.value.isActive || spec.isReverseRemote) return;
+    if (_restarting) {
+      _restartAgain = true;
+      return;
+    }
+    _restarting = true;
+    // Every round belongs to the session this was asked for: one that ends
+    // meanwhile stops the rounds, and its successor is left alone.
+    final attempt = currentAttempt;
+    try {
+      do {
+        _restartAgain = false;
+        try {
+          await _exclusive(() async {
+            // The session may have ended while this waited its turn.
+            if (isCancelled(attempt) || !phase.value.isActive) return;
+            log.w('Host: rebuilding capture pipeline after wake/stream-stop');
+            // The new encoder starts at the preset's bitrate, and so does the
+            // adaptation that _startCapture sets up for it.
+            _stopBitrateAdaptation();
+            await _frameSub?.cancel();
+            _frameSub = null;
+            await _capture.stopCapture(session: nativeId);
+            await _capture.removeVirtualDisplay(session: nativeId);
+            await _startCapture(attempt);
+            if (isCancelled(attempt)) return;
+            await _capture.requestIdr(session: nativeId);
+            log.i('Host: capture pipeline rebuilt');
+          });
+        } catch (e, st) {
+          // Typically the displays are asleep: the wake asks again.
+          log.e('Host: capture restart failed', e, st);
+        }
+      } while (_restartAgain && !isCancelled(attempt) && phase.value.isActive);
+    } finally {
+      _restarting = false;
+      _restartAgain = false;
+    }
+  }
+
+  /// Runs the rebuild a wake or a stopped stream asks for, as they do.
+  @visibleForTesting
+  Future<void> rebuildCapture() => _restartCapture();
+
+  // ─── Native callbacks, routed here by the hub ─────────────────────────────
+
+  /// The Mac woke (every session hears it), or this session's stream
+  /// stopped with an error: rebuild the capture pipeline.
+  void captureNeedsRestart() {
+    if (_captureWired) _restartCapture();
+  }
+
+  /// Displays were rearranged (or another session's display came or went):
+  /// re-fetch the bounds input is mapped through.
+  void displayBoundsChanged() {
+    if (_captureWired) _refreshDisplayBounds();
+  }
+
+  /// Max preset: this session's encoder changed its rate (down under load,
+  /// back up once it recovers) — tell the tablet so its display mode + HUD
+  /// follow (same 0xFB it gets at stream start).
+  void frameRateChanged(int fps) {
+    if (_captureWired) _announceRefreshRate(fps);
+  }
+
+  /// Reverse remote: this session's decoder is fed pictures it cannot
+  /// decode; ask the tablet for a keyframe.
+  void decoderWantsKeyframe() {
+    if (_remoteWired) requestIdr();
+  }
+
+  /// Re-fetches the virtual/main display's screen-space bounds after the
+  /// native side reports the display arrangement changed (e.g. the virtual
+  /// display was dragged to a different position in System Settings →
+  /// Displays). Touch/mouse injection maps normalized coordinates through
+  /// these bounds, so a stale cache sends input to the display's old position.
+  Future<void> _refreshDisplayBounds() async {
+    if (!phase.value.isActive || spec.isReverseRemote) return;
+    final bounds = await _capture.getDisplayBounds(session: nativeId);
+    if ((bounds['w'] ?? 0) > 0 && (bounds['h'] ?? 0) > 0) {
+      _displayBounds = bounds;
+      log.i('Display bounds refreshed: $_displayBounds');
+    }
+  }
+
+  /// Reverse remote (Mac controls tablet): the tablet captures + encodes its own
+  /// screen, so the host decodes the incoming stream into a Flutter texture and
+  /// injects input back via `adb shell input`. No ScreenCaptureKit here.
+  Future<void> _startRemoteReceive() async {
+    // Tell the client to switch into capture mode.
+    _sendSessionMode();
+
+    // Stand up the decoder + texture sized to the tablet's native panel.
+    // From here the decoder's keyframe requests (routed here by the hub)
+    // become 0xFF to the tablet.
+    _remoteWired = true;
+    final p = panel;
+    final texId = await _remote.initialize(
+      session: nativeId,
+      codec: settings.codec,
+      width: p.width,
+      height: p.height,
+    );
+    remoteTextureId.value = texId;
+
+    // Here the *tablet's* encoder does the work, and Max's native @ 120 Hz is
+    // beyond it (its HEVC encoder manages well under 120 fps at 4K), so Max
+    // falls back to Quality's native @ 60 Hz / 20 Mbps in this direction.
+    final isMax = settings.encodePreset == EncodePreset.max;
+    final fps = isMax ? 60 : settings.refreshRateFor(p);
+    final bitrate = isMax ? 20000000 : settings.captureBitrateFor(p);
+    refreshRateHz.value = fps;
+
+    // Instruct the client to begin capturing + encoding.
+    // 0xF8 + codec + fps + bitrate(Mbps).
+    _sendToClient(Packet(
+      type: PacketType.control,
+      timestampUs: DateTime.now().microsecondsSinceEpoch,
+      payload: Uint8List.fromList([
+        0xF8,
+        settings.codec == CodecType.h265 ? 1 : 0,
+        fps.clamp(0, 255),
+        (bitrate ~/ 1000000).clamp(1, 255),
+      ]),
+    ));
+    // And a keyframe: a capture can outlive the last session (its 0xF7 never
+    // arrived when the link dropped), and then the tablet only goes on with
+    // pictures the new decoder cannot start from. Its periodic keyframes come
+    // with its frames, so on a still screen the next can be a long way off
+    // (measured: over a minute). A capture that is only starting begins with
+    // one anyway. Sent here, not with requestIdr(): the session is not
+    // streaming yet.
+    _sendToClient(Packet(
+      type: PacketType.control,
+      timestampUs: DateTime.now().microsecondsSinceEpoch,
+      payload: Uint8List.fromList([0xFF]),
+    ));
+    log.i('Host: reverse remote — decoding tablet stream (texture $texId)');
+  }
+
+  /// Reverse remote (USB): turns the tablet's panel off, or back on, while
+  /// the tablet keeps running, so the Mac still sees and drives it
+  /// ([AdbService.holdTabletScreenOff]). The choice is remembered once it has
+  /// worked (on is remembered at once: it cannot be refused) and applied
+  /// again when the next session's picture arrives. Returns null when done,
+  /// else why not. One call at a time ([changingTabletScreen]).
+  Future<String?> setTabletScreenOff(bool off) async {
+    final serial = activeDevice.value?.serial;
+    if (!spec.isReverseRemote ||
+        _wifiSession ||
+        !phase.value.isActive ||
+        !tabletStreaming.value ||
+        serial == null) {
+      return 'no live Mac-controls-tablet session';
+    }
+    if (changingTabletScreen.value) return 'already turning the screen';
+    changingTabletScreen.value = true;
+    final seq = ++_tabletScreenSeq;
+    final attempt = currentAttempt;
+    try {
+      if (!off) {
+        tabletScreenOff.value = false;
+        await settings.setTabletScreenOffFor(serial, false);
+        await _adb.releaseTabletScreenOff(serial: serial);
+        return null;
+      }
+      final error = await _adb.holdTabletScreenOff(serial: serial);
+      // The session may have ended while adb worked: its teardown released
+      // what was held then, not this.
+      if (isCancelled(attempt) || seq != _tabletScreenSeq) {
+        if (error == null) await _adb.releaseTabletScreenOff(serial: serial);
+        return 'the session ended';
+      }
+      if (error != null) {
+        log.w('Host: tablet screen not turned off: $error');
+        return error;
+      }
+      tabletScreenOff.value = true;
+      await settings.setTabletScreenOffFor(serial, true);
+      return null;
+    } finally {
+      if (seq == _tabletScreenSeq) changingTabletScreen.value = false;
+    }
+  }
+
+  /// The remembered choice, applied once this session's picture is coming
+  /// (the panel had to be on for the capture prompt) and the session is live,
+  /// whichever of the two comes last.
+  void _darkenTabletIfChosen() {
+    final serial = activeDevice.value?.serial;
+    if (spec.isReverseRemote &&
+        !_wifiSession &&
+        serial != null &&
+        settings.tabletScreenOffFor(serial) &&
+        tabletStreaming.value &&
+        phase.value.isActive &&
+        !tabletScreenOff.value &&
+        !changingTabletScreen.value) {
+      unawaited(setTabletScreenOff(true));
+    }
+  }
+
+  /// Reverse remote: the tablet [serial]'s panel came back on without being
+  /// asked (its helper's lease ran out, the cable came out, the helper
+  /// died). The hub routes [AdbService.onTabletScreenRestored] here.
+  void onTabletScreenRestored(String serial) {
+    if (serial == activeDevice.value?.serial) tabletScreenOff.value = false;
+  }
+
+  /// 0xF9 + sessionMode index + remoteDirection index.
+  void _sendSessionMode() {
+    _sendToClient(Packet(
+      type: PacketType.control,
+      timestampUs: DateTime.now().microsecondsSinceEpoch,
+      payload: Uint8List.fromList([
+        0xF9,
+        spec.mode.index,
+        // Over Wi-Fi this is always tablet-controls-Mac.
+        spec.direction.index,
+      ]),
+    ));
+  }
+
+  // ─── Reverse-remote input (Mac → tablet via adb) ──────────────────────────
+  // The remote-view widget reports normalized coords; map them to the tablet's
+  // device pixels and drive `adb shell input`.
+
+  void sendRemoteTap(double nx, double ny) {
+    final serial = activeDevice.value?.serial;
+    if (serial == null) return;
+    final p = panel;
+    _adb.inputTap(
+      serial: serial,
+      x: (nx * p.width).round(),
+      y: (ny * p.height).round(),
+    );
+  }
+
+  void sendRemoteSwipe(double nx1, double ny1, double nx2, double ny2,
+      {int durationMs = 50}) {
+    final serial = activeDevice.value?.serial;
+    if (serial == null) return;
+    final w = panel.width;
+    final h = panel.height;
+    _adb.inputSwipe(
+      serial: serial,
+      x1: (nx1 * w).round(),
+      y1: (ny1 * h).round(),
+      x2: (nx2 * w).round(),
+      y2: (ny2 * h).round(),
+      durationMs: durationMs,
+    );
+  }
+
+  @override
+  Future<void> onTeardown() async {
+    // Stop native wake callbacks from resurrecting capture after a disconnect.
+    // Cleared before the first await, so a callback landing mid-teardown is
+    // ignored rather than restarting capture behind it.
+    _captureWired = false;
+    _remoteWired = false;
+    _stopBitrateAdaptation();
+    if (Get.isRegistered<WifiDiscoveryService>()) _discovery.stopResponder();
+    final reverse = spec.isReverseRemote;
+    if (reverse) {
+      // Best-effort: tell the client to stop capturing before the socket drops.
+      _sendToClient(Packet(
+        type: PacketType.control,
+        timestampUs: DateTime.now().microsecondsSinceEpoch,
+        payload: Uint8List.fromList([0xF7]),
+      ));
+    }
+    // From here on nobody is authenticated, whoever the socket belongs to,
+    // and this attempt's USB key opens nothing any more.
+    _authedConnection = null;
+    _usbKey = null;
+    // Wake a connect() parked on the proof or the HELLO: its session is over,
+    // and it must find that out now, not when its timeout fires seconds later
+    // in the middle of the session that replaced it.
+    _settle(_Proof.none);
+    if (!(_helloReceived?.isCompleted ?? true)) _helloReceived!.complete();
+    // The tablet's panel comes back on with the session's end (adb is still
+    // there; and if it is not, the tablet's helper lights it by itself).
+    tabletStreaming.value = false;
+    tabletScreenOff.value = false;
+    _tabletScreenSeq++;
+    changingTabletScreen.value = false;
+    final device = activeDevice.value?.serial;
+    if (reverse && !_wifiSession && device != null && _ownsTunnel(device)) {
+      await _adb.releaseTabletScreenOff(serial: device);
+    }
+    // A drag cut off by the link dropping never gets its up: release the
+    // button, or every later injected move would post as a drag.
+    await _input.releaseAll(session: nativeId);
+    // Behind any start still in flight, so what it started is stopped too.
+    await _exclusive(() async {
+      // Again: a start that was mid-flight above may have set them since.
+      _captureWired = false;
+      _remoteWired = false;
+      _stopBitrateAdaptation();
+      await _frameSub?.cancel();
+      _frameSub = null;
+      if (reverse) {
+        await _remote.dispose(session: nativeId);
+        remoteTextureId.value = null;
+      } else {
+        await _capture.stopCapture(session: nativeId);
+        await _capture.removeVirtualDisplay(session: nativeId);
+      }
+    });
+    // A Wi-Fi session has no tunnel, and its "device" is an address.
+    final tunnelled = activeDevice.value?.serial;
+    if (!_wifiSession && tunnelled != null && _ownsTunnel(tunnelled)) {
+      await _onTunnel(tunnelled,
+          () => _adb.removeForward(serial: tunnelled, remotePort: linkPort));
+    }
+  }
+
+  /// The gate every inbound packet passes before anything looks at it,
+  /// heartbeats included. Nothing is admitted until this connection has
+  /// proved itself: over Wi-Fi with the pairing token, over USB with a hello
+  /// made with this attempt's session key.
+  @override
+  bool admitPacket(Packet packet) {
+    if (peerTrusted) return true;
+    // One packet decides, per connection: after it the client is either
+    // trusted or about to be turned away.
+    if (_proof?.isCompleted ?? true) return false;
+    if (packet.type != PacketType.control || packet.payload.isEmpty) {
+      return false;
+    }
+    final command = packet.payload[0];
+    if (_wifiSession) {
+      // 0xF5 — Tablet → Host: the pairing token. The only packet an
+      // unauthenticated Wi-Fi client can get a reaction to.
+      if (command != WifiPairingService.authCommand) return false;
+      final paired =
+          _identity?.tokenMatches(packet.payload.sublist(1)) ?? false;
+      if (paired) {
+        _trustConnection();
+        // The tablet has found this Mac. Until the host listens again there
+        // is nobody to answer, and no reason to keep a UDP port open.
+        if (Get.isRegistered<WifiDiscoveryService>()) {
+          _discovery.stopResponder();
+        }
+      }
+      _settle(paired ? _Proof.given : _Proof.wrong);
+    } else {
+      // 0xF4 — Tablet → Host: the hello of a USB session. The only packet an
+      // unproven USB client can get a reaction to.
+      if (command != UsbSessionService.helloCommand) return false;
+      final key = _usbKey;
+      final nonce = key == null
+          ? null
+          : UsbSessionService.verifyHello(key, packet.payload);
+      if (key != null && nonce != null) {
+        // One session per key: a hello cannot be played back.
+        _usbKey = null;
+        _trustConnection();
+        // 0xF3 — Host → Tablet: this Mac holds the key too. Sent only now,
+        // so a client without the key learns nothing from this side.
+        _sendToClient(Packet(
+          type: PacketType.control,
+          timestampUs: DateTime.now().microsecondsSinceEpoch,
+          payload: UsbSessionService.buildAnswer(key, nonce),
+        ));
+      }
+      _settle(nonce != null ? _Proof.given : _Proof.wrong);
+    }
+    return false;
+  }
+
+  void _trustConnection() {
+    _authedConnection = socket.connectionId;
+    socket.trustPeer();
+  }
+
+  void _settle(_Proof proof) {
+    if (!(_proof?.isCompleted ?? true)) _proof!.complete(proof);
+  }
+
+  @override
+  void onRolePacket(Packet packet) {
+    switch (packet.type) {
+      // Reverse remote: encoded frames coming FROM the tablet → decode them.
+      case PacketType.frameData when spec.isReverseRemote:
+        _remote.feedNal(nativeId, packet.payload);
+        if (!tabletStreaming.value) {
+          tabletStreaming.value = true;
+          _darkenTabletIfChosen();
+        }
+        break;
+
+      // HELLO from the client: version + platform + native panel size.
+      case PacketType.control
+          when packet.payload.isNotEmpty && packet.payload[0] == 0x01:
+        _onHello(packet.payload);
+        break;
+
+      // Host injects input received from the tablet.
+      case PacketType.touchEvent:
+        _injectTouch(packet);
+        break;
+      case PacketType.mouseEvent:
+        _injectMouse(packet);
+        break;
+      case PacketType.keyEvent:
+        _injectKey(packet);
+        break;
+
+      // 0xFF — Tablet → Host: request a fresh keyframe (IDR).
+      case PacketType.control
+          when packet.payload.isNotEmpty && packet.payload[0] == 0xFF:
+        _capture.requestIdr(session: nativeId);
+        break;
+
+      default:
+        break;
+    }
+  }
+
+  /// Parse the client HELLO: [version, platform, panelW hi, panelW lo,
+  /// panelH hi, panelH lo, panel max refresh Hz]. Older clients send fewer
+  /// bytes — then the last-known values are kept.
+  void _onHello(Uint8List p) {
+    final known = panel;
+    var w = known.width, h = known.height, hz = known.maxHz;
+    if (p.length >= 6) {
+      final pw = (p[2] << 8) | p[3];
+      final ph = (p[4] << 8) | p[5];
+      if (pw >= 320 && ph >= 240 && pw <= 8192 && ph <= 8192) {
+        w = pw;
+        h = ph;
+        log.i('Host: client panel $w×$h');
+      }
+    }
+    if (p.length >= 7 && p[6] >= 24) {
+      hz = p[6];
+      log.i('Host: client panel max refresh $hz Hz');
+    }
+    _panel = ClientPanel(w, h, hz);
+    settings.setClientPanelFor(key, _panel!);
+    if (!(_helloReceived?.isCompleted ?? true)) _helloReceived!.complete();
+  }
+
+  // Without valid bounds, normalized coords can't be mapped to the screen.
+  bool get _hasBounds => (_displayBounds['w'] ?? 0) > 0;
+
+  void _injectTouch(Packet packet) {
+    if (!_hasBounds) return;
+    // Map a single primary pointer to a mouse move/click on macOS.
+    final t = PacketCodec.decodeTouch(packet.payload);
+    if (t == null || t.pointers.isEmpty) return;
+    final p = t.pointers.first;
+    final action = switch (t.action) {
+      TouchAction.down => MouseAction.down,
+      TouchAction.up => MouseAction.up,
+      TouchAction.move => MouseAction.move,
+      TouchAction.cancel => MouseAction.up,
+    };
+    _input.injectMouse(
+      session: nativeId,
+      MouseEventModel(
+        normalizedX: p.normalizedX,
+        normalizedY: p.normalizedY,
+        button: MouseButton.left,
+        action: action,
+        timestampUs: t.timestampUs,
+      ),
+      _displayBounds,
+    );
+  }
+
+  void _injectMouse(Packet packet) {
+    if (!_hasBounds) return;
+    final m = PacketCodec.decodeMouse(packet.payload);
+    if (m != null) _input.injectMouse(m, _displayBounds, session: nativeId);
+  }
+
+  void _injectKey(Packet packet) {
+    final k = PacketCodec.decodeKey(packet.payload);
+    if (k != null) _input.injectKey(k, session: nativeId);
+  }
+}
+
+/// What a client that just connected did about proving itself.
+enum _Proof {
+  /// It holds the pairing token (Wi-Fi) or the session key (USB).
+  given,
+
+  /// It tried, with the wrong one. Over USB also a hello with none.
+  wrong,
+
+  /// Nothing within the time allowed, or the session ended first.
+  none,
+}
+
+/// Each tablet's adb reverse rule (its tcp:7001), as the sessions the hub
+/// makes for that tablet, one after another, take turns at it. Changes to
+/// one tablet's rule run one at a time, in the order they were asked for,
+/// and only the newest session for the tablet may remove it or let go of
+/// its screen hold: an older session whose adb call returns late (adb can
+/// take seconds) ends without undoing what the newer one set up.
+class TabletTunnels {
+  final _queues = <String, PipelineQueue>{};
+  final _owners = <String, Object>{};
+
+  /// [owner] is now [serial]'s newest session.
+  void claim(String serial, Object owner) => _owners[serial] = owner;
+
+  bool owns(String serial, Object owner) =>
+      !_owners.containsKey(serial) || identical(_owners[serial], owner);
+
+  Future<T> run<T>(String serial, Future<T> Function() operation) =>
+      (_queues[serial] ??= PipelineQueue()).run(operation);
+}

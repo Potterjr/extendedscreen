@@ -11,8 +11,11 @@ import 'package:extendedscreen/modules/remote_screen/host/remote_video_channel.d
 import 'package:extendedscreen/shared/connection/adb_service.dart';
 import 'package:extendedscreen/shared/connection/connection_state.dart';
 import 'package:extendedscreen/shared/connection/host_connection_manager.dart';
+import 'package:extendedscreen/shared/connection/host_session.dart';
+import 'package:extendedscreen/shared/connection/pipeline_queue.dart';
 import 'package:extendedscreen/shared/connection/socket_service.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
+import 'package:extendedscreen/shared/models/link_type.dart';
 import 'package:extendedscreen/shared/models/touch_event_model.dart';
 import 'package:extendedscreen/shared/services/logger_service.dart';
 import 'package:extendedscreen/shared/services/settings_service.dart';
@@ -205,7 +208,7 @@ void main() {
   });
 
   group('rebuilding the capture', () {
-    late HostConnectionManager host;
+    late HostSession host;
     late int starts;
 
     /// The host's capture as native answers it; [startCapture] decides each
@@ -233,8 +236,15 @@ void main() {
       Get.put<AdbService>(AdbService());
       Get.put(ScreenCaptureChannel());
       Get.put(InputInjectChannel());
-      host = HostConnectionManager(socket: SocketService())
-        ..phase.value = ConnectionPhase.streaming;
+      host = HostSession(
+        key: 'TABLET',
+        link: LinkType.usb,
+        serial: 'TABLET',
+        pipeline: PipelineQueue(),
+        socket: SocketService(),
+      )..phase.value = ConnectionPhase.streaming;
+      // The plugin's callbacks reach a session through the hub.
+      HostConnectionManager(socket: SocketService()).sessions['TABLET'] = host;
     });
 
     test('a wake that comes while a rebuild cannot work yet (the displays '
@@ -287,10 +297,17 @@ void main() {
     });
   });
 
-  test('every host connection gets an id of its own, never reused', () {
+  test('every host session gets an id of its own, never reused', () {
     Get.put<AdbService>(AdbService());
-    final a = HostConnectionManager(socket: SocketService());
-    final b = HostConnectionManager(socket: SocketService());
+    HostSession session() => HostSession(
+          key: 'TABLET',
+          link: LinkType.usb,
+          serial: 'TABLET',
+          pipeline: PipelineQueue(),
+          socket: SocketService(),
+        );
+    final a = session();
+    final b = session();
     expect(a.nativeId, isNot(b.nativeId));
     expect(a.nativeId, greaterThan(0), reason: '0 is what a call without one means');
   });

@@ -1,4 +1,5 @@
 import 'package:get/get.dart';
+import 'package:extendedscreen/shared/models/client_panel.dart';
 import 'package:extendedscreen/shared/services/settings_service.dart';
 
 enum DisplayMode { extend, mirror }
@@ -47,14 +48,10 @@ extension EncodePresetX on EncodePreset {
   /// Bitrate in Mbps, e.g. "20 Mbps".
   String get bitrateLabel => '${(bitrate / 1000000).round()} Mbps';
 
-  // Native panel of the connected client (physical px, learned from its HELLO
-  // and persisted) — fixed presets are defined relative to this, so they adapt
-  // to whatever device is plugged in.
-  static int get _panelW => Get.find<SettingsService>().clientPanelWidth.value;
-  static int get _panelH => Get.find<SettingsService>().clientPanelHeight.value;
-  // Top refresh rate the connected client's panel supports (from its HELLO).
-  static int get _panelMaxHz =>
-      Get.find<SettingsService>().clientMaxRefreshHz.value;
+  // The last client panel a HELLO reported (persisted), for the getters
+  // below that take none: the labels Settings shows. A session sizes its
+  // capture from its own tablet's panel with the `…For` variants.
+  static ClientPanel get _lastPanel => Get.find<SettingsService>().lastClientPanel;
 
   // Quality's density (20 Mbps at native 60 Hz) in bits per pixel per frame,
   // so Max scales its bitrate with whatever resolution × rate it lands on.
@@ -62,14 +59,17 @@ extension EncodePresetX on EncodePreset {
 
   // Logical width/height passed to CGVirtualDisplay (panel ÷ 2 = HiDPI points).
   // For `custom` these are fallbacks — the live values come from SettingsService.
-  int get width => switch (this) {
+  int get width => widthFor(_lastPanel);
+  int get height => heightFor(_lastPanel);
+
+  int widthFor(ClientPanel panel) => switch (this) {
         EncodePreset.custom => 1920,
-        _ => _panelW ~/ 2,
+        _ => panel.width ~/ 2,
       };
 
-  int get height => switch (this) {
+  int heightFor(ClientPanel panel) => switch (this) {
         EncodePreset.custom => 1200,
-        _ => _panelH ~/ 2,
+        _ => panel.height ~/ 2,
       };
 
   // Performance uses 1.0x (no HiDPI): encodes at half the panel resolution
@@ -82,10 +82,13 @@ extension EncodePresetX on EncodePreset {
         EncodePreset.custom => 1.0,
       };
 
-  int get bitrate => switch (this) {
-        EncodePreset.max => (_qualityBitsPerPixel * _panelW * _panelH * _panelMaxHz)
-            .round()
-            .clamp(8000000, 50000000),
+  int get bitrate => bitrateFor(_lastPanel);
+
+  int bitrateFor(ClientPanel panel) => switch (this) {
+        EncodePreset.max =>
+          (_qualityBitsPerPixel * panel.width * panel.height * panel.maxHz)
+              .round()
+              .clamp(8000000, 50000000),
         EncodePreset.quality => 20000000,
         EncodePreset.balanced => 8000000,
         EncodePreset.performance => 12000000,
@@ -94,8 +97,10 @@ extension EncodePresetX on EncodePreset {
 
   // Refresh rate is tied to the preset (no separate frame-rate setting).
   // Performance trades resolution for a high 120Hz capture; the rest run 60Hz.
-  int get refreshRate => switch (this) {
-        EncodePreset.max => _panelMaxHz,
+  int get refreshRate => refreshRateFor(_lastPanel);
+
+  int refreshRateFor(ClientPanel panel) => switch (this) {
+        EncodePreset.max => panel.maxHz,
         EncodePreset.quality => 60,
         EncodePreset.balanced => 60,
         EncodePreset.performance => 120,

@@ -208,7 +208,9 @@ class SocketService extends GetxService {
     _paced = false;
     _untrustedLimit = untrustedPayloadLimit;
     _inboundLimit = untrustedPayloadLimit ?? maxPayloadBytes;
-    _server = await ServerSocket.bind(host, port, shared: true);
+    // Not shared: a second listener on the same port in this process would
+    // quietly split the connections between the two.
+    _server = await ServerSocket.bind(host, port);
     _clientReady = Completer<void>();
     _serverSub = _server!.listen(_accept, onError: _onError);
   }

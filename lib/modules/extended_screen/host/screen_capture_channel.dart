@@ -160,6 +160,15 @@ class ScreenCaptureChannel extends GetxService {
     } catch (_) {}
   }
 
+  /// Stops and forgets [session] natively: its capture, encoder, virtual
+  /// display and content rect. For a session that is gone for good (its id
+  /// is never used again). Returns once all of that is gone.
+  Future<void> disposeSession({required int session}) async {
+    try {
+      await _channel.invokeMethod('disposeSession', {'session': session});
+    } catch (_) {}
+  }
+
   /// Returns the screen-space bounds of the display [session] captures: its
   /// virtual display (extend mode), or the main display (mirror mode, or
   /// extend when the virtual display never appeared and capture fell back).

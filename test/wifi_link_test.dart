@@ -175,6 +175,13 @@ class _NoAdb extends AdbService {
     return devices;
   }
 
+  /// Every `adb reverse` asked for: the device, its port and the Mac's.
+  final reverses = <({String serial, int remote, int local})>[];
+
+  // With [tunnel], what `adb reverse` puts on the tablet: a listener on its
+  // port that joins each connection to the Mac port the rule points at.
+  final _forwarders = <int, _Forwarder>{};
+
   @override
   Future<bool> reverseForward({
     required String serial,
@@ -183,12 +190,74 @@ class _NoAdb extends AdbService {
   }) async {
     calls++;
     forwardedTo.add(serial);
-    return tunnel;
+    reverses.add((serial: serial, remote: remotePort, local: localPort));
+    if (!tunnel) return false;
+    // Without --no-rebind adb re-points a rule the port already has.
+    (_forwarders[remotePort] ??= await _Forwarder.open(remotePort)).target =
+        localPort;
+    return true;
   }
 
   @override
-  Future<void> removeForward({required String serial, int? remotePort}) async =>
-      calls++;
+  Future<void> removeForward({required String serial, int? remotePort}) async {
+    calls++;
+    if (remotePort == null) return closeForwarders();
+    await _forwarders.remove(remotePort)?.close();
+  }
+
+  /// Takes every rule down, as unplugging the tablet would.
+  Future<void> closeForwarders() async {
+    final all = _forwarders.values.toList();
+    _forwarders.clear();
+    for (final f in all) {
+      await f.close();
+    }
+  }
+}
+
+/// The tablet's end of an `adb reverse` rule: a listener on the tablet-side
+/// port that joins each connection to the Mac port the rule points at when
+/// it arrives, as adb's tunnel does (it accepts on the tablet whether or not
+/// the Mac side answers, and then drops the connection).
+class _Forwarder {
+  _Forwarder._(this._server) {
+    _server.listen((tablet) async {
+      _ends.add(tablet);
+      final Socket mac;
+      try {
+        mac = await Socket.connect('127.0.0.1', target);
+      } catch (_) {
+        tablet.destroy();
+        return;
+      }
+      _ends.add(mac);
+      void join(Socket from, Socket to) {
+        from.listen((chunk) {
+          try {
+            to.add(chunk);
+          } catch (_) {}
+        }, onDone: to.destroy, onError: (_) => to.destroy());
+        from.done.then((_) {}, onError: (_) {});
+      }
+
+      join(tablet, mac);
+      join(mac, tablet);
+    });
+  }
+
+  static Future<_Forwarder> open(int port) async =>
+      _Forwarder._(await ServerSocket.bind(InternetAddress.loopbackIPv4, port));
+
+  final ServerSocket _server;
+  final _ends = <Socket>[];
+  int target = 0;
+
+  Future<void> close() async {
+    for (final s in _ends) {
+      s.destroy();
+    }
+    await _server.close();
+  }
 }
 
 /// The Mac's decoder for the tablet's picture (reverse remote), with nothing
@@ -1809,6 +1878,7 @@ Future<void> main() async {
           DeviceModel(serial: 'TABLET', status: DeviceStatus.connected),
         ]
         ..tablet = _fromAdb;
+      addTearDown(adb.closeForwarders);
       capture = Get.put<ScreenCaptureChannel>(_FakeCapture()) as _FakeCapture;
       Get.put<InputInjectChannel>(_FakeInput());
       Get.put(VideoDecoderChannel());
@@ -1840,10 +1910,25 @@ Future<void> main() async {
 
     Future<void> usbSession() async {
       hostConnect = host.connect(serial: 'TABLET');
-      await _until(() => hostSocket.serverPort != null);
+      // The tunnel is up and the tablet has this attempt's key.
+      await _until(() => Get.find<UsbSessionService>().key != null);
       await client.connect();
       await _until(() => host.phase.value == ConnectionPhase.streaming);
     }
+
+    test("the Mac listens for the tablet on a port of its own, and adb joins "
+        "the tablet's port to it", () async {
+      await usbSession();
+      final rule = adb.reverses.last;
+      expect(rule.serial, 'TABLET');
+      expect(rule.remote, port, reason: "the tablet's side stays where it dials");
+      expect(rule.local, hostSocket.serverPort);
+      expect(rule.local, isNot(port));
+
+      await host.disconnect();
+      expect(adb._forwarders, isEmpty, reason: 'its rule went with it');
+      expect(host.sessions, isEmpty);
+    }, skip: _opensslMissing);
 
     test('reverse remote: as the Mac starts receiving it asks the tablet for '
         'a keyframe too, after the request to capture', () async {
@@ -2090,6 +2175,7 @@ Future<void> main() async {
           DeviceModel(serial: 'TABLET', status: DeviceStatus.connected),
         ]
         ..tablet = _fromAdb;
+      addTearDown(adb.closeForwarders);
       capture = Get.put<ScreenCaptureChannel>(_FakeCapture()) as _FakeCapture;
       input = Get.put<InputInjectChannel>(_FakeInput()) as _FakeInput;
       Get.put(VideoDecoderChannel());

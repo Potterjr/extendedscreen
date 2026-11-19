@@ -2,6 +2,7 @@ import 'dart:ui';
 
 import 'package:get/get.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:extendedscreen/shared/models/client_panel.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
 import 'package:extendedscreen/shared/models/link_type.dart';
 import 'package:extendedscreen/shared/models/session_mode.dart';
@@ -26,7 +27,13 @@ class SettingsService extends GetxService {
   static const _keyPerfOverlay = 'perf_overlay';
   static const _keyHudOverlay = 'hud_overlay';
   static const _keyKeepMacCursor = 'keep_mac_cursor';
+  // Where a single tablet's screen-off choice used to live, before it was
+  // kept per tablet. Read once, by [_migrateToPerTablet], then removed.
   static const _keyTabletScreenOff = 'tablet_screen_off';
+  // Per tablet: `tablet_screen_off.<serial>` and `client_panel.<key>` (the
+  // session key: the adb serial over USB).
+  static const _keyTabletScreenOffPrefix = 'tablet_screen_off.';
+  static const _keyClientPanelPrefix = 'client_panel.';
   static const _keyEncodePreset = 'encode_preset';
   static const _keyCodec = 'codec';
   static const _keyLocale = 'locale';
@@ -41,10 +48,6 @@ class SettingsService extends GetxService {
   // Host only: the tablet's touches borrow the Mac's single cursor and hand it
   // back to where the user left it after each gesture (InputInjectPlugin).
   final keepMacCursor = true.obs;
-  // Host only, reverse remote: the tablet's screen goes dark while the Mac
-  // views and controls it (the last choice on the remote view, applied again
-  // when the next session's picture arrives).
-  final tabletScreenOff = false.obs;
   // Reactive mirror of the active codec so UI (e.g. the home card) updates live.
   final codecRx = CodecType.h264.obs;
   // Reactive UI language code ('en' / 'th'); drives the language picker.
@@ -79,7 +82,6 @@ class SettingsService extends GetxService {
     showPerformanceOverlay.value = _prefs.getBool(_keyPerfOverlay) ?? false;
     showHudOverlay.value = _prefs.getBool(_keyHudOverlay) ?? true;
     keepMacCursor.value = _prefs.getBool(_keyKeepMacCursor) ?? true;
-    tabletScreenOff.value = _prefs.getBool(_keyTabletScreenOff) ?? false;
     codecRx.value = switch (_prefs.getString(_keyCodec)) {
       'h265' => CodecType.h265,
       'h264' => CodecType.h264,
@@ -96,6 +98,30 @@ class SettingsService extends GetxService {
     linkTypeRx.value = _prefs.getString(_keyLinkType) == LinkType.wifi.name
         ? LinkType.wifi
         : LinkType.usb;
+    await _migrateToPerTablet();
+  }
+
+  /// Once: what used to be kept for the one tablet (its panel, the
+  /// screen-off choice) becomes the last-used device's own, and the old
+  /// screen-off key goes, so no other tablet inherits it later by becoming
+  /// the last-used one. The global panel stays: it is the last panel any
+  /// tablet reported.
+  Future<void> _migrateToPerTablet() async {
+    final last = _prefs.getString(_keyLastDevice);
+    final off = _prefs.getBool(_keyTabletScreenOff);
+    if (off != null) {
+      if (last != null &&
+          _prefs.getBool('$_keyTabletScreenOffPrefix$last') == null) {
+        await _prefs.setBool('$_keyTabletScreenOffPrefix$last', off);
+      }
+      await _prefs.remove(_keyTabletScreenOff);
+    }
+    if (last != null &&
+        _prefs.containsKey(_keyPanelW) &&
+        _prefs.getString('$_keyClientPanelPrefix$last') == null) {
+      await _prefs.setString(
+          '$_keyClientPanelPrefix$last', lastClientPanel.encode());
+    }
   }
 
   LinkType get linkType => linkTypeRx.value;
@@ -177,6 +203,25 @@ class SettingsService extends GetxService {
       sessionMode == SessionMode.remoteControl
           ? DisplayMode.mirror
           : displayMode;
+
+  /// The panel the last HELLO reported, whichever tablet sent it: what the
+  /// Settings labels show, and the fallback for a tablet never seen before.
+  ClientPanel get lastClientPanel => ClientPanel(clientPanelWidth.value,
+      clientPanelHeight.value, clientMaxRefreshHz.value);
+
+  /// The panel the tablet behind session [key] reported last time, if it
+  /// ever did (the last-used device from before panels were kept per tablet
+  /// has the one it reported then).
+  ClientPanel? clientPanelFor(String key) =>
+      ClientPanel.decode(_prefs.getString('$_keyClientPanelPrefix$key'));
+
+  /// Host: record [panel] as the one session [key]'s tablet reported (its
+  /// HELLO), and as the last one reported.
+  Future<void> setClientPanelFor(String key, ClientPanel panel) async {
+    await _prefs.setString('$_keyClientPanelPrefix$key', panel.encode());
+    await setClientPanel(panel.width, panel.height);
+    await setClientMaxRefresh(panel.maxHz);
+  }
 
   /// Host: record the client's native panel (from its HELLO). Landscape is
   /// enforced on the client, so width is always the long side.
@@ -261,20 +306,29 @@ class SettingsService extends GetxService {
   // stays at the panel's logical size (panel ÷ 2, HiDPI) like every fixed
   // preset; only the encode scale changes, so "half" really halves the pixels
   // (it used to be doubled as logical points: 1480×924 encoded at 2960×1848).
-  int get _panelLogicalWidth => clientPanelWidth.value ~/ 2;
-  int get captureWidth =>
-      isCustomPreset ? _panelLogicalWidth : encodePreset.width;
-  int get captureHeight =>
-      isCustomPreset ? clientPanelHeight.value ~/ 2 : encodePreset.height;
-  double get captureScaleFactor => isCustomPreset
-      ? customWidth / _panelLogicalWidth
-      : encodePreset.scaleFactor;
-  int get captureBitrate =>
-      isCustomPreset ? customBitrateMbps * 1000000 : encodePreset.bitrate;
+  //
+  // Each `…For` takes the panel of the tablet a session captures for; the
+  // getters without one use the last panel a HELLO reported.
+  int get captureWidth => captureWidthFor(lastClientPanel);
+  int get captureHeight => captureHeightFor(lastClientPanel);
+  double get captureScaleFactor => captureScaleFactorFor(lastClientPanel);
+  int get captureBitrate => captureBitrateFor(lastClientPanel);
 
   /// Effective refresh rate of the active preset (custom-aware).
-  int get refreshRate =>
-      isCustomPreset ? customRefreshRate : encodePreset.refreshRate;
+  int get refreshRate => refreshRateFor(lastClientPanel);
+
+  int captureWidthFor(ClientPanel panel) =>
+      isCustomPreset ? panel.width ~/ 2 : encodePreset.widthFor(panel);
+  int captureHeightFor(ClientPanel panel) =>
+      isCustomPreset ? panel.height ~/ 2 : encodePreset.heightFor(panel);
+  double captureScaleFactorFor(ClientPanel panel) => isCustomPreset
+      ? customWidth / (panel.width ~/ 2)
+      : encodePreset.scaleFactor;
+  int captureBitrateFor(ClientPanel panel) => isCustomPreset
+      ? customBitrateMbps * 1000000
+      : encodePreset.bitrateFor(panel);
+  int refreshRateFor(ClientPanel panel) =>
+      isCustomPreset ? customRefreshRate : encodePreset.refreshRateFor(panel);
 
   CodecType get codec => codecRx.value;
 
@@ -318,8 +372,12 @@ class SettingsService extends GetxService {
     return _prefs.setBool(_keyKeepMacCursor, v);
   }
 
-  Future<void> setTabletScreenOff(bool v) {
-    tabletScreenOff.value = v;
-    return _prefs.setBool(_keyTabletScreenOff, v);
-  }
+  /// Reverse remote: whether the tablet [serial]'s panel was last chosen to
+  /// go dark while the Mac views and drives it (the remote view's toggle,
+  /// applied again when its next session's picture arrives).
+  bool tabletScreenOffFor(String serial) =>
+      _prefs.getBool('$_keyTabletScreenOffPrefix$serial') ?? false;
+
+  Future<void> setTabletScreenOffFor(String serial, bool v) =>
+      _prefs.setBool('$_keyTabletScreenOffPrefix$serial', v);
 }

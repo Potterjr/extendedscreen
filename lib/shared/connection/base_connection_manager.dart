@@ -167,6 +167,11 @@ abstract class BaseConnectionManager extends GetxService
   @protected
   Duration get reconnectDelay => const Duration(seconds: 5);
 
+  /// The wait before the retry that [handleLinkFailure] is arming now. Called
+  /// once per failure: the host's sessions back off here.
+  @protected
+  Duration nextRetryDelay() => reconnectDelay;
+
   @override
   void onInit() {
     super.onInit();
@@ -328,7 +333,7 @@ abstract class BaseConnectionManager extends GetxService
     if (_attempt != failure) return;
     setPhase(ConnectionPhase.error);
     _reconnectTimer?.cancel();
-    _reconnectTimer = Timer(reconnectDelay, () {
+    _reconnectTimer = Timer(nextRetryDelay(), () {
       _recovering = false;
       connect();
     });
