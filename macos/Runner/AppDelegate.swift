@@ -4,6 +4,15 @@ import FlutterMacOS
 @main
 class AppDelegate: FlutterAppDelegate {
 
+  // The entry point: NSApplicationMain, as @main gives an app delegate by
+  // default, unless this process is the short-lived child that switches a
+  // virtual display to HiDPI (VirtualDisplayModeHelper), which exits before
+  // anything of the app starts.
+  static func main() {
+    VirtualDisplayModeHelper.runIfAsked()
+    _ = NSApplicationMain(CommandLine.argc, CommandLine.unsafeArgv)
+  }
+
   private var statusItem: NSStatusItem?
 
   override func applicationDidFinishLaunching(_ notification: Notification) {

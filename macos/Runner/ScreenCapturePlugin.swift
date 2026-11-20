@@ -18,6 +18,107 @@ private func esLog(_ message: String) {
     FileHandle.standardError.write(Data((message + "\n").utf8))
 }
 
+/// Puts one of this app's virtual displays into its HiDPI mode from a child
+/// process. macOS remembers each display's mode per UUID (vendor, product,
+/// serial) and set of attached displays, so a virtual display that once came
+/// up 1x (an emulator or a foldable, from before createVirtualDisplay
+/// reported the right millimetres) comes up 1x there again, at its pixel
+/// size, with tiny text on the tablet. Switching it with
+/// CGConfigureDisplayWithDisplayMode from the app itself works, but the
+/// display then stays active after it is released, until the process exits
+/// (measured on macOS 27.2: still listed 8 s after release), so the app
+/// would keep a phantom display.
+/// The same switch made by a short-lived child process leaves no such hold
+/// (measured: released in 0.13 s), and macOS saves it, so the next display
+/// with that serial comes up HiDPI by itself. The child is this executable,
+/// run with `flag` before NSApplicationMain (see AppDelegate.main), so it
+/// never becomes an app.
+enum VirtualDisplayModeHelper {
+    static let flag = "--extendedscreen-set-hidpi"
+    /// The descriptor's vendor and product: the child touches no display
+    /// that reports anything else, so it can never change a real one.
+    static let vendorID: UInt32 = 0x3456
+    static let productID: UInt32 = 0x1234
+
+    /// In the child: does the switch and exits. In the app: returns at once.
+    static func runIfAsked() {
+        let a = CommandLine.arguments
+        // The flag anywhere means this process is the child, whatever else
+        // came with it: a malformed call must exit with 2, never fall through
+        // to NSApplicationMain, which would start a second, full app (its
+        // auto-connect then takes tablets and adb tunnels from the real one).
+        guard a.contains(flag) else { return }
+        guard a.count == 5, a[1] == flag else { exit(2) }
+        exit(switchToHiDPI(display: a[2], width: a[3], height: a[4]))
+    }
+
+    /// Exit codes: 0 switched (or already w×h at 2x), 2 bad arguments,
+    /// 3 not one of our virtual displays, 4 another HiDPI mode is set (the
+    /// user's choice, left alone), 5 no w×h@2x mode, 6 the switch failed.
+    private static func switchToHiDPI(display: String, width: String, height: String) -> Int32 {
+        guard let id = CGDirectDisplayID(display), let w = Int(width), let h = Int(height),
+              w > 0, h > 0 else { return 2 }
+        guard CGDisplayVendorNumber(id) == vendorID, CGDisplayModelNumber(id) == productID else {
+            return 3
+        }
+        if let current = CGDisplayCopyDisplayMode(id), current.width > 0 {
+            if current.width == w && current.height == h && current.pixelWidth == 2 * w {
+                return 0
+            }
+            if current.pixelWidth > current.width { return 4 }
+        }
+        let options = [kCGDisplayShowDuplicateLowResolutionModes: kCFBooleanTrue] as CFDictionary
+        let modes = (CGDisplayCopyAllDisplayModes(id, options) as? [CGDisplayMode]) ?? []
+        guard let mode = modes.first(where: {
+            $0.width == w && $0.height == h && $0.pixelWidth == 2 * w && $0.pixelHeight == 2 * h
+        }) else { return 5 }
+        var config: CGDisplayConfigRef?
+        guard CGBeginDisplayConfiguration(&config) == .success else { return 6 }
+        guard CGConfigureDisplayWithDisplayMode(config, id, mode, nil) == .success else {
+            CGCancelDisplayConfiguration(config)
+            return 6
+        }
+        return CGCompleteDisplayConfiguration(config, .forSession) == .success ? 0 : 6
+    }
+
+    /// In the app: runs the child for `display` and calls back on the main
+    /// thread with its exit code, or nil if it could not be run or took over
+    /// 3 s (it is then killed).
+    static func run(display: CGDirectDisplayID, width: Int, height: Int,
+                    completion: @escaping (Int32?) -> Void) {
+        guard let exe = Bundle.main.executableURL else {
+            completion(nil)
+            return
+        }
+        let p = Process()
+        p.executableURL = exe
+        p.arguments = [flag, "\(display)", "\(width)", "\(height)"]
+        p.standardInput = FileHandle.nullDevice
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        var answered = false
+        let answer: (Int32?) -> Void = { code in
+            guard !answered else { return }
+            answered = true
+            completion(code)
+        }
+        p.terminationHandler = { proc in
+            let code = proc.terminationReason == .exit ? proc.terminationStatus : nil
+            DispatchQueue.main.async { answer(code) }
+        }
+        do {
+            try p.run()
+        } catch {
+            answer(nil)
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+            if p.isRunning { p.terminate() }
+            answer(nil)
+        }
+    }
+}
+
 /// Where a session's captured display sits inside its encoded frame,
 /// normalised to the frame (0…1). The frame is always panel-shaped, so a
 /// display of another shape (Mirror from a notched MacBook or a 16:9 monitor
@@ -516,20 +617,34 @@ private final class CaptureSession: NSObject, SCStreamDelegate, SCStreamOutput {
             let r = args["refreshRate"] as? Int ?? 60
             let serial = args["serialNum"] as? Int ?? 0x0001
             let name = args["name"] as? String ?? "Extended Screen"
-            let pw = w * 2, ph = h * 2  // physical pixels
+            // The display's own size: w×h, grown for a panel too small for a
+            // HiDPI desktop (see hiDPISize). Capture still encodes w×h ×
+            // scaleFactor (startCapture), the same shape, so the tablet sees
+            // the picture scaled to its panel; input maps through the
+            // display's bounds.
+            let (vw, vh) = Self.hiDPISize(w: w, h: h)
+            let pw = vw * 2, ph = vh * 2  // physical pixels
 
             let descriptor = CGVirtualDisplayDescriptor()
             descriptor.queue = DispatchQueue.global(qos: .userInteractive)
             descriptor.name = name
             descriptor.maxPixelsWide = UInt32(pw)
             descriptor.maxPixelsHigh = UInt32(ph)
-            // ~220 PPI → macOS treats this as a Retina display and applies 2x
-            // HiDPI scaling: logical w×h points, physical pw×ph pixels.
-            let mmW = CGFloat(w) / 220.0 * 25.4
-            let mmH = CGFloat(h) / 220.0 * 25.4
+            // The physical size of a 218 ppi Retina desktop panel (the pixel
+            // buffer at 218 px/in). For a display it has no saved mode for,
+            // macOS (measured on 27.2) picks the HiDPI mode w×h@2x only when
+            // the reported panel is at least ~166 mm wide and at least
+            // ~150 px/in; otherwise it comes up 1x at native pixels, with
+            // tiny text on the tablet. The old size (the LOGICAL width at
+            // 220 ppi) was under 166 mm for every panel narrower than
+            // 1440 pt (1248×660 → 144 mm), so only the Tab S10 Ultra's
+            // 1480 pt (171 mm) came up HiDPI. At 218 px/in every w ≥ 713 pt
+            // is wide enough. The display's UUID does not depend on it.
+            let mmW = CGFloat(pw) / 218.0 * 25.4
+            let mmH = CGFloat(ph) / 218.0 * 25.4
             descriptor.sizeInMillimeters = CGSize(width: mmW, height: mmH)
-            descriptor.productID = 0x1234
-            descriptor.vendorID  = 0x3456
+            descriptor.productID = VirtualDisplayModeHelper.productID
+            descriptor.vendorID  = VirtualDisplayModeHelper.vendorID
             // macOS remembers each display's arrangement by its serial; a
             // different one per tablet keeps two of them apart.
             descriptor.serialNum = UInt32(truncatingIfNeeded: max(serial, 1))
@@ -551,16 +666,49 @@ private final class CaptureSession: NSObject, SCStreamDelegate, SCStreamOutput {
             madeID = display.displayID
 
             let settings = CGVirtualDisplaySettings()
-            settings.hiDPI = 1  // 2x Retina: logical w×h → physical pw×ph
-            let mode = CGVirtualDisplayMode(width: UInt32(w), height: UInt32(h),
+            settings.hiDPI = 1  // 2x Retina: logical vw×vh → physical pw×ph
+            let mode = CGVirtualDisplayMode(width: UInt32(vw), height: UInt32(vh),
                                             refreshRate: Double(r))
             settings.modes = [mode]
 
             let ok = display.apply(settings)
             self.virtualDisplay = display
             self.virtualDisplayID = display.displayID
-            esLog("\(tag) Virtual display created id=\(display.displayID) applied=\(ok) serial=\(serial)")
-            result(["applied": ok, "displayID": Int(display.displayID)])
+            let made = display.displayID
+            let size = vw == w && vh == h ? "" : " (grown from \(w)x\(h) for HiDPI)"
+            guard ok, made != 0 else {
+                esLog("\(tag) Virtual display created id=\(made) applied=\(ok) serial=\(serial)")
+                result(["applied": ok, "displayID": Int(made)])
+                return
+            }
+            // Answer once the display is active, when its mode is already
+            // the one macOS picked (measured: the first active read has the
+            // final bounds), so the capture that follows sees it as it stays.
+            Self.waitUntilActive(made, deadline: Date().addingTimeInterval(1)) { active in
+                let mode = Self.describeMode(made, active: active, w: vw, h: vh)
+                guard active, !Self.isHiDPI(made, w: vw, h: vh) else {
+                    esLog("\(tag) Virtual display created id=\(made) applied=\(ok) serial=\(serial) \(mode)\(size)")
+                    result(["applied": ok, "displayID": Int(made)])
+                    return
+                }
+                // macOS restored a 1x mode it saved for this serial. Switch
+                // it once from a child process (see VirtualDisplayModeHelper);
+                // macOS saves that, so the next display with this serial
+                // comes up HiDPI by itself.
+                esLog("\(tag) Virtual display created id=\(made) applied=\(ok) serial=\(serial) \(mode)\(size): not \(vw)x\(vh) pt HiDPI, switching it")
+                VirtualDisplayModeHelper.run(display: made, width: vw, height: vh) { code in
+                    Self.waitUntilHiDPI(made, w: vw, h: vh,
+                                        deadline: Date().addingTimeInterval(code == 0 ? 1 : 0)) { hiDPI in
+                        let now = Self.describeMode(made, active: true, w: vw, h: vh)
+                        if hiDPI {
+                            esLog("\(tag) Virtual display \(made) switched to \(now)")
+                        } else {
+                            esLog("\(tag) WARNING: virtual display \(made) stays at \(now), not \(vw)x\(vh) pt HiDPI, so the tablet's text is small (switch \(code.map { "exit \($0)" } ?? "did not run or timed out"); exit 4 means another HiDPI mode was picked in System Settings > Displays, and is kept)")
+                        }
+                        result(["applied": ok, "displayID": Int(made)])
+                    }
+                }
+            }
         }
         guard virtualDisplay != nil else {
             make()
@@ -597,6 +745,86 @@ private final class CaptureSession: NSObject, SCStreamDelegate, SCStreamOutput {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             waitUntilGone(display, deadline: deadline, completion: completion)
         }
+    }
+
+    /// Calls back on the main thread once `display` is in the active list
+    /// (true) or the deadline has passed (false).
+    private static func waitUntilActive(_ display: CGDirectDisplayID, deadline: Date,
+                                        completion: @escaping (Bool) -> Void) {
+        if activeDisplays().contains(display) {
+            completion(true)
+            return
+        }
+        if Date() >= deadline {
+            completion(false)
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) {
+            waitUntilActive(display, deadline: deadline, completion: completion)
+        }
+    }
+
+    /// macOS gives a virtual display a HiDPI mode only from 800×525 pt
+    /// (1600×1050 px) up (measured on 27.2, whatever the millimetres): a
+    /// smaller one comes up 1x, at its pixel size or at a size of macOS's
+    /// own choosing (832×440 came up 1600×846 pt). So a smaller panel's
+    /// display is grown, keeping its shape, until it fits: 832×440 becomes
+    /// 993×525 pt, and the tablet gets that desktop scaled to its panel
+    /// (text at 84% of its usual size, against about half at 1x).
+    static let hiDPIMinWidth = 800, hiDPIMinHeight = 525
+
+    static func hiDPISize(w: Int, h: Int) -> (w: Int, h: Int) {
+        guard w > 0, h > 0, w < hiDPIMinWidth || h < hiDPIMinHeight else { return (w, h) }
+        let k = max(Double(hiDPIMinWidth) / Double(w), Double(hiDPIMinHeight) / Double(h))
+        return (max(hiDPIMinWidth, Int((Double(w) * k - 1e-6).rounded(.up))),
+                max(hiDPIMinHeight, Int((Double(h) * k - 1e-6).rounded(.up))))
+    }
+
+    /// Whether `display` shows w×h pt at 2x. Its bounds say the points; the
+    /// mode, when macOS gives one (often nil once this process has made
+    /// another virtual display), says the scale. Below the HiDPI floor a
+    /// 1x mode of w×h exists too, which hiDPISize keeps us clear of.
+    private static func isHiDPI(_ display: CGDirectDisplayID, w: Int, h: Int) -> Bool {
+        let b = CGDisplayBounds(display)
+        guard Int(b.width) == w, Int(b.height) == h else { return false }
+        if let m = CGDisplayCopyDisplayMode(display), m.width > 0 {
+            return m.pixelWidth == 2 * m.width
+        }
+        return true
+    }
+
+    /// Calls back on the main thread once `display` is w×h pt HiDPI (true)
+    /// or the deadline has passed (false).
+    private static func waitUntilHiDPI(_ display: CGDirectDisplayID, w: Int, h: Int, deadline: Date,
+                                       completion: @escaping (Bool) -> Void) {
+        if isHiDPI(display, w: w, h: h) {
+            completion(true)
+            return
+        }
+        if Date() >= deadline {
+            completion(false)
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) {
+            waitUntilHiDPI(display, w: w, h: h, deadline: deadline, completion: completion)
+        }
+    }
+
+    /// "mode=1248x660 pt 2496x1320 px 2x" for the log. CGDisplayCopyDisplayMode
+    /// is often nil once the process has made another virtual display
+    /// before this one (measured), while CGDisplayBounds is right; the
+    /// points always come from the bounds, and without a mode the scale is
+    /// judged from them against w×h.
+    private static func describeMode(_ display: CGDirectDisplayID, active: Bool,
+                                     w: Int, h: Int) -> String {
+        guard active else { return "mode=? (not active after 1 s)" }
+        let b = CGDisplayBounds(display)
+        let pts = "\(Int(b.width))x\(Int(b.height)) pt"
+        if let m = CGDisplayCopyDisplayMode(display), m.width > 0 {
+            let scale = Double(m.pixelWidth) / Double(m.width)
+            return "mode=\(pts) \(m.pixelWidth)x\(m.pixelHeight) px \(scale == scale.rounded() ? "\(Int(scale))x" : String(format: "%.2fx", scale))"
+        }
+        return "mode=\(pts), pixels not reported (\(Int(b.width) == w && Int(b.height) == h ? "2x" : "not 2x") by its bounds)"
     }
 
     private static func activeDisplays() -> [CGDirectDisplayID] {
