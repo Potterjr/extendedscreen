@@ -33,10 +33,15 @@ const bool synthTablets = synthTabletCount > 0;
 /// and keeps what it is sent: frames, the codec, rate and mode the Mac
 /// announces. It can also send what the app sends while it shows the Mac
 /// (a mouse event, a keyframe request), and dial any port with any key, as
-/// something else on the tablet could. A real `ClientConnectionManager` cannot run
-/// twice in one process (each would take the one `UsbSessionService`), so
-/// the Mac's side of several tablets is tested against these. Paired with
-/// [SynthAdb], which plays adb for them.
+/// something else on the tablet could. It plays the tablet the Mac controls
+/// too (reverse remote): the Mac's `0xF8` starts its "capture" ([sharing],
+/// with no user to ask, where the app waits for a tap and the consent),
+/// `0xF7` stops it, the Mac's keyframe requests are counted, and
+/// [sendFrame] sends a frame of its screen while it shares. A real
+/// `ClientConnectionManager` cannot run twice in one process (each would
+/// take the one `UsbSessionService`), so the Mac's side of several tablets
+/// is tested against these. Paired with [SynthAdb], which plays adb for
+/// them.
 ///
 /// Tests use it directly; a debug build with [synthTabletCount] runs some in
 /// the app ([SyntheticTablets]). Nothing in a release build refers to it.
@@ -84,13 +89,34 @@ class FakeTablet {
   final _frames = StreamController<Uint8List>.broadcast();
 
   /// What the Mac announced last: the codec (`0xFC`), the stream's rate
-  /// (`0xFB`) and the session mode (`0xF9`). Null until it has.
+  /// (`0xFB`) and the session mode with its direction (`0xF9`). Null until
+  /// it has.
   CodecType? codec;
   int? rate;
   SessionMode? mode;
+  RemoteDirection? direction;
 
   /// Every rate the Mac announced (`0xFB`), in order.
   final rates = <int>[];
+
+  /// Reverse remote: what the Mac's last `0xF8` asked this tablet to capture
+  /// its screen with (the codec, the rate, the bitrate in Mbps). Null until
+  /// one came.
+  CodecType? captureCodec;
+  int? captureFps;
+  int? captureMbps;
+
+  /// How many `0xF8` (start capturing) and `0xF7` (stop) the Mac sent.
+  int captureRequests = 0;
+  int captureStops = 0;
+
+  /// This tablet is capturing its screen for the Mac: from a `0xF8` until a
+  /// `0xF7`. Like the app's capture it outlives a link that just drops,
+  /// whose `0xF7` never arrives.
+  bool sharing = false;
+
+  /// How many keyframes the Mac asked this tablet's encoder for (`0xFF`).
+  int keyframeRequests = 0;
 
   /// adb pointed this tablet's port at [macPort] on the Mac (null: the rule
   /// is gone).
@@ -201,6 +227,18 @@ class FakeTablet {
   /// does.
   void requestKeyframe() => _send(Uint8List.fromList([0xFF]));
 
+  /// Reverse remote: one encoded frame of this tablet's screen ([annexB]),
+  /// as the app's capture sends it. Only while [sharing], and only to a Mac
+  /// that has proved itself: a capture left running goes nowhere otherwise.
+  void sendFrame(Uint8List annexB) {
+    if (!_trusted || !sharing) return;
+    _socket.send(Packet(
+      type: PacketType.frameData,
+      timestampUs: DateTime.now().microsecondsSinceEpoch,
+      payload: annexB,
+    ));
+  }
+
   void _onPacket(Packet packet) {
     if (!_trusted) {
       final key = _key, nonce = _nonce;
@@ -235,6 +273,20 @@ class FakeTablet {
             rates.add(p[1]);
           case 0xF9 when p.length >= 2 && p[1] < SessionMode.values.length:
             mode = SessionMode.values[p[1]];
+            if (p.length >= 3 && p[2] < RemoteDirection.values.length) {
+              direction = RemoteDirection.values[p[2]];
+            }
+          case 0xF8 when p.length >= 4:
+            captureCodec = p[1] == 1 ? CodecType.h265 : CodecType.h264;
+            captureFps = p[2];
+            captureMbps = p[3];
+            captureRequests++;
+            sharing = true;
+          case 0xF7:
+            captureStops++;
+            sharing = false;
+          case 0xFF:
+            keyframeRequests++;
           default:
             break;
         }
@@ -272,8 +324,14 @@ class FakeTablet {
 /// adb for [FakeTablet]s, in this process: lists them, points each one's
 /// tunnel at the Mac port a reverse rule names, and hands it its session
 /// key (which it dials with at once, as the app does). Pairings are taken
-/// and dropped; the screen-off helper and `adb shell input` are not there.
-/// A test can close a tablet's app ([appOpen]) or hold its key deliveries
+/// and dropped. `adb shell input` reaches no screen: the taps and swipes
+/// the Mac sends a tablet are only kept ([taps], [swipes]), and so is each
+/// time it ends a tablet's input shell ([inputShellsClosed]). The screen-off
+/// helper is not there either, so a hold is refused, except for the tablets
+/// a test gives a panel ([panels]): theirs succeeds or fails as the test
+/// says ([holdErrors]), is kept with its release ([holds], [releases]), and
+/// [restore] plays a panel that came back on by itself. A test can also
+/// close a tablet's app ([appOpen]) or hold its key deliveries
 /// ([deliveryGates]).
 class SynthAdb extends AdbService {
   SynthAdb(Iterable<FakeTablet> tablets)
@@ -339,6 +397,33 @@ class SynthAdb extends AdbService {
   /// While a tablet has an entry here, its key deliveries wait for it to
   /// complete (adb taking its time), and then go on as they would have.
   final deliveryGates = <String, Completer<void>>{};
+
+  /// Reverse remote: every tap (serial, x, y) and swipe (serial, x1, y1,
+  /// x2, y2, duration in ms) the Mac sent a tablet through `adb shell
+  /// input`, in order, in the tablet's own pixels.
+  final taps = <(String, int, int)>[];
+  final swipes = <(String, int, int, int, int, int)>[];
+
+  /// Every tablet whose input shell (the one its taps go through) the Mac
+  /// asked to end, in order: once per teardown of a session the Mac
+  /// controlled it in.
+  final inputShellsClosed = <String>[];
+
+  /// Tablets with a panel the screen-off helper can turn off. None unless
+  /// a test adds one: a synthetic tablet's hold is refused.
+  final panels = <String>{};
+
+  /// What a hold of a tablet in [panels] fails with (absent: it succeeds).
+  final holdErrors = <String, String>{};
+
+  /// The holds that turned a panel off, and every release asked for, by
+  /// serial, in order.
+  final holds = <String>[];
+  final releases = <String>[];
+
+  /// [serial]'s panel came back on without being asked (its helper ended):
+  /// what `AdbManagerPlugin` reports as `onTabletScreenRestored`.
+  void restore(String serial) => onTabletScreenRestored?.call(serial);
 
   @override
   Future<List<DeviceModel>?> listDevicesOrNull() async {
@@ -426,20 +511,30 @@ class SynthAdb extends AdbService {
   }
 
   @override
-  Future<String?> holdTabletScreenOff({required String serial}) async =>
-      _real(serial)
-          ? super.holdTabletScreenOff(serial: serial)
-          : 'a synthetic tablet has no panel to turn off';
+  Future<String?> holdTabletScreenOff({required String serial}) async {
+    if (_real(serial)) return super.holdTabletScreenOff(serial: serial);
+    if (!panels.contains(serial)) {
+      return 'a synthetic tablet has no panel to turn off';
+    }
+    final error = holdErrors[serial];
+    if (error != null) return error;
+    holds.add(serial);
+    return null;
+  }
 
   @override
   Future<void> releaseTabletScreenOff({required String serial}) async {
-    if (_real(serial)) await super.releaseTabletScreenOff(serial: serial);
+    if (_real(serial)) {
+      return super.releaseTabletScreenOff(serial: serial);
+    }
+    releases.add(serial);
   }
 
   @override
   Future<void> inputTap(
       {required String serial, required int x, required int y}) async {
-    if (_real(serial)) await super.inputTap(serial: serial, x: x, y: y);
+    if (_real(serial)) return super.inputTap(serial: serial, x: x, y: y);
+    taps.add((serial, x, y));
   }
 
   @override
@@ -452,7 +547,7 @@ class SynthAdb extends AdbService {
     int durationMs = 50,
   }) async {
     if (_real(serial)) {
-      await super.inputSwipe(
+      return super.inputSwipe(
           serial: serial,
           x1: x1,
           y1: y1,
@@ -460,6 +555,13 @@ class SynthAdb extends AdbService {
           y2: y2,
           durationMs: durationMs);
     }
+    swipes.add((serial, x1, y1, x2, y2, durationMs));
+  }
+
+  @override
+  Future<void> closeInputShell({required String serial}) async {
+    if (_real(serial)) return super.closeInputShell(serial: serial);
+    inputShellsClosed.add(serial);
   }
 
   @override

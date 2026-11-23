@@ -1,5 +1,6 @@
 import 'package:extendedscreen/shared/models/display_config_model.dart';
 import 'package:extendedscreen/shared/models/link_type.dart';
+import 'package:extendedscreen/shared/models/session_choice.dart';
 import 'package:extendedscreen/shared/models/session_mode.dart';
 import 'package:extendedscreen/shared/services/settings_service.dart';
 
@@ -17,27 +18,45 @@ class SessionSpec {
     required this.displayMode,
   });
 
-  /// The settings as they stand, for a session on [link]. Over Wi-Fi the
-  /// tablet always drives the Mac: Mac-controls-tablet injects its input
-  /// with adb, which needs the cable.
-  factory SessionSpec.of(SettingsService settings, LinkType link) {
-    final mode = settings.sessionMode;
+  /// The settings as they stand, for a session on [link]: the next session's
+  /// choice ([SettingsService.nextChoice]) and the display mode, through
+  /// [SessionSpec.from].
+  ///
+  /// A reading of Home's selectors, nothing more: no session is built from
+  /// it (a session's spec comes from its own choice, through
+  /// [SessionSpec.from]), so a rule about what a session may run as belongs
+  /// in [SessionChoice.effective], never here.
+  factory SessionSpec.of(SettingsService settings, LinkType link) =>
+      SessionSpec.from(settings.nextChoice, link,
+          displayMode: settings.displayMode);
+
+  /// What a session asked to be [choice] runs on [link]. Over Wi-Fi the
+  /// tablet always drives the Mac ([SessionChoice.effective]):
+  /// Mac-controls-tablet injects its input with adb, which needs the cable.
+  /// A remote-control session mirrors the real desktop; any other captures in
+  /// [displayMode].
+  ///
+  /// The link is all that is known when an attempt begins. A device that
+  /// turns out not to be Android (an iPhone or iPad, known from its HELLO)
+  /// can only drive the Mac too; that clamp will be applied after the HELLO,
+  /// with `effective(android: false)`, once such a device can connect.
+  factory SessionSpec.from(SessionChoice choice, LinkType link,
+      {required DisplayMode displayMode}) {
+    final effective = choice.effective(link: link);
     return SessionSpec(
       link: link,
-      mode: mode,
-      direction: link == LinkType.wifi
-          ? RemoteDirection.tabControlsMac
-          : settings.remoteDirection,
-      displayMode: mode == SessionMode.remoteControl
+      mode: effective.mode,
+      direction: effective.direction,
+      displayMode: effective.mode == SessionMode.remoteControl
           ? DisplayMode.mirror
-          : settings.displayMode,
+          : displayMode,
     );
   }
 
   final LinkType link;
   final SessionMode mode;
 
-  /// The effective direction (see [SessionSpec.of]).
+  /// The effective direction (see [SessionSpec.from]).
   final RemoteDirection direction;
 
   /// What the Mac captures: remote-control sessions always mirror the real

@@ -553,10 +553,13 @@ private final class CaptureSession: NSObject, SCStreamDelegate, SCStreamOutput {
     private var latestPixelBuffer: CVPixelBuffer?
     private let bufferLock = NSLock()
     private var frameCount = 0  // capture queue only
-    // Capture queue only: set (the start's generation and the display) when
-    // this capture shows the session's own virtual display, until a frame's
-    // content rect has been checked against it (see checkShowsOwnDisplay).
-    private var ownDisplayCheck: (generation: Int, display: CGDirectDisplayID)?
+    // Capture queue only: set (the start's generation and the display asked
+    // for) when this capture shows the session's own virtual display or, in
+    // Mirror, the main display, until a frame's content rect has been
+    // checked against it. `aspect` is nil for the session's own virtual
+    // display (see checkShowsOwnDisplay), and for Mirror the width ÷ height
+    // of the display asked for (see checkShowsMainDisplay).
+    private var firstFrameCheck: (generation: Int, display: CGDirectDisplayID, aspect: CGFloat?)?
 
     // Diagnostic counters.
     private var diagSckCount: Int32 = 0
@@ -910,7 +913,7 @@ private final class CaptureSession: NSObject, SCStreamDelegate, SCStreamOutput {
         captureQueue.async { [weak self] in
             guard let self = self else { return }
             self.frameCount = 0
-            self.ownDisplayCheck = nil
+            self.firstFrameCheck = nil
             self.bufferLock.lock(); self.latestPixelBuffer = nil; self.bufferLock.unlock()
         }
 
@@ -966,14 +969,31 @@ private final class CaptureSession: NSObject, SCStreamDelegate, SCStreamOutput {
             let newStream = SCStream(filter: filter, configuration: config, delegate: self)
             self.stream = newStream
 
-            // The new stream's first measured frame is checked against its
-            // own virtual display (see checkShowsOwnDisplay). Set on the
-            // capture queue before the stream starts, so before its samples.
+            // The new stream's first measured frame is checked against the
+            // display it asked for: its own virtual display, which fills the
+            // frame (see checkShowsOwnDisplay), or in Mirror the main
+            // display, whose shape the picture has (see
+            // checkShowsMainDisplay). An Extend start that fell back to the
+            // main display is not checked. Set on the capture queue before
+            // the stream starts, so before its samples.
             let showsOwnDisplay = extend && self.virtualDisplayID != 0
                 && targetDisplay.displayID == self.virtualDisplayID
             let displayID = targetDisplay.displayID
+            var check: (generation: Int, display: CGDirectDisplayID, aspect: CGFloat?)?
+            if showsOwnDisplay {
+                check = (generation, displayID, nil)
+            } else if !extend {
+                // The display asked for is the main one (see
+                // findCaptureDisplay); its bounds give the shape whatever
+                // its scale.
+                let bounds = CGDisplayBounds(displayID)
+                if bounds.width > 0, bounds.height > 0 {
+                    check = (generation, displayID, bounds.width / bounds.height)
+                }
+            }
+            let firstFrame = check
             self.captureQueue.async { [weak self] in
-                self?.ownDisplayCheck = showsOwnDisplay ? (generation, displayID) : nil
+                self?.firstFrameCheck = firstFrame
             }
 
             do {
@@ -1394,9 +1414,14 @@ private final class CaptureSession: NSObject, SCStreamDelegate, SCStreamOutput {
             esLog("\(tag) First frame pixel size: \(pw)x\(ph)")
         }
         let measured = trackContentRect(sampleBuffer, pixelWidth: pw, pixelHeight: ph)
-        if let check = ownDisplayCheck, let rect = measured {
-            ownDisplayCheck = nil
-            checkShowsOwnDisplay(rect, display: check.display, generation: check.generation)
+        if let check = firstFrameCheck, let rect = measured {
+            firstFrameCheck = nil
+            if let aspect = check.aspect {
+                checkShowsMainDisplay(rect, frameWidth: pw, frameHeight: ph, aspect: aspect,
+                                      display: check.display, generation: check.generation)
+            } else {
+                checkShowsOwnDisplay(rect, display: check.display, generation: check.generation)
+            }
         }
         frameCount += 1
         OSAtomicIncrement32(&diagSckCount)
@@ -1471,6 +1496,46 @@ private final class CaptureSession: NSObject, SCStreamDelegate, SCStreamOutput {
         }
         esLog(String(format: "%@ WARNING: the capture of virtual display %u does not fill the frame (x=%.4f y=%.4f w=%.4f h=%.4f): it may be showing another display",
                      tag, display, Double(rect.minX), Double(rect.minY),
+                     Double(rect.width), Double(rect.height)))
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, generation == self.captureGeneration else { return }
+            self.plugin?.invoke("onCaptureMismatch", [
+                "session": id,
+                "x": Double(rect.minX), "y": Double(rect.minY),
+                "w": Double(rect.width), "h": Double(rect.height),
+            ])
+        }
+    }
+
+    /// Capture queue, on a Mirror capture: ScreenCaptureKit keeps the shape
+    /// of the display it shows, so the picture in the frame has the shape of
+    /// the main display that was asked for (`aspect`, its width ÷ height),
+    /// within 2%. A picture of another shape is another display's: with
+    /// virtual displays about, macOS can hand a stream of the main display
+    /// one of them instead (FB17797423). A virtual display of the main
+    /// display's shape cannot be told apart this way. Reported once per
+    /// start, either way, like checkShowsOwnDisplay: onCaptureMismatch, or
+    /// onCaptureMatched. Dart decides what to do.
+    private func checkShowsMainDisplay(_ rect: CGRect, frameWidth: Int, frameHeight: Int,
+                                       aspect: CGFloat, display: CGDirectDisplayID,
+                                       generation: Int) {
+        let tolerance: CGFloat = 0.02
+        let id = self.id
+        let pictureWidth = rect.width * CGFloat(frameWidth)
+        let pictureHeight = rect.height * CGFloat(frameHeight)
+        // A frame with no measurable picture says nothing either way.
+        guard pictureWidth > 0, pictureHeight > 0, aspect.isFinite, aspect > 0 else { return }
+        let picture = pictureWidth / pictureHeight
+        if abs(picture / aspect - 1) <= tolerance {
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self, generation == self.captureGeneration else { return }
+                self.plugin?.invoke("onCaptureMatched", ["session": id])
+            }
+            return
+        }
+        esLog(String(format: "%@ WARNING: the capture of the main display %u has another shape (picture %.4f, display %.4f; x=%.4f y=%.4f w=%.4f h=%.4f): it may be showing another display",
+                     tag, display, Double(picture), Double(aspect),
+                     Double(rect.minX), Double(rect.minY),
                      Double(rect.width), Double(rect.height)))
         DispatchQueue.main.async { [weak self] in
             guard let self = self, generation == self.captureGeneration else { return }

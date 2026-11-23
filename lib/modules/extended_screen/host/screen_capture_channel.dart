@@ -77,15 +77,17 @@ class ScreenCaptureChannel extends GetxService {
   /// the display it had). Only reported for now.
   void Function(int session, int displayId)? onVirtualDisplayTerminated;
 
-  /// [session]'s capture of its own virtual display came out with bars on
-  /// its first frame: the stream may be showing another display (Apple bug
-  /// FB17797423). Reported once per start; the hub decides what to do
-  /// (an ordered rebuild of every display, or a notice on the card).
+  /// [session]'s capture came out in another shape than the display it
+  /// asked for on its first frame: its own virtual display with bars
+  /// (Extend), or a picture that has not the main display's shape (Mirror).
+  /// The stream may be showing another display (Apple bug FB17797423).
+  /// Reported once per start; the hub decides what to do (an ordered
+  /// rebuild of every display, or a notice on the card).
   void Function(int session)? onCaptureMismatch;
 
-  /// [session]'s capture of its own virtual display filled its first frame
-  /// (the same check as [onCaptureMismatch], the other answer). Once per
-  /// start.
+  /// [session]'s capture showed the display it asked for on its first
+  /// frame (the same check as [onCaptureMismatch], the other answer). Once
+  /// per start.
   void Function(int session)? onCaptureMatched;
 
   /// Wired by [HostConnectionManager] to refresh the cached display bounds

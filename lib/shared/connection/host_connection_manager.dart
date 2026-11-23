@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
-import 'package:flutter/foundation.dart' show visibleForTesting;
+import 'package:flutter/foundation.dart' show protected, visibleForTesting;
 import 'package:flutter/widgets.dart' show AppLifecycleState;
 import 'package:get/get.dart';
 import 'package:extendedscreen/shared/connection/adb_service.dart';
@@ -15,6 +15,7 @@ import 'package:extendedscreen/shared/connection/wifi_pairing_service.dart';
 import 'package:extendedscreen/shared/models/device_model.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
 import 'package:extendedscreen/shared/models/link_type.dart';
+import 'package:extendedscreen/shared/models/session_choice.dart';
 import 'package:extendedscreen/shared/models/session_mode.dart';
 import 'package:extendedscreen/shared/platform/permissions_channel.dart';
 import 'package:extendedscreen/shared/services/settings_service.dart';
@@ -30,13 +31,14 @@ import 'package:extendedscreen/modules/remote_screen/host/remote_video_channel.d
 /// single-slot callbacks, which it routes to the session they are about),
 /// and runs no link of its own: no packet loop, heartbeat or retry.
 ///
-/// Over USB in Extended screen it holds up to [cap] sessions side by side;
-/// over Wi-Fi and in remote control, one, which a pick of another device
-/// replaces. It mirrors the focused one: its [phase], [errorMessage],
-/// [activeDevice], [latencyMs], [refreshRateHz], [streamBitrate],
-/// [availableDevices] and the reverse-remote observables follow the focused
-/// session's, so Home, Settings and the remote view see what they saw when
-/// this class was the link itself.
+/// Over USB it holds up to [cap] sessions side by side, each in the mode it
+/// was made for (its [HostSession.choice], fixed for its life: a tablet's
+/// mode changes by replacing its session, [changeMode]); over Wi-Fi, one,
+/// which a pick replaces. It mirrors the focused one: its [phase],
+/// [errorMessage], [activeDevice], [latencyMs], [refreshRateHz],
+/// [streamBitrate], [availableDevices] and the reverse-remote observables
+/// follow the focused session's, so Home and Settings see what they saw
+/// when this class was the link itself.
 class HostConnectionManager extends BaseConnectionManager {
   /// [socket] and [port] (tests) go to the sessions it makes: one session at
   /// a time uses an injected socket. Without one, each session gets a socket
@@ -69,8 +71,12 @@ class HostConnectionManager extends BaseConnectionManager {
       }
     };
     ever<LinkType>(settings.linkTypeRx, _onLinkTypeChanged);
-    displays.onRebuildNeeded = _displaysNeedRebuild;
+    _sessionsWorker = ever<Map<String, HostSession>>(
+        sessions, (_) => _sessionsChanged());
+    displays.onRebuildNeeded = _displaySetNeedsRebuild;
+    displays.onMirrorRepairNeeded = _mirrorNeedsRepair;
     displays.coveredByRound = _roundWillRestart;
+    displays.downForRound = _roundHasDisplaysDown;
     budget.addListener(_encoderStateChanged);
     _routeNativeCallbacks();
     hostInfoReady = _loadHostInfo();
@@ -348,27 +354,39 @@ class HostConnectionManager extends BaseConnectionManager {
     }
   }
 
-  /// How many tablets may be connected at once: over USB in Extended
-  /// screen, the Maximum tablets setting within what this Mac's encoder is
-  /// thought to take; otherwise one. Over Wi-Fi there is one listener, and
-  /// in remote control the remote view, the screen toggle and the remote
-  /// taps all go to the focused session. Each session's budget admission
-  /// reads it too.
-  int get cap => settings.linkType == LinkType.usb &&
-          settings.sessionMode == SessionMode.extendedScreen
+  /// How many tablets may be connected at once: over USB, the Maximum
+  /// tablets setting within what this Mac's encoder is thought to take,
+  /// whatever mode each tablet runs in (one the Mac only views counts too,
+  /// though it takes nothing of the encoder); over Wi-Fi one, since there
+  /// is one listener. This is where it is applied: a tablet with no place
+  /// is refused before a session is made for it ([_sessionFor]). A
+  /// session's budget admission is handed no less than the places held
+  /// ([heldUsbPlaces]), so the budget never refuses, as one tablet too
+  /// many, a session that has its place here: not one made before the
+  /// setting was lowered, nor the new session of a tablet changing mode.
+  int get cap => settings.linkType == LinkType.usb
       ? math.min(settings.maxTablets,
           budget.estimate.tabletCap ?? SettingsService.maxTabletsLimit)
       : 1;
 
-  // What connect() is choosing for: the keys being picked, from the call
+  // What a connect is choosing for: the keys being picked, from the call
   // until the key's session has started connecting (and so shows a
   // connecting phase); [_anyDevice] while a pick without a serial looks for
   // one, [_linkChange] while a link change ends sessions (which holds off
-  // every pick). With [cap] 1 any entry holds off every pick, as one choice
-  // at a time always has.
+  // every pick). A tablet whose mode is being changed is held here too, from
+  // the step that ends its old session until its new one has started
+  // ([_replace]), so neither a pick nor the auto-connect policy brings it
+  // back meanwhile. With [cap] 1 any entry holds off every pick, as one
+  // choice at a time always has.
   final _choosing = <String>{};
   static const _anyDevice = '\u0000any';
   static const _linkChange = '\u0000link';
+
+  // USB tablets whose session is being replaced ([_replace]): out of
+  // [sessions] while the old one ends, each still holds its place under
+  // [cap], so no other pick takes it. Observable, since the tablets Home
+  // offers ([freeDevices]) leave them out.
+  final _reserved = <String>{}.obs;
 
   // disconnect() calls ending every session: nothing new starts meanwhile.
   int _endingAll = 0;
@@ -453,10 +471,12 @@ class HostConnectionManager extends BaseConnectionManager {
   bool _skippedEmpty = false;
 
   /// Attached devices with no session yet (a tablet listed twice, by serial
-  /// and by its wireless-debugging name, counts once).
+  /// and by its wireless-debugging name, counts once). A tablet between
+  /// two sessions, its mode being changed, is not one of them.
   List<DeviceModel> get freeDevices => [
         for (final d in DeviceModel.withoutMdnsDuplicates(availableDevices))
-          if (!sessions.containsKey(d.serial)) d,
+          if (!sessions.containsKey(d.serial) && !_reserved.contains(d.serial))
+            d,
       ];
 
   /// Some session is live.
@@ -466,16 +486,33 @@ class HostConnectionManager extends BaseConnectionManager {
   bool get anyConnecting =>
       sessions.values.any((s) => s.phase.value.isConnecting);
 
-  /// Sessions over USB, whatever their phase: what [cap] counts.
+  /// Sessions over USB, whatever their phase.
   int get usbSessionCount =>
       sessions.values.where((s) => s.link == LinkType.usb).length;
+
+  /// The places taken under [cap]: every USB session, whatever its phase,
+  /// and every tablet whose session is being replaced ([changeMode]), which
+  /// has none for a moment.
+  Set<String> get heldUsbPlaces => {
+        for (final s in sessions.values)
+          if (s.link == LinkType.usb) s.key,
+        ..._reserved,
+      };
+
+  /// Some USB tablet is between two sessions, its mode being changed
+  /// ([changeMode]): it is in no session for a moment, and comes back.
+  /// Observable. Home offers no link selector meanwhile: a link switched
+  /// then would be saved and never acted on ([_onLinkTypeChanged] does
+  /// nothing during a choice), and the tablet would come back over USB
+  /// with the app saying Wi-Fi.
+  bool get replacing => _reserved.isNotEmpty;
 
   /// A pick of a USB tablet with no session would add one beside the
   /// others, rather than replace the one there is (cap 1) or be refused.
   bool get canAdd =>
       !endingAll.value &&
       settings.linkType == LinkType.usb &&
-      usbSessionCount < cap;
+      heldUsbPlaces.length < cap;
 
   /// Makes the session [key] the one the hub's observables show.
   void focus(String key) {
@@ -489,22 +526,73 @@ class HostConnectionManager extends BaseConnectionManager {
   @override
   bool get isHost => true;
 
+  // ─── Reverse remote, every session ────────────────────────────────────────
+
+  /// The sessions of tablets the Mac views and drives, whatever their
+  /// phase, sorted by key. Reads [sessions], so an `Obx` that calls it
+  /// follows the map (not each session's phase).
+  List<HostSession> get remoteSessions => [
+        for (final s in sessions.values)
+          if (s.spec.isReverseRemote) s,
+      ]..sort((a, b) => a.key.compareTo(b.key));
+
+  // What keeps [reverseActive] right: one worker on [sessions], which keeps
+  // a phase worker for each session in the map and for no other.
+  late final Worker _sessionsWorker;
+  final _phaseWorkers = <HostSession, Worker>{};
+
+  /// [sessions] changed, however (a pick, an end, [adopt], a test putting
+  /// a session in directly): the sessions that left are no longer watched,
+  /// the new ones are, and [reverseActive] is counted again.
+  void _sessionsChanged() {
+    final now = sessions.values.toSet();
+    for (final session in _phaseWorkers.keys.toList()) {
+      if (!now.contains(session)) _phaseWorkers.remove(session)!.dispose();
+    }
+    for (final session in now) {
+      _phaseWorkers.putIfAbsent(session,
+          () => ever<ConnectionPhase>(session.phase, (_) => _countReverse()));
+    }
+    _countReverse();
+  }
+
+  /// [reverseActive]: the live sessions of tablets the Mac views and
+  /// drives. A session's spec is its attempt's, taken before its phase
+  /// leaves `disconnected` or `error`, so it is settled by the time the
+  /// phase says live.
+  void _countReverse() {
+    final live = sessions.values
+        .where((s) => s.spec.isReverseRemote && s.phase.value.isActive)
+        .length;
+    if (reverseActive.value != live) reverseActive.value = live;
+  }
+
   // ─── Reverse remote, mirrored from the focused session ────────────────────
+  //
+  // Focused-session compatibility: the four observables below, and
+  // [setTabletScreenOff], [sendRemoteTap] and [sendRemoteSwipe], are the
+  // focused session's and say nothing about any other tablet the Mac
+  // controls. The remote view no longer uses them: it goes to the sessions
+  // themselves ([remoteSessions], each one's own observables and calls,
+  // [reconnectSession]), as anything that shows or drives several must.
 
   /// Texture id of the decoded tablet stream (reverse remote: Mac controls the
   /// tablet). Null unless a reverse-remote session is live; the remote-view
-  /// widget renders a `Texture` from it.
+  /// widget renders a `Texture` from it. The focused session's.
   final remoteTextureId = Rxn<int>();
 
   /// Reverse remote: the tablet's picture has started to arrive this session
-  /// (its user approved screen capture), so its panel may go dark now.
+  /// (its user approved screen capture), so its panel may go dark now. The
+  /// focused session's.
   final tabletStreaming = false.obs;
 
   /// Reverse remote: the tablet's panel is held off ([setTabletScreenOff]).
+  /// The focused session's.
   final tabletScreenOff = false.obs;
 
   /// A [setTabletScreenOff] is under way, the user's or the remembered
-  /// choice's: the toggle waits for it, and another call is refused.
+  /// choice's: the toggle waits for it, and another call is refused. The
+  /// focused session's.
   final changingTabletScreen = false.obs;
 
   /// Reverse remote (USB): turns the focused tablet's panel off, or back on
@@ -516,8 +604,12 @@ class HostConnectionManager extends BaseConnectionManager {
     return session.setTabletScreenOff(off);
   }
 
+  /// Reverse remote: a tap on the focused tablet
+  /// ([HostSession.sendRemoteTap]).
   void sendRemoteTap(double nx, double ny) => _focused?.sendRemoteTap(nx, ny);
 
+  /// Reverse remote: a swipe on the focused tablet
+  /// ([HostSession.sendRemoteSwipe]).
   void sendRemoteSwipe(double nx1, double ny1, double nx2, double ny2,
           {int durationMs = 50}) =>
       _focused?.sendRemoteSwipe(nx1, ny1, nx2, ny2, durationMs: durationMs);
@@ -719,23 +811,48 @@ class HostConnectionManager extends BaseConnectionManager {
   /// attached, else the first one attached; with none attached and no
   /// session, it says so and looks again every second.
   ///
-  /// With [cap] 1 and at most one session, as there always was: only while
-  /// nothing is connecting or connected, one call at a time, and picking
-  /// another device ends the focused session first. Otherwise per tablet:
-  /// a pick adds a session for a tablet that has none (up to [cap], counting
+  /// With [cap] 1 (over Wi-Fi, or Maximum tablets 1) and at most one
+  /// session, as there always was: only while nothing is connecting or
+  /// connected, one call at a time, and picking another device ends the
+  /// focused session first. Otherwise per tablet, whatever the modes: a
+  /// pick adds a session for a tablet that has none (up to [cap], counting
   /// every USB session), runs the pending retry of one in `error`, and does
   /// nothing for one connecting or live, or while that tablet is being
   /// picked already; a tablet whose session is still ending is connected
   /// once that has ended. A pick without a serial takes only devices with
   /// no session. The session picked is focused.
+  ///
+  /// This is the user's connect (a tile of the Add panel, the Connect
+  /// button, the Loopback preview's Start): a session it makes runs in the
+  /// mode Home's selectors show at this call
+  /// ([SettingsService.nextChoice]). Every other connect that picks a
+  /// tablet goes to [connectWith] with a mode of its own, or none.
+  /// [changeMode] does not: it starts its new session itself ([_replace]).
   @override
-  Future<void> connect({String? serial}) async {
+  Future<void> connect({String? serial}) =>
+      connectWith(serial, choice: settings.nextChoice);
+
+  /// [connect], for whoever says the mode: a session made here runs as
+  /// [choice]; without one, in the mode its tablet is remembered in
+  /// ([SettingsService.knownChoice]: the auto-connect policy's connects,
+  /// and the hub's own after a link change), else as the selectors stood
+  /// when this was called (read before anything is awaited, so a slow adb
+  /// listing does not pick up a later change). A session that exists
+  /// already (a retry run early, a card's Retry, the same tablet with [cap]
+  /// 1) keeps the mode it was made for, whatever is passed.
+  @override
+  @protected
+  Future<void> connectWith(String? serial, {SessionChoice? choice}) async {
+    final fallback = settings.nextChoice;
     if (_endingAll > 0 || _choosing.contains(_linkChange)) return;
     final single = cap == 1 && sessions.length <= 1;
     if (single) {
+      // The session's own phase too, not only the one shown: a session
+      // the hub did not show would otherwise be taken for idle.
       if (_choosing.isNotEmpty ||
           phase.value.isConnecting ||
-          phase.value.isActive) {
+          phase.value.isActive ||
+          sessions.values.any(_busy)) {
         return;
       }
     } else if (_choosing.contains(serial ?? _anyDevice) ||
@@ -749,7 +866,8 @@ class HostConnectionManager extends BaseConnectionManager {
     _lookAgain?.cancel();
     final HostSession? session;
     try {
-      session = await _choose(serial, single: single, held: held);
+      session = await _choose(serial,
+          single: single, held: held, choice: choice, fallback: fallback);
     } finally {
       _choosing.removeAll(held);
     }
@@ -764,11 +882,16 @@ class HostConnectionManager extends BaseConnectionManager {
     await connecting;
   }
 
-  /// Which session [connect] goes on with; null when there is none to
+  /// Which session [connectWith] goes on with; null when there is none to
   /// connect (nothing attached, the tablet is being picked or is busy
-  /// already, no room under [cap], or a [disconnect] came meanwhile).
+  /// already, no room under [cap], or a [disconnect] came meanwhile). A new
+  /// one runs as [choice], else as its tablet is remembered, else as
+  /// [fallback].
   Future<HostSession?> _choose(String? serial,
-      {required bool single, required Set<String> held}) async {
+      {required bool single,
+      required Set<String> held,
+      required SessionChoice? choice,
+      required SessionChoice fallback}) async {
     final attempt = currentAttempt;
     final link = settings.linkType;
     final focused = _focused;
@@ -792,7 +915,9 @@ class HostConnectionManager extends BaseConnectionManager {
           ? devices
           : [
               for (final d in DeviceModel.withoutMdnsDuplicates(devices))
-                if (!sessions.containsKey(d.serial)) d,
+                if (!sessions.containsKey(d.serial) &&
+                    !_reserved.contains(d.serial))
+                  d,
             ];
       final preferred = settings.lastDeviceSerial;
       final picked =
@@ -807,8 +932,11 @@ class HostConnectionManager extends BaseConnectionManager {
         errorMessage.value = 'Exception: No ADB device detected';
         errorKey.value = null;
         setPhase(ConnectionPhase.error);
+        // With the mode this call was given, as it was given it.
         _lookAgain = Timer(const Duration(seconds: 1), () {
-          if (!isCancelled(attempt) && _focused == null) connect();
+          if (!isCancelled(attempt) && _focused == null) {
+            connectWith(null, choice: choice);
+          }
         });
         return null;
       }
@@ -821,7 +949,8 @@ class HostConnectionManager extends BaseConnectionManager {
       _choosing.add(key);
       held.add(key);
     }
-    return _sessionFor(key, link, attempt, single: single);
+    return _sessionFor(key, link, attempt,
+        single: single, choice: choice, fallback: fallback);
   }
 
   /// The session [key] on [link]. With [single], the focused one when it is
@@ -829,11 +958,23 @@ class HostConnectionManager extends BaseConnectionManager {
   /// other link) has ended. Otherwise the session [key] when it waits to
   /// retry, else a new one beside the others while there is room under
   /// [cap]. Null when there is nothing to connect, or a [disconnect] came
-  /// meanwhile. [connect] focuses it.
+  /// meanwhile. The caller focuses it.
+  ///
+  /// A session that exists keeps the mode it was made for. A new one is
+  /// made as [choice], else as the tablet is remembered
+  /// ([SettingsService.knownChoice]), else as [fallback] (the selectors as
+  /// they stood when the connect was asked for), and keeps that for its
+  /// life, over Wi-Fi too.
   Future<HostSession?> _sessionFor(String key, LinkType link, int attempt,
-      {required bool single}) async {
-    final current = _focused;
+      {required bool single,
+      SessionChoice? choice,
+      SessionChoice? fallback}) async {
     if (single) {
+      // The one session there is ([single]: at most one), whether or not
+      // it is the one shown. Going by the shown one alone took a session
+      // that was not shown for no session: a second one was made for its
+      // tablet, and the first ran on where nothing could end it.
+      final current = sessions.values.firstOrNull ?? _focused;
       if (current != null && current.key == key && current.link == link) {
         return current;
       }
@@ -860,10 +1001,17 @@ class HostConnectionManager extends BaseConnectionManager {
       await ending;
       if (isCancelled(attempt)) return null;
     }
+    // Never over a session that is there: that one would run on, out of
+    // the map and out of reach.
+    final there = sessions[key];
+    if (there != null) return _busy(there) ? null : there;
     // Counted after every await: live sessions keep running when the cap
-    // is lowered under their number; only new ones are refused.
-    if (!single && usbSessionCount >= cap) {
-      log.w('Host: $key not connected: $usbSessionCount of $cap tablets '
+    // is lowered under their number; only new ones are refused. A tablet
+    // whose session is being replaced is no new one: its place is held
+    // ([_reserved]), and counts against every other pick.
+    final held = heldUsbPlaces..remove(key);
+    if (!single && !_reserved.contains(key) && held.length >= cap) {
+      log.w('Host: $key not connected: ${held.length} of $cap tablets '
           'already');
       return null;
     }
@@ -873,12 +1021,15 @@ class HostConnectionManager extends BaseConnectionManager {
       key: key,
       link: link,
       serial: usb ? key : null,
+      choice: choice ?? settings.knownChoice(key) ?? fallback,
       pipeline: pipeline,
       tunnels: _tunnels,
       displays: displays,
       adb: _adb,
       budget: budget,
-      cap: () => cap,
+      // The hub's check above is the cap. The budget's own must not
+      // refuse a session that holds a place here (see [cap]).
+      cap: () => math.max(cap, heldUsbPlaces.length),
       // Over Wi-Fi the one display every build has made; over USB the
       // tablet's own, never one a live display already has.
       vdSerial: usb
@@ -908,7 +1059,8 @@ class HostConnectionManager extends BaseConnectionManager {
   /// ended), so nothing can pick it again while it ends; then its link
   /// ends, then its native state. When it was the focused one, the hub
   /// shows the most recently focused session left, at once; with none
-  /// left, [showing] (`disconnected` unless a pick is replacing it). Not
+  /// left, [showing] (`disconnected` unless a pick is replacing it, or
+  /// another tablet is between two sessions, [replacing]). Not
   /// while a [disconnect] ends them all: that sets `disconnected` at its
   /// end, as it always has.
   Future<void> _endSession(HostSession session,
@@ -917,6 +1069,8 @@ class HostConnectionManager extends BaseConnectionManager {
       sessions.remove(session.key);
       _recent.remove(session.key);
     }
+    // A repair it asked for is asked for nobody now.
+    _repairs.remove(session);
     if (_focused == session) {
       _unfocus();
       // What its teardown would have shown, mirrored.
@@ -927,8 +1081,13 @@ class HostConnectionManager extends BaseConnectionManager {
       tabletScreenOff.value = false;
       changingTabletScreen.value = false;
       // Before anything is awaited: the facade never shows the ended
-      // session's values, nor `disconnected` while a pick replaces it.
-      if (_endingAll == 0) _refocus(showing);
+      // session's values, nor `disconnected` while a pick replaces it or
+      // while another tablet, between two sessions, is on its way back
+      // ([_replace] sets `disconnected` if that one does not come back).
+      if (_endingAll == 0) {
+        _refocus(showing ??
+            (_reserved.isNotEmpty ? ConnectionPhase.detectingDevice : null));
+      }
     }
     final ended = Completer<void>();
     _endingKeys[session.key] = ended.future;
@@ -952,7 +1111,8 @@ class HostConnectionManager extends BaseConnectionManager {
     }
   }
 
-  /// The hub's observables follow the most recently focused session left;
+  /// The hub's observables follow the most recently focused session left
+  /// (else any session left: the hub never reads idle while it has one);
   /// with none, they show [showing] (else `disconnected`) and no error.
   void _refocus(ConnectionPhase? showing) {
     for (final key in _recent.reversed) {
@@ -962,9 +1122,125 @@ class HostConnectionManager extends BaseConnectionManager {
         return;
       }
     }
+    final left = sessions.values.lastOrNull;
+    if (left != null) {
+      _focus(left);
+      return;
+    }
     errorMessage.value = '';
     errorKey.value = null;
     setPhase(showing ?? ConnectionPhase.disconnected);
+  }
+
+  /// The tablet whose session is [key] is to run as [choice] from now on.
+  /// A session never changes what it is ([HostSession.choice] is final, so
+  /// its teardown undoes exactly what its attempts built): it is ended and
+  /// a new one made for the same key, with a new native id and, over USB,
+  /// the tablet's own virtual-display serial ([_replace]). The other
+  /// tablets run on.
+  ///
+  /// Nothing, and false, when there is no such session, it is no longer
+  /// [expected] (the one the caller was looking at: a menu opened before
+  /// the session was replaced), it has been ended, the tablet is being
+  /// picked or its last session still ends, a [disconnect] or a link change
+  /// is under way, the session is on its way to being live (its attempt is
+  /// left to finish or fail), or [choice] comes to what it already runs as
+  /// on its link ([SessionChoice.sameEffect]; over Wi-Fi the direction
+  /// means nothing). Otherwise true, once the new session's connect has
+  /// returned (as [connect] does), or a [disconnect] has overtaken it.
+  @override
+  Future<bool> changeMode(String key, SessionChoice choice,
+      {HostSession? expected}) async {
+    final old = sessions[key];
+    if (old == null ||
+        (expected != null && !identical(expected, old)) ||
+        old.isRetired ||
+        _endingKeys.containsKey(key) ||
+        _choosing.contains(key) ||
+        _choosing.contains(_linkChange) ||
+        // With one tablet at a time, a pick under way may be replacing
+        // this very session.
+        (cap == 1 && sessions.length <= 1 && _choosing.isNotEmpty) ||
+        _endingAll > 0 ||
+        old.phase.value.isConnecting ||
+        old.choice
+            .effective(link: old.link)
+            .sameEffect(choice.effective(link: old.link))) {
+      return false;
+    }
+    await _replace(old, choice);
+    return true;
+  }
+
+  /// Ends [old] and makes its tablet a new session as [choice], then
+  /// connects it; focused if [old] was.
+  ///
+  /// Everything up to the first await is one synchronous step, and has to
+  /// stay one: the key is in [_choosing] (no pick and no automatic connect
+  /// brings the tablet back in its old mode while [old] ends) and, over
+  /// USB, in [_reserved] (its place under [cap] is not given away while it
+  /// has no session) before [old] leaves [sessions]. An await between them
+  /// would open both races. The tablet's remembered mode is the new one
+  /// from that step on too ([SettingsService.setKnownChoice]; a tablet not
+  /// known yet is remembered when its new session goes live).
+  ///
+  /// When [old] was the only session, the hub shows a connecting phase
+  /// while it ends, never `disconnected`: with one tablet at a time that is
+  /// what holds off a pick, and with more it keeps Home from offering the
+  /// link selector, and the policy from taking the hub for idle, in a
+  /// moment when a tablet is on its way back.
+  Future<void> _replace(HostSession old, SessionChoice choice) async {
+    final key = old.key;
+    final link = old.link;
+    final usb = link == LinkType.usb;
+    final wasFocused = identical(_focused, old);
+    final attempt = currentAttempt;
+    final showing =
+        usb ? ConnectionPhase.detectingDevice : ConnectionPhase.handshaking;
+    _choosing.add(key);
+    if (usb) _reserved.add(key);
+    final ending = _endSession(old, showing: showing);
+    settings.setKnownChoice(key, choice);
+    HostSession? session;
+    try {
+      await ending;
+      if (!isCancelled(attempt) && _endingAll == 0) {
+        session = await _sessionFor(key, link, attempt,
+            single: false, choice: choice);
+      }
+    } finally {
+      _choosing.remove(key);
+      _reserved.remove(key);
+      // Nothing came back (a Disconnect of everything, which sets
+      // `disconnected` itself when it is done, or no session made): the
+      // connecting phase shown for it must not stay.
+      // Unless another tablet is still on its way back: its own replace
+      // settles this.
+      if ((session == null || sessions[key] != session) &&
+          _focused == null &&
+          _reserved.isEmpty &&
+          _endingAll == 0 &&
+          phase.value == showing) {
+        setPhase(ConnectionPhase.disconnected);
+      }
+    }
+    if (session == null || sessions[key] != session) return;
+    // As in [connectWith]: connecting before it is shown, so the hub's
+    // phase never passes through a new session's `disconnected`.
+    final connecting = session.connect();
+    if (wasFocused || _focused == null) {
+      _focus(session);
+    } else {
+      // Not the one shown, but in the focus history like every session,
+      // as the least recent: when the shown one ends, [_refocus] takes
+      // the tablets that were shown before this one. (It finds a session
+      // that is in no history too, so the hub does not read
+      // `disconnected` with this tablet live either way.)
+      _recent
+        ..remove(key)
+        ..insert(0, key);
+    }
+    await connecting;
   }
 
   /// Ends the session [key] alone; the others run on, and the hub shows
@@ -1021,10 +1297,33 @@ class HostConnectionManager extends BaseConnectionManager {
   /// device survives the lost link), which the remote view's Reconnect
   /// relies on; one the encoder refused waits for the user.
   @override
-  Future<void> reconnect() async {
+  Future<void> reconnect() => _reconnectWhere((_) => true);
+
+  /// [reconnect] for the tablets the Mac extends onto alone: what a change
+  /// of the display mode needs, since a remote-control session mirrors the
+  /// real desktop whatever that setting says (and a tablet the Mac controls
+  /// would have to approve its capture again for nothing).
+  @override
+  Future<void> reconnectExtendedOnly() =>
+      _reconnectWhere((s) => s.spec.mode == SessionMode.extendedScreen);
+
+  /// [reconnect] for the session [key] alone, by the same rule; the others
+  /// run on. Nothing for a key with no session.
+  @override
+  Future<void> reconnectSession(String key) {
+    final session = sessions[key];
+    if (session == null) return Future<void>.value();
+    return _reconnectWhere((s) => identical(s, session));
+  }
+
+  /// Reconnects, side by side, every session [test] takes that may
+  /// reconnect: one connecting, live or in `error`, and not one the encoder
+  /// refused.
+  Future<void> _reconnectWhere(bool Function(HostSession) test) async {
     await Future.wait([
       for (final s in sessions.values.toList())
-        if (!s.refused.value &&
+        if (test(s) &&
+            !s.refused.value &&
             (s.phase.value.isConnecting ||
                 s.phase.value.isActive ||
                 s.phase.value == ConnectionPhase.error))
@@ -1081,6 +1380,11 @@ class HostConnectionManager extends BaseConnectionManager {
     _capacityTimer = null;
     _clearProbe();
     budget.removeListener(_encoderStateChanged);
+    _sessionsWorker.dispose();
+    for (final worker in _phaseWorkers.values) {
+      worker.dispose();
+    }
+    _phaseWorkers.clear();
     super.onClose();
   }
 
@@ -1098,7 +1402,9 @@ class HostConnectionManager extends BaseConnectionManager {
   /// ([stoppedDevices]). Over USB the candidates are the attached tablets
   /// with no session that the user has not stopped, emulators only when no
   /// real tablet is attached (stand-in tablets never), and only those in
-  /// [only] when given (the poll's tablets just plugged in):
+  /// [only] when given (the poll's tablets just plugged in). Whichever rule
+  /// takes a tablet, it comes back in the mode it is remembered in
+  /// ([_start]), not in the one the selectors show:
   /// - with no session, the hub `disconnected` and exactly one candidate,
   ///   that one (the first-run rule: one tablet connects whether or not it
   ///   was seen before; two wait for the user's pick). Deliberately not
@@ -1162,6 +1468,7 @@ class HostConnectionManager extends BaseConnectionManager {
     ]..sort();
     final firstRun = sessions.isEmpty &&
         _starting.isEmpty &&
+        _reserved.isEmpty &&
         phase.value == ConnectionPhase.disconnected &&
         free.length == 1 &&
         candidates.length == 1;
@@ -1169,11 +1476,11 @@ class HostConnectionManager extends BaseConnectionManager {
         ? {for (final d in settings.knownDevices) d.serial}
         : const <String>{};
     // The user's picks still under way (waiting for their tablet's old
-    // session to end, say) hold their place too.
+    // session to end, say) hold their place too, and so does a tablet
+    // between two sessions, its mode being changed.
     var room = cap -
         {
-          for (final s in sessions.values)
-            if (s.link == LinkType.usb) s.key,
+          ...heldUsbPlaces,
           ..._starting,
           for (final key in _choosing)
             if (key != _anyDevice && key != _linkChange && key != wifiKey) key,
@@ -1189,10 +1496,13 @@ class HostConnectionManager extends BaseConnectionManager {
 
   /// Starts connecting [key] (over Wi-Fi, the Wi-Fi session) for the
   /// policy, without waiting for it: a connect returns only once its
-  /// session is live, or never while a tablet does not answer.
+  /// session is live, or never while a tablet does not answer. In the mode
+  /// the tablet is remembered in, whichever rule picked it; one with none
+  /// remembered (and the Wi-Fi session) takes what the selectors say.
   void _start(String key) {
     _starting.add(key);
-    unawaited(connect(serial: key == wifiKey ? null : key)
+    unawaited(connectWith(key == wifiKey ? null : key,
+            choice: settings.knownChoice(key))
         .catchError((Object e) => log.w('Host: auto-connect of $key: $e'))
         .whenComplete(() => _starting.remove(key)));
   }
@@ -1224,7 +1534,9 @@ class HostConnectionManager extends BaseConnectionManager {
     }
     if (isCancelled(attempt)) return;
     if (retrying) {
-      await connect();
+      // The hub's own connect: the tablet it settles on comes back in the
+      // mode it is remembered in.
+      await connectWith(null);
     } else if (sessions.isEmpty) {
       setPhase(ConnectionPhase.disconnected);
     }
@@ -1267,8 +1579,10 @@ class HostConnectionManager extends BaseConnectionManager {
       capture.onCaptureMatched = (id) => _byNativeId(id)?.captureMatched();
     }
     if (Get.isRegistered<RemoteVideoChannel>()) {
-      Get.find<RemoteVideoChannel>().onRequestIdr =
-          (id) => _byNativeId(id)?.decoderWantsKeyframe();
+      final remote = Get.find<RemoteVideoChannel>();
+      remote.onRequestIdr = (id) => _byNativeId(id)?.decoderWantsKeyframe();
+      remote.onCodecError = (id, code) => _byNativeId(id)?.decoderFailed(code);
+      remote.onDecoderReady = (id) => _byNativeId(id)?.decoderReady();
     }
   }
 
@@ -1278,37 +1592,92 @@ class HostConnectionManager extends BaseConnectionManager {
   // set changed, or a capture showed another display, since the round under
   // way took its targets. [_displayRoundWaiting]: a display round is queued
   // and has not taken its targets yet, so it covers any change asked now.
+  // [_wakeRoundWaiting]: the same for a wake's round, which covers every
+  // capture (the media queue can be busy for a while before it runs).
   bool _rebuilding = false;
   bool _wantAll = false;
   bool _wantDisplays = false;
   bool _displayRoundWaiting = false;
+  bool _wakeRoundWaiting = false;
   // A display round is asked for, its timer not run yet.
   bool _displayRoundAsked = false;
-  // The round under way: the targets it has not started again yet.
+  // The display round asked for is wanted for the display set itself (a
+  // display made beside another, an Extend capture showing another
+  // display), not only for the repairs in [_repairs]: one asked for by
+  // repairs alone does nothing once none of them is needed any more. Set
+  // with the ask and never by a timer or a round's end, cleared as a
+  // display round takes its targets.
+  bool _displaySetAsked = false;
+  // The round under way: its targets; those it has not started again yet;
+  // and those whose virtual display it took down, until its start of each
+  // has returned.
+  final _roundTargets = <HostSession>{};
   final _roundStartsLeft = <HostSession>{};
+  final _roundDisplaysDown = <HostSession>{};
+  // Sessions whose capture of the main display showed another display: the
+  // next display round makes them again too, before any display (a repair
+  // round, [_mirrorNeedsRepair]). Only sessions the hub still holds
+  // ([_endSession] takes an ended one out).
+  final _repairs = <HostSession>{};
+
+  /// The sessions waiting for a repair round (tests).
+  @visibleForTesting
+  List<HostSession> get repairsDue => List.of(_repairs);
 
   /// Whether a rebuild round makes [session]'s running capture again: one
   /// under way that has not got to its start yet, or one asked for that
   /// has not taken its targets yet and will take this one (a display round
-  /// takes every Extend session with a display, a wake every session that
-  /// captures). [VirtualDisplays.willRestart] asks, so a first frame of a
-  /// capture about to be made again asks for no round of its own.
+  /// takes every Extend session with a display and every Mirror session
+  /// waiting for a repair, a wake every session that captures).
+  /// [VirtualDisplays.willRestart] asks, so a first frame of a capture
+  /// about to be made again asks for no round of its own.
+  ///
+  /// An Extend session answered true for a display round still to come
+  /// counts on that round from then on ([_displaySetAsked]): it may have
+  /// been asked for by a Mirror repair alone, and would do nothing if that
+  /// repair were no longer needed when it runs.
   bool _roundWillRestart(HostSession session) {
     if (_roundStartsLeft.contains(session)) return true;
-    if (_wantAll && session.canRebuild) return true;
-    return (_displayRoundAsked || _displayRoundWaiting || _wantDisplays) &&
-        session.rebuildsDisplay;
+    if ((_wantAll || _wakeRoundWaiting) && session.canRebuild) return true;
+    if (!(_displayRoundAsked || _displayRoundWaiting || _wantDisplays)) {
+      return false;
+    }
+    if (_repairs.contains(session)) return true;
+    if (!session.rebuildsDisplay) return false;
+    _displaySetAsked = true;
+    return true;
   }
+
+  /// Whether the round under way has taken down a virtual display it has
+  /// not made again yet, and does not make [session]'s capture again
+  /// itself: [session]'s stream was made beside that display, which is
+  /// about to be back. Between a round's last stop and its first display
+  /// the set is empty, and a capture of the main display whose first frame
+  /// is heard just then is still one to repair
+  /// ([VirtualDisplays.besideDisplays]). A target of the round is another
+  /// matter: its capture is, or will be, one the round made with no
+  /// display there.
+  bool _roundHasDisplaysDown(HostSession session) =>
+      !_roundTargets.contains(session) &&
+      _roundDisplaysDown.any((s) => !identical(s, session));
 
   /// The Mac woke: every session that captures is rebuilt
   /// ([_RebuildRound.wake]).
   Future<void> _rebuildAll() => _rebuild(_RebuildRound.wake);
 
   /// A session is making its virtual display while another session's
-  /// exists, or its capture showed another display ([VirtualDisplays]).
-  /// Asked from inside the queued start that makes the display: the round
-  /// is queued from outside it, once that start is over (and its connect
-  /// has gone live), and several asks before then make one round.
+  /// exists, or its Extend capture showed another display
+  /// ([VirtualDisplays]): the next display round is wanted for the display
+  /// set, whatever becomes of the repairs asked for beside it.
+  void _displaySetNeedsRebuild() {
+    _displaySetAsked = true;
+    _displaysNeedRebuild();
+  }
+
+  /// Asks for a display round. Asked from inside the queued start that
+  /// makes a display (or from a native callback): the round is queued from
+  /// outside it, once that start is over (and its connect has gone live),
+  /// and several asks before then make one round.
   void _displaysNeedRebuild() {
     if (_displayRoundAsked) return;
     _displayRoundAsked = true;
@@ -1316,6 +1685,18 @@ class HostConnectionManager extends BaseConnectionManager {
       _displayRoundAsked = false;
       unawaited(_rebuildDisplays());
     });
+  }
+
+  /// [session] captures the main display (Mirror) and its first frame
+  /// showed another one: with virtual displays about, macOS can hand a new
+  /// stream one of them instead (FB17797423), and making that stream again
+  /// beside them would likely get the same. So the next display round
+  /// takes [session] too and starts it before any display is made again (a
+  /// repair round, see [_rebuildRound]). Queued from a timer like any
+  /// display round; several asks before it runs make one round.
+  void _mirrorNeedsRepair(HostSession session) {
+    _repairs.add(session);
+    _displaysNeedRebuild();
   }
 
   /// Every Extend session's capture is rebuilt with the display set emptied
@@ -1341,8 +1722,10 @@ class HostConnectionManager extends BaseConnectionManager {
           _wantDisplays = false;
         }
         _displayRoundWaiting = next == _RebuildRound.displays;
+        _wakeRoundWaiting = next == _RebuildRound.wake;
         await pipeline.run(() {
           _displayRoundWaiting = false;
+          _wakeRoundWaiting = false;
           return _rebuildRound(next);
         });
       }
@@ -1351,6 +1734,7 @@ class HostConnectionManager extends BaseConnectionManager {
       _wantAll = false;
       _wantDisplays = false;
       _displayRoundWaiting = false;
+      _wakeRoundWaiting = false;
     }
   }
 
@@ -1370,14 +1754,49 @@ class HostConnectionManager extends BaseConnectionManager {
   /// displays of sessions on their way out (their own teardown would only
   /// get to them after the starts): FB17797423 lasts until every virtual
   /// display is gone.
+  ///
+  /// The same bug can hand a stream of the main display a virtual display
+  /// instead, so a capture of the main display has to be made while none
+  /// exists. A wake therefore starts its Mirror targets first (by what
+  /// each start will capture, [SessionSpec.displayMode]; a remote-control
+  /// session whose tablet drives the Mac always mirrors), then the Extend
+  /// ones, each group in key order; the stops stay in key order. A display
+  /// round never takes a Mirror session, except the ones whose first frame
+  /// showed another display ([_repairs], a repair round): those stop with
+  /// the rest and start first. With only Extend targets every round runs
+  /// in key order, as it always has. A display round asked for by repairs
+  /// alone, none of which is still needed when it runs (a wake's round made
+  /// that capture again meanwhile, or its session ended or lost its
+  /// capture), does nothing: the Extend tablets have nothing to be stopped
+  /// for.
   Future<void> _rebuildRound(_RebuildRound round) async {
     final wake = round == _RebuildRound.wake;
+    // The Mirror captures waiting for a repair are this round's now. A
+    // wake makes every live capture again, those included, so it only
+    // takes their asks off the list (one not live yet keeps its ask for
+    // the display round that follows).
+    final repairs = <HostSession>{};
+    if (wake) {
+      _repairs.removeWhere(
+          (s) => s.canRebuild || !identical(sessions[s.key], s));
+    } else {
+      repairs.addAll([
+        for (final s in _repairs)
+          if (identical(sessions[s.key], s) && s.repairsMirror) s,
+      ]);
+      _repairs.clear();
+      final forDisplaySet = _displaySetAsked;
+      _displaySetAsked = false;
+      if (!forDisplaySet && repairs.isEmpty) return;
+    }
     final targets = [
       for (final s in sessions.values)
-        if (wake ? s.canRebuild : s.rebuildsDisplay)
+        if (wake ? s.canRebuild : s.rebuildsDisplay || repairs.contains(s))
           (session: s, attempt: s.currentAttempt),
     ]..sort((a, b) => a.session.key.compareTo(b.session.key));
     if (targets.isEmpty) return;
+    bool first(HostSession s) =>
+        wake ? s.spec.displayMode == DisplayMode.mirror : repairs.contains(s);
     final leaving = wake
         ? const <HostSession>[]
         : [
@@ -1386,12 +1805,25 @@ class HostConnectionManager extends BaseConnectionManager {
           ];
     log.w(wake
         ? 'Host: rebuilding ${targets.length} capture pipelines after wake'
-        : 'Host: rebuilding ${targets.length} virtual displays in order '
-            '(the display set changed)');
+        : repairs.isEmpty
+            ? 'Host: rebuilding ${targets.length} virtual displays in order '
+                '(the display set changed)'
+            : 'Host: rebuilding ${targets.length} captures, '
+                '${repairs.length} of the main display first (it showed '
+                'another display)');
     displays.rebuilding = true;
-    _roundStartsLeft
+    _roundTargets
       ..clear()
       ..addAll([for (final t in targets) t.session]);
+    _roundStartsLeft
+      ..clear()
+      ..addAll(_roundTargets);
+    _roundDisplaysDown
+      ..clear()
+      ..addAll([
+        for (final t in targets)
+          if (displays.holds(t.session)) t.session,
+      ]);
     try {
       for (final s in leaving) {
         try {
@@ -1407,21 +1839,35 @@ class HostConnectionManager extends BaseConnectionManager {
           stopped.add(t);
         } catch (e, st) {
           _roundStartsLeft.remove(t.session);
+          _roundDisplaysDown.remove(t.session);
           t.session.rebuildFailed(e, st);
         }
       }
-      for (final t in stopped) {
+      // Captures of the main display first, while no virtual display
+      // exists; each group as it was stopped, in key order.
+      final starts = [
+        for (final t in stopped)
+          if (first(t.session)) t,
+        for (final t in stopped)
+          if (!first(t.session)) t,
+      ];
+      for (final t in starts) {
         // From here a capture of this session's is the round's own.
         _roundStartsLeft.remove(t.session);
         try {
           await t.session.startPipelineOp(t.attempt);
         } catch (e, st) {
           t.session.rebuildFailed(e, st);
+        } finally {
+          // Back in the display set by now, or not coming back.
+          _roundDisplaysDown.remove(t.session);
         }
       }
     } finally {
       displays.rebuilding = false;
+      _roundTargets.clear();
       _roundStartsLeft.clear();
+      _roundDisplaysDown.clear();
     }
   }
 
@@ -1486,6 +1932,8 @@ enum _RebuildRound {
   wake,
 
   /// The virtual display set changed with several displays (FB17797423):
-  /// every Extend session with a display.
+  /// every Extend session with a display. With a capture of the main
+  /// display that showed another one, that capture too, started first (a
+  /// repair round).
   displays,
 }

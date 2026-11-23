@@ -328,6 +328,54 @@ void main() {
         [('initialize', 5), ('dispose', 5)]);
   });
 
+  test("a decoder that cannot be made, and one made again, say which "
+      "session; a decoder that is no session's reaches neither slot",
+      () async {
+    final channel = RemoteVideoChannel()..onInit();
+    final errors = <(int, String)>[];
+    final ready = <int>[];
+    final keyframes = <int>[];
+    channel.onCodecError = (s, code) => errors.add((s, code));
+    channel.onDecoderReady = ready.add;
+    channel.onRequestIdr = keyframes.add;
+
+    await fromNative('extended_screen/remote_video', 'onCodecError',
+        {'session': 5, 'error': 'DECODER_BUSY'});
+    expect(errors, [(5, 'DECODER_BUSY')]);
+    expect(ready, isEmpty);
+    await fromNative(
+        'extended_screen/remote_video', 'onDecoderReady', {'session': 5});
+    expect(ready, [5]);
+    expect(keyframes, isEmpty);
+
+    // The Loopback preview's decoder: it has a listener of its own for
+    // keyframes, and no session to tell about the rest.
+    var own = 0;
+    channel.listenIdr(9, () => own++);
+    await fromNative('extended_screen/remote_video', 'onCodecError',
+        {'session': 9, 'error': 'DECODER_FAILED'});
+    await fromNative(
+        'extended_screen/remote_video', 'onDecoderReady', {'session': 9});
+    expect(errors, [(5, 'DECODER_BUSY')]);
+    expect(ready, [5]);
+    expect(own, 0);
+
+    // Calls that name no session are about nobody.
+    await fromNative('extended_screen/remote_video', 'onCodecError',
+        {'error': 'DECODER_FAILED'});
+    await fromNative('extended_screen/remote_video', 'onDecoderReady', null);
+    expect(errors, hasLength(1));
+    expect(ready, hasLength(1));
+
+    // With no slot taken (no hub), nothing throws.
+    channel.onCodecError = null;
+    channel.onDecoderReady = null;
+    await fromNative('extended_screen/remote_video', 'onCodecError',
+        {'session': 5, 'error': 'DECODER_BUSY'});
+    await fromNative(
+        'extended_screen/remote_video', 'onDecoderReady', {'session': 5});
+  });
+
   test('mouse, key and release calls name their session', () async {
     final channel = InputInjectChannel();
     await channel.injectMouse(

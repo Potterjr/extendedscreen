@@ -7,7 +7,9 @@ import 'package:extendedscreen/shared/models/display_config_model.dart';
 /// Debug only (`SYNTH_TABLETS`): a tile per synthetic tablet, showing its
 /// stream as it reached the tablet's socket, decoded on this Mac. Each tile
 /// is drawn in its tablet's panel shape, so a stream that carries another
-/// tablet's display shows bars.
+/// tablet's display shows bars. A tile's label says which mode its session
+/// runs in; one the Mac views and drives (Mac -> Tablet) has no stream to
+/// show, since the Mac sends it none and a stand-in sends no screen.
 class LoopbackPreviewView extends GetView<LoopbackPreviewController> {
   const LoopbackPreviewView({super.key});
 
@@ -65,6 +67,10 @@ class _Tile extends StatelessWidget {
         };
         final texture = tile.textureId.value;
         final busy = phase.isConnecting || phase.isActive;
+        // Fixed for the session's life: a tablet whose mode is changed gets
+        // a new session, which this builder follows through the hub's map.
+        final choice = session?.effectiveChoice;
+        final reverse = choice?.isReverse ?? false;
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -98,6 +104,7 @@ class _Tile extends StatelessWidget {
             ),
             Text(
               [
+                if (choice != null) choice.label,
                 phase.label,
                 codec,
                 '${tile.fps.value} fps',
@@ -121,12 +128,26 @@ class _Tile extends StatelessWidget {
                   color: Colors.black,
                   border: Border.all(color: _accent.withValues(alpha: 0.4)),
                 ),
-                child: texture == null
+                // A session the Mac views gets no stream from the Mac: a
+                // texture still there is an earlier session's last picture,
+                // so it is not shown as this one's.
+                child: reverse
                     ? Center(
-                        child: Text('loopback_preview_no_stream'.tr,
-                            style: dim),
+                        child: Padding(
+                          padding: const EdgeInsets.all(12),
+                          child: Text(
+                            'loopback_no_picture_reverse'.tr,
+                            textAlign: TextAlign.center,
+                            style: dim,
+                          ),
+                        ),
                       )
-                    : Texture(textureId: texture),
+                    : texture == null
+                        ? Center(
+                            child: Text('loopback_preview_no_stream'.tr,
+                                style: dim),
+                          )
+                        : Texture(textureId: texture),
               ),
             ),
           ],

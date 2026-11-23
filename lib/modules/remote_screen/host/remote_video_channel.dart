@@ -23,8 +23,19 @@ class RemoteVideoChannel extends GetxService {
   /// request.
   void Function(int session)? onRequestIdr;
 
+  /// Invoked with the session whose native decoder could not be made, and
+  /// the plugin's code for why (`DECODER_BUSY` or `DECODER_FAILED`, with
+  /// VideoToolbox's status): that tablet's picture is not shown until
+  /// [onDecoderReady].
+  void Function(int session, String code)? onCodecError;
+
+  /// Invoked with the session whose native decoder was made again, the
+  /// first time after an [onCodecError].
+  void Function(int session)? onDecoderReady;
+
   // Decoders that are no session's (the debug Loopback preview's): their
-  // keyframe requests go to their own listener, never to [onRequestIdr].
+  // keyframe requests go to their own listener, never to [onRequestIdr],
+  // and their failures and recoveries are only logged.
   final _idrListeners = <int, void Function()>{};
 
   /// [session]'s keyframe requests go to [onIdr] instead of [onRequestIdr],
@@ -55,6 +66,18 @@ class RemoteVideoChannel extends GetxService {
         }
       case 'onCodecError':
         _log.w('RemoteVideo codec error: $args');
+        if (session is int && !_idrListeners.containsKey(session)) {
+          final code = args is Map ? args['error'] : null;
+          onCodecError?.call(session, code is String ? code : '');
+        }
+      case 'onDecoderReady':
+        if (session is int) {
+          if (_idrListeners.containsKey(session)) {
+            _log.i('RemoteVideo decoder made again (session $session)');
+          } else {
+            onDecoderReady?.call(session);
+          }
+        }
     }
     return null;
   }

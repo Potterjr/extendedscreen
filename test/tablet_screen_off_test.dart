@@ -17,6 +17,7 @@ import 'package:extendedscreen/shared/connection/socket_service.dart';
 import 'package:extendedscreen/shared/models/device_model.dart';
 import 'package:extendedscreen/shared/models/link_type.dart';
 import 'package:extendedscreen/shared/models/packet_model.dart';
+import 'package:extendedscreen/shared/models/session_choice.dart';
 import 'package:extendedscreen/shared/models/session_mode.dart';
 import 'package:extendedscreen/shared/services/logger_service.dart';
 import 'package:extendedscreen/shared/services/settings_service.dart';
@@ -44,6 +45,30 @@ class _Adb extends AdbService {
 
   @override
   Future<void> removeForward({required String serial, int? remotePort}) async {}
+
+  /// The end of the tablet's input shell, which every teardown of a tablet
+  /// the Mac controls asks for: not what these tests are about.
+  @override
+  Future<void> closeInputShell({required String serial}) async {}
+
+  /// The taps and swipes the Mac sent the tablet.
+  final input = <String>[];
+
+  @override
+  Future<void> inputTap(
+          {required String serial, required int x, required int y}) async =>
+      input.add('tap $serial $x $y');
+
+  @override
+  Future<void> inputSwipe({
+    required String serial,
+    required int x1,
+    required int y1,
+    required int x2,
+    required int y2,
+    int durationMs = 50,
+  }) async =>
+      input.add('swipe $serial $x1 $y1 $x2 $y2 $durationMs');
 }
 
 class _Capture extends ScreenCaptureChannel {
@@ -88,6 +113,17 @@ void main() {
         const DeviceModel(serial: 'TABLET', status: DeviceStatus.connected);
   }
 
+  /// The tablet's session, made as [choice]; with none, as the selectors
+  /// stand (Mac controls tablet, from the set-up).
+  HostSession sessionAs(SessionChoice? choice) => HostSession(
+        key: 'TABLET',
+        link: LinkType.usb,
+        serial: 'TABLET',
+        choice: choice,
+        pipeline: PipelineQueue(),
+        socket: SocketService(),
+      );
+
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
     Get.put(LoggerService());
@@ -100,13 +136,7 @@ void main() {
     Get.put<ScreenCaptureChannel>(_Capture());
     Get.put<InputInjectChannel>(_Input());
     Get.put<RemoteVideoChannel>(_Remote());
-    host = HostSession(
-      key: 'TABLET',
-      link: LinkType.usb,
-      serial: 'TABLET',
-      pipeline: PipelineQueue(),
-      socket: SocketService(),
-    );
+    host = sessionAs(null);
   });
 
   tearDown(Get.reset);
@@ -255,11 +285,42 @@ void main() {
   });
 
   test('outside Mac-controls-tablet nothing is turned off', () async {
-    await settings.setSessionMode(SessionMode.extendedScreen);
+    // A session is what it was made to be: one made to extend.
+    host = sessionAs(const SessionChoice(SessionMode.extendedScreen));
+    // Whatever the selectors say, which is Mac controls tablet here.
+    expect(settings.isReverseRemote, isTrue);
     live();
     host.tabletStreaming.value = true;
     expect(await host.setTabletScreenOff(true), isNotNull);
     expect(adb.calls, isEmpty);
+  });
+
+  test("the Mac's taps and swipes go to a tablet it controls, to its own "
+      'device, and to no other kind of session', () async {
+    live();
+    final panel = host.panel;
+    host.sendRemoteTap(0.5, 0.5);
+    host.sendRemoteSwipe(0, 0, 1, 1);
+    expect(adb.input, [
+      'tap TABLET ${panel.width ~/ 2} ${panel.height ~/ 2}',
+      'swipe TABLET 0 0 ${panel.width} ${panel.height} 50',
+    ]);
+
+    // An Extended screen takes its input from the tablet, and sends none.
+    adb.input.clear();
+    host = sessionAs(const SessionChoice(SessionMode.extendedScreen));
+    live();
+    host.sendRemoteTap(0.5, 0.5);
+    host.sendRemoteSwipe(0, 0, 1, 1);
+    expect(adb.input, isEmpty);
+
+    // Nor does a tablet that drives the Mac.
+    host = sessionAs(const SessionChoice(
+        SessionMode.remoteControl, RemoteDirection.tabControlsMac));
+    live();
+    host.sendRemoteTap(0.5, 0.5);
+    host.sendRemoteSwipe(0, 0, 1, 1);
+    expect(adb.input, isEmpty);
   });
 
   test('the choice is kept per tablet', () async {

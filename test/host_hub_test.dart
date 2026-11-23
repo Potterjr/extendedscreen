@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:extendedscreen/modules/extended_screen/host/input_inject_channel.dart';
 import 'package:extendedscreen/modules/extended_screen/host/screen_capture_channel.dart';
+import 'package:extendedscreen/modules/remote_screen/host/remote_video_channel.dart';
 import 'package:extendedscreen/shared/connection/adb_service.dart';
 import 'package:extendedscreen/shared/connection/connection_state.dart';
 import 'package:extendedscreen/shared/connection/debug/synthetic_tablet.dart';
@@ -17,12 +18,16 @@ import 'package:extendedscreen/shared/connection/host_session.dart';
 import 'package:extendedscreen/shared/connection/pipeline_queue.dart';
 import 'package:extendedscreen/shared/connection/socket_service.dart';
 import 'package:extendedscreen/shared/models/client_panel.dart';
+import 'package:extendedscreen/shared/models/device_model.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
 import 'package:extendedscreen/shared/models/link_type.dart';
+import 'package:extendedscreen/shared/models/session_choice.dart';
 import 'package:extendedscreen/shared/models/session_mode.dart';
 import 'package:extendedscreen/shared/models/touch_event_model.dart';
 import 'package:extendedscreen/shared/services/logger_service.dart';
 import 'package:extendedscreen/shared/services/settings_service.dart';
+
+import 'support/recording_remote_video.dart';
 
 /// The hub and its per-tablet sessions, against tablets stood in for in
 /// this process ([FakeTablet], with [SynthAdb] playing adb).
@@ -100,6 +105,29 @@ class _Input extends InputInjectChannel {
   @override
   Future<void> injectMouse(MouseEventModel e, Map<String, double> displayBounds,
       {required int session}) async {}
+}
+
+/// adb whose device listing can be held ([listing]), as a slow `adb devices`
+/// holds a connect that has no serial yet.
+class _SlowListing extends SynthAdb {
+  _SlowListing(super.tablets);
+
+  /// While set, a listing answers only once it completes.
+  Completer<void>? listing;
+
+  /// Listings asked for and held.
+  int waiting = 0;
+
+  @override
+  Future<List<DeviceModel>?> listDevicesOrNull() async {
+    final held = listing;
+    if (held != null) {
+      waiting++;
+      await held.future;
+      waiting--;
+    }
+    return super.listDevicesOrNull();
+  }
 }
 
 Future<void> _until(bool Function() condition,
@@ -510,28 +538,281 @@ void main() {
       expect(phases, isNot(contains(ConnectionPhase.disconnected)));
     });
 
-    test('in remote control a second pick replaces the session, as it always '
-        'did', () async {
+    test('in remote control a second pick adds a session beside the first, '
+        'each tablet told its own mode', () async {
       await settings.setSessionMode(SessionMode.remoteControl);
       await settings.setRemoteDirection(RemoteDirection.tabControlsMac);
-      final all = tablets(['A', 'B']);
-      final a = all.first;
-      final adb = SynthAdb(all);
+      final [tabletA, tabletB] = tablets(['A', 'B']);
+      final adb = SynthAdb([tabletA, tabletB]);
       final hub = await roomyHub(adb);
-      expect(hub.cap, 1);
+      expect(hub.cap, settings.maxTablets,
+          reason: 'the mode no longer makes it one tablet at a time');
+      expect(hub.cap, 4);
 
       await hub.connect(serial: 'A');
-      final first = hub.focused!;
-      await hub.connect(serial: 'B');
-      expect(hub.sessions.keys, ['A'], reason: 'A is live: refused');
+      final a = hub.focused!;
+      final idA = a.nativeId;
+      expect(hub.canAdd, isTrue);
 
-      adb.unplugged.add('A');
-      await a.hangUp();
-      await _until(() => hub.phase.value == ConnectionPhase.error);
+      // The second one extends: the selectors moved on between the picks.
+      await settings.setSessionMode(SessionMode.extendedScreen);
       await hub.connect(serial: 'B');
-      expect(hub.sessions.keys, ['B']);
+      final b = hub.focused!;
+      expect(hub.sessions.keys.toSet(), {'A', 'B'});
+      expect(hub.sessions['A'], same(a), reason: 'A was not replaced');
+      expect(a.nativeId, idA);
+      expect(b.key, 'B');
+      expect(a.phase.value, ConnectionPhase.streaming);
+      expect(b.phase.value, ConnectionPhase.streaming);
+      expect(hub.usbSessionCount, 2);
+
+      await _until(() => tabletA.mode != null && tabletB.mode != null);
+      expect(tabletA.mode, SessionMode.remoteControl);
+      expect(tabletA.direction, RemoteDirection.tabControlsMac);
+      expect(tabletB.mode, SessionMode.extendedScreen);
+      expect(tabletA.controls.where((c) => c == 0xF9), hasLength(1));
+      expect(tabletB.controls.where((c) => c == 0xF9), hasLength(1));
+      expect(
+          a.choice,
+          const SessionChoice(
+              SessionMode.remoteControl, RemoteDirection.tabControlsMac));
+      expect(b.choice.mode, SessionMode.extendedScreen);
+      expect(adb.keysDelivered, {'A': 1, 'B': 1});
+    });
+
+    // With Maximum tablets 1 a pick still replaces, in remote control as in
+    // any mode, in either direction.
+    for (final direction in RemoteDirection.values) {
+      test('with Maximum tablets 1, in remote control (${direction.name}), a '
+          'second pick is refused while the first is live and replaces it '
+          'once it is not, never showing disconnected', () async {
+        Get.put<RemoteVideoChannel>(RecordingRemoteVideo());
+        await settings.setMaxTablets(1);
+        await settings.setSessionMode(SessionMode.remoteControl);
+        await settings.setRemoteDirection(direction);
+        final all = tablets(['A', 'B']);
+        final a = all.first;
+        final adb = SynthAdb(all);
+        final hub = await roomyHub(adb);
+        expect(hub.cap, 1);
+
+        await hub.connect(serial: 'A');
+        final first = hub.focused!;
+        expect(first.spec.direction, direction);
+        await hub.connect(serial: 'B');
+        expect(hub.sessions.keys, ['A'], reason: 'A is live: refused');
+
+        adb.unplugged.add('A');
+        await a.hangUp();
+        await _until(() => hub.phase.value == ConnectionPhase.error);
+        // Ending A takes a while.
+        adb.removeDelay = const Duration(milliseconds: 300);
+        final phases = <ConnectionPhase>[];
+        final worker = ever<ConnectionPhase>(hub.phase, phases.add);
+        addTearDown(worker.dispose);
+        await hub.connect(serial: 'B');
+        expect(hub.sessions.keys, ['B']);
+        expect(hub.phase.value, ConnectionPhase.streaming);
+        expect(first.phase.value, ConnectionPhase.disconnected);
+        expect(phases.first, ConnectionPhase.detectingDevice);
+        expect(phases.last, ConnectionPhase.streaming);
+        expect(phases, isNot(contains(ConnectionPhase.disconnected)));
+        expect(hub.focused!.spec.direction, direction);
+        await _until(() => all.last.mode != null);
+        expect(all.last.mode, SessionMode.remoteControl);
+        expect(all.last.direction, direction);
+      });
+    }
+
+    test('a pick runs in the mode the selectors showed when it was made: a '
+        'change while adb is still listing does not reach it', () async {
+      final [tabletA] = tablets(['A']);
+      final adb = _SlowListing([tabletA]);
+      final hub = await roomyHub(adb);
+      await settings.setSessionMode(SessionMode.remoteControl);
+      await settings.setRemoteDirection(RemoteDirection.tabControlsMac);
+
+      // Connect with nothing chosen: adb is asked what is attached first.
+      adb.listing = Completer<void>();
+      final connecting = hub.connect();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(hub.sessions, isEmpty);
+      expect(hub.phase.value, ConnectionPhase.detectingDevice);
+
+      await settings.setSessionMode(SessionMode.extendedScreen);
+      adb.listing!.complete();
+      adb.listing = null;
+      await connecting;
+
+      final a = hub.sessions['A']!;
+      expect(a.phase.value, ConnectionPhase.streaming);
+      expect(a.choice.mode, SessionMode.remoteControl);
+      expect(a.spec.mode, SessionMode.remoteControl);
+      await _until(() => tabletA.mode != null);
+      expect(tabletA.mode, SessionMode.remoteControl);
+      expect(settings.knownChoice('A')?.mode, SessionMode.remoteControl);
+    });
+
+    test('a tablet the hub connects by itself runs in the mode it is '
+        'remembered in, one with none in the selectors\' as they stand then',
+        () async {
+      const reverse = SessionChoice(
+          SessionMode.remoteControl, RemoteDirection.macControlsTab);
+      Get.put<RemoteVideoChannel>(RecordingRemoteVideo());
+      final [tabletA, tabletB] = tablets(['A', 'B']);
+      final adb = SynthAdb([tabletA, tabletB]);
+      final hub = await roomyHub(adb);
+      await settings.rememberDevice('A', vdSerial: 0x10001, choice: reverse);
+      await settings.rememberDevice('B', vdSerial: 0x10002);
+      await settings.setSessionMode(SessionMode.remoteControl);
+      await settings.setRemoteDirection(RemoteDirection.tabControlsMac);
+
+      await hub.connectIfUnambiguous();
+      await _until(() =>
+          hub.sessions.length == 2 &&
+          hub.sessions.values
+              .every((s) => s.phase.value == ConnectionPhase.streaming));
+      expect(hub.sessions['A']!.choice, reverse);
+      expect(hub.sessions['A']!.spec.isReverseRemote, isTrue);
+      expect(
+          hub.sessions['B']!.choice,
+          const SessionChoice(
+              SessionMode.remoteControl, RemoteDirection.tabControlsMac));
+      await _until(() => tabletA.mode != null && tabletB.mode != null);
+      expect(tabletA.direction, RemoteDirection.macControlsTab);
+      expect(tabletB.direction, RemoteDirection.tabControlsMac);
+      // And B is remembered in it from now on.
+      expect(settings.knownChoice('B'), hub.sessions['B']!.choice);
+    });
+
+    test('a link change back to USB brings a known tablet back in the mode '
+        'it is remembered in, not in the one the selectors show', () async {
+      const reverse = SessionChoice(
+          SessionMode.remoteControl, RemoteDirection.macControlsTab);
+      Get.put<RemoteVideoChannel>(RecordingRemoteVideo());
+      final [tabletA] = tablets(['A']);
+      final adb = SynthAdb([tabletA]);
+      final hub = await roomyHub(adb);
+      await settings.setSessionMode(SessionMode.remoteControl);
+      await settings.setRemoteDirection(RemoteDirection.macControlsTab);
+      await hub.connect(serial: 'A');
       expect(hub.phase.value, ConnectionPhase.streaming);
-      expect(first.phase.value, ConnectionPhase.disconnected);
+      expect(settings.knownChoice('A'), reverse);
+
+      // The selectors move on, and the tablet's link drops.
+      await settings.setSessionMode(SessionMode.extendedScreen);
+      adb.unplugged.add('A');
+      await tabletA.hangUp();
+      await _until(() =>
+          hub.sessions['A']!.phase.value == ConnectionPhase.error &&
+          hub.sessions['A']!.retryPending.value);
+
+      // Over to Wi-Fi while it waits to retry: the Mac listens instead, in
+      // the selectors' mode (nothing is remembered for the Wi-Fi session).
+      // No Wi-Fi identity in this test, so that session fails and retries.
+      await settings.setLinkType(LinkType.wifi);
+      await _until(() =>
+          hub.sessions.keys.join() == HostConnectionManager.wifiKey);
+      final wifi = hub.sessions[HostConnectionManager.wifiKey]!;
+      expect(wifi.choice.mode, SessionMode.extendedScreen);
+      await _until(() =>
+          wifi.phase.value == ConnectionPhase.error && wifi.retryPending.value);
+
+      // And back, the tablet plugged in again.
+      adb.unplugged.remove('A');
+      tabletA.mode = tabletA.direction = null;
+      await settings.setLinkType(LinkType.usb);
+      await _until(() =>
+          hub.sessions['A']?.phase.value == ConnectionPhase.streaming);
+      expect(hub.sessions.keys, ['A']);
+      expect(hub.sessions['A']!.choice, reverse);
+      await _until(() => tabletA.mode != null);
+      expect(tabletA.mode, SessionMode.remoteControl);
+      expect(tabletA.direction, RemoteDirection.macControlsTab);
+      expect(settings.nextChoice.mode, SessionMode.extendedScreen);
+    });
+
+    test("the hub's own connect after a link change takes a tablet with no "
+        'mode remembered in the mode the selectors showed as that connect '
+        'began: a change while adb is still listing does not reach it',
+        () async {
+      const driving = SessionChoice(
+          SessionMode.remoteControl, RemoteDirection.tabControlsMac);
+      final [tabletA, tabletB] = tablets(['A', 'B']);
+      final adb = _SlowListing([tabletA, tabletB])..unplugged.add('B');
+      final hub = await roomyHub(adb);
+      await hub.connect(serial: 'A');
+      expect(hub.phase.value, ConnectionPhase.streaming);
+
+      // A's link drops and it waits to retry; over to Wi-Fi meanwhile (no
+      // Wi-Fi identity in this test, so that session fails and retries).
+      adb.unplugged.add('A');
+      await tabletA.hangUp();
+      await _until(() =>
+          hub.sessions['A']!.phase.value == ConnectionPhase.error &&
+          hub.sessions['A']!.retryPending.value);
+      await settings.setLinkType(LinkType.wifi);
+      await _until(() =>
+          hub.sessions.keys.join() == HostConnectionManager.wifiKey);
+      final wifi = hub.sessions[HostConnectionManager.wifiKey]!;
+      await _until(() =>
+          wifi.phase.value == ConnectionPhase.error && wifi.retryPending.value);
+
+      // Another tablet is plugged in, one the Mac has never had, and the
+      // selectors say Tablet -> Mac. Back to USB: the hub connects by
+      // itself, with no mode given, and adb takes its time listing.
+      adb.unplugged.remove('B');
+      await settings.setSessionMode(driving.mode);
+      await settings.setRemoteDirection(driving.direction);
+      expect(settings.knownChoice('B'), isNull);
+      adb.listing = Completer<void>();
+      await settings.setLinkType(LinkType.usb);
+      await _until(() => adb.waiting == 1);
+      expect(hub.sessions, isEmpty);
+
+      // The selectors move on while it lists.
+      await settings.setSessionMode(SessionMode.extendedScreen);
+      adb.listing!.complete();
+      adb.listing = null;
+      await _until(() =>
+          hub.sessions['B']?.phase.value == ConnectionPhase.streaming);
+      expect(hub.sessions.keys, ['B']);
+      expect(hub.sessions['B']!.choice, driving);
+      await _until(() => tabletB.mode != null);
+      expect(tabletB.mode, SessionMode.remoteControl);
+      expect(tabletB.direction, RemoteDirection.tabControlsMac);
+      expect(settings.knownChoice('B'), driving);
+      expect(settings.nextChoice.mode, SessionMode.extendedScreen);
+    });
+
+    test('with no tablet attached, the tablet plugged in later runs in the '
+        'mode the selectors showed at the Connect, not in one chosen while '
+        'the hub was looking for it', () async {
+      const driving = SessionChoice(
+          SessionMode.remoteControl, RemoteDirection.tabControlsMac);
+      final [tablet] = tablets(['NEW']);
+      final adb = SynthAdb([tablet])..unplugged.add('NEW');
+      final hub = await roomyHub(adb);
+      await settings.setSessionMode(driving.mode);
+      await settings.setRemoteDirection(driving.direction);
+
+      await hub.connect();
+      expect(hub.phase.value, ConnectionPhase.error);
+      expect(hub.errorMessage.value, contains('No ADB device'));
+      expect(hub.sessions, isEmpty);
+
+      // The selectors move on, then the tablet is plugged in: the hub's
+      // next look takes it.
+      await settings.setSessionMode(SessionMode.extendedScreen);
+      adb.unplugged.clear();
+      await _until(
+          () => hub.sessions['NEW']?.phase.value == ConnectionPhase.streaming,
+          timeout: const Duration(seconds: 4));
+      expect(hub.sessions['NEW']!.choice, driving);
+      await _until(() => tablet.mode != null);
+      expect(tablet.mode, SessionMode.remoteControl);
+      expect(tablet.direction, RemoteDirection.tabControlsMac);
+      expect(settings.knownChoice('NEW'), driving);
     });
 
     test('a pick past the cap is refused', () async {

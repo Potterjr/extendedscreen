@@ -10,6 +10,7 @@ import 'package:extendedscreen/shared/connection/host_session.dart';
 import 'package:extendedscreen/shared/connection/wifi_pairing_service.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
 import 'package:extendedscreen/shared/models/link_type.dart';
+import 'package:extendedscreen/shared/models/session_choice.dart';
 import 'package:extendedscreen/shared/models/session_mode.dart';
 import 'package:extendedscreen/shared/models/session_spec.dart';
 import 'package:extendedscreen/shared/services/settings_service.dart';
@@ -32,17 +33,25 @@ class HomeView extends GetView<HomeController> {
 
     return Scaffold(
       appBar: AppBar(
-        // On the host show the chosen session mode (picked via the selector
-        // below), or with several tablets the app's name and how many —
-        // wrapped in Obx so it reacts. The client always shows the static
-        // app name, so it must NOT be in an Obx (a builder that reads no
-        // observable trips GetX's "improper use").
+        // On the host: with no tablet, the mode the next one would run in
+        // (picked in the add panel below); with one, that tablet's own mode
+        // (a session keeps the mode it was made for, whatever the selector
+        // says by now); with several, the app's name and how many. Wrapped
+        // in Obx so it reacts. The client always shows the static app name,
+        // so it must NOT be in an Obx (a builder that reads no observable
+        // trips GetX's "improper use").
         title: controller.isHost
             ? Obx(() {
-                final count = (cm as HostConnectionManager).sessions.length;
+                final sessions =
+                    (cm as HostConnectionManager).sessions.values.toList();
+                final count = sessions.length;
                 const style = TextStyle(fontWeight: FontWeight.w600);
-                if (count <= 1) {
+                if (count == 0) {
                   return Text(settings.sessionModeRx.value.label, style: style);
+                }
+                if (count == 1) {
+                  return Text(sessions.single.effectiveChoice.label,
+                      style: style);
                 }
                 return Row(
                   children: [
@@ -206,10 +215,19 @@ class _HostBody extends StatelessWidget {
       final busy = phases.any((p) => p.isConnecting || p.isActive) ||
           phase.isConnecting ||
           phase.isActive;
-      // Mode, direction and link apply to the next connect, and to every
-      // tablet at once: only while nothing is under way, and never with
-      // several tablets (their sessions keep what they started with).
-      final selectors = !busy && sessions.length <= 1;
+      // The link is every tablet's at once: its selector shows only while
+      // nothing is under way, and never with several tablets. Mode and
+      // direction say what the next session made runs as, and a session
+      // that exists keeps what it was made for. Over USB they sit in the
+      // add panel, always: they are part of adding a tablet, and a tablet
+      // that has a card changes mode from that card's menu. Over Wi-Fi,
+      // where there is one session and no card, they go with the link
+      // selector, and a change reaches a session that waits to retry by
+      // replacing it (HomeController.onSelectSessionMode).
+      // Nor while a tablet is between two sessions (its mode being changed
+      // from its card): it is in none of [sessions] for a moment, the hub
+      // acts on no link change meanwhile, and it comes back over USB.
+      final selectors = !busy && sessions.length <= 1 && !hub.replacing;
       return ListView(
         padding: const EdgeInsets.all(20),
         children: [
@@ -244,7 +262,7 @@ class _HostBody extends StatelessWidget {
         wifi: true,
       ),
       const SizedBox(height: 16),
-      if (selectors) ..._selectors(),
+      if (selectors) ...[..._modeSelectors(), ..._linkSelector()],
       // Where the tablet finds this Mac. Not part of the idle-only block
       // above: listening is a connecting phase, and that is exactly when the
       // address is needed (to type on a tablet that can't find the Mac by
@@ -257,10 +275,6 @@ class _HostBody extends StatelessWidget {
       if (phase.isActive) ...[
         DeviceInfoCard(device: hub.activeDevice.value),
         const SizedBox(height: 12),
-        if (controller.isReverseRemote) ...[
-          _OpenRemoteButton(controller: controller),
-          const SizedBox(height: 12),
-        ],
         LatencyChip(
             latencyMs: hub.latencyMs.value,
             wifi: true,
@@ -275,13 +289,13 @@ class _HostBody extends StatelessWidget {
 
   /// Over USB: a card per tablet (with none, the facade's card, which says
   /// what the hub is doing: looking for a device, or that none is
-  /// attached), the selectors while idle, and the add panel.
+  /// attached), the link selector while idle, and the add panel, which
+  /// holds the mode the next tablet added runs in above its tiles.
   List<Widget> _usb(ConnectionPhase phase, String codecLabel,
       List<HostSession> sessions, bool busy, bool selectors, bool capturing) {
     final focusedKey = hub.focusedKey.value;
     final devices = hub.availableDevices.toList();
     final cap = hub.cap;
-    final remote = settings.sessionModeRx.value == SessionMode.remoteControl;
     // With one tablet at most (cap 1), picking another one replaces the
     // session there is while it is not under way, as it always has.
     final canPick = hub.canAdd || (cap == 1 && sessions.length <= 1 && !busy);
@@ -289,25 +303,48 @@ class _HostBody extends StatelessWidget {
     // them: the tablets it freed are not short of room, and the facade
     // still reads the phase of a session that has no card any more.
     final ending = hub.endingAll.value;
-    final spec = SessionSpec.of(settings, LinkType.usb);
+    // What a tile pressed now would run as: the selectors' choice, read
+    // through their observables so this builder follows them.
+    final next = SessionSpec.from(
+        SessionChoice(
+            settings.sessionModeRx.value, settings.remoteDirectionRx.value),
+        LinkType.usb,
+        displayMode: settings.displayMode);
     final free = hub.freeDevices.toList();
+    // What a tablet the Mac has had before ran as last time, which is what
+    // it comes back as when it connects by itself. A press on its tile
+    // asks for the mode chosen above the tiles instead, so the tile says
+    // which one the tablet is used to. The known list is not observable;
+    // reading it at each build is enough, since a tablet's entry changes
+    // only while it has a session (as it goes live, or when its mode is
+    // changed from its card), and its tile is back only once that session
+    // has left the map this builder follows.
+    final known = free.isEmpty
+        ? const <String, SessionChoice?>{}
+        : {for (final k in settings.knownDevices) k.serial: k.choice};
+    final lastModes = <String, String>{
+      for (final d in free)
+        if (known[d.serial] case final last?)
+          d.serial: 'home_tile_last_mode'.trParams({'mode': last.label}),
+    };
     final disabled = <String, String>{
       for (final d in free)
+        // A tablet the Mac only views takes nothing of the encoder: it
+        // needs a place, and no room there.
         if (!canPick ||
-            !hub.budget.wouldFit(
-                settings.captureConfigFor(
-                    settings.clientPanelFor(d.serial) ??
-                        settings.lastClientPanel,
-                    spec),
-                cap: cap))
-          d.serial: ending
-              ? 'home_disconnecting'.tr
-              : remote && sessions.isNotEmpty
-                  ? 'home_remote_single'.tr
-                  : 'home_at_limit'.tr,
+            (!next.isReverseRemote &&
+                !hub.budget.wouldFit(
+                    settings.captureConfigFor(
+                        settings.clientPanelFor(d.serial) ??
+                            settings.lastClientPanel,
+                        next),
+                    cap: cap)))
+          d.serial: ending ? 'home_disconnecting'.tr : 'home_at_limit'.tr,
     };
+    // Places in use: a tablet between two sessions holds its own.
     final header = [
-      'home_tablets_count'.trParams({'n': '${hub.usbSessionCount}', 'cap': '$cap'}),
+      'home_tablets_count'
+          .trParams({'n': '${hub.heldUsbPlaces.length}', 'cap': '$cap'}),
       if (capturing)
         'home_encoder_load'.trParams({
           'load': '${(hub.budget.load * 100).round()}',
@@ -342,15 +379,16 @@ class _HostBody extends StatelessWidget {
           onFocus: () => controller.onFocus(s.key),
           onStop: controller.onSessionStop,
           onRetry: controller.onSessionRetry,
-          onOpenRemote: () {
-            controller.onFocus(s.key);
-            controller.onOpenRemoteView();
-          },
+          // The remote view shows every tablet the Mac controls; the key
+          // only says which tile to show alone. The hub's focus stays.
+          onOpenRemote: () => controller.onOpenRemoteView(key: s.key),
+          // Not while every session is being ended: the hub would refuse.
+          onMode: ending ? null : controller.onSessionMode,
         ),
         const SizedBox(height: 12),
       ],
       if (sessions.isNotEmpty) const SizedBox(height: 4),
-      if (selectors) ..._selectors(),
+      if (selectors) ..._linkSelector(),
       DevicePickerCard(
         // Snapshots taken here, inside the Obx builder, so GetX subscribes
         // to them. Passing the RxList itself registers nothing (the card
@@ -359,9 +397,29 @@ class _HostBody extends StatelessWidget {
         devices: free,
         title: 'home_add_tablet'.tr,
         header: header,
-        emptyText:
-            sessions.isNotEmpty ? 'home_all_attached_connected'.tr : null,
+        // A tablet between two sessions is attached, and on its way back.
+        emptyText: sessions.isNotEmpty || hub.replacing
+            ? 'home_all_attached_connected'.tr
+            : null,
         disabledReasons: disabled,
+        subtitles: lastModes,
+        // Always there, whatever the tablets are doing: it changes none of
+        // them, only what the next press on a tile below asks for.
+        leading: [
+          Padding(
+            key: const ValueKey('next/caption'),
+            padding: const EdgeInsets.only(left: 4, top: 10, bottom: 8),
+            child: Text(
+              'home_next_tablet_mode'.tr,
+              style: const TextStyle(
+                color: Colors.white70,
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          ..._modeSelectors(gap: 12),
+        ],
         refreshing: controller.refreshingDevices.value,
         onSelect: controller.onSelectDevice,
         onRefresh: controller.refreshDevices,
@@ -369,14 +427,22 @@ class _HostBody extends StatelessWidget {
     ];
   }
 
-  /// Session mode, remote direction (remote control only) and link.
-  List<Widget> _selectors() => [
-        _SessionModeSelector(controller: controller),
-        const SizedBox(height: 16),
+  /// What the next session made runs as: session mode and, for remote
+  /// control, the direction, each followed by [gap]. Keyed, since the
+  /// direction comes and goes with the mode.
+  List<Widget> _modeSelectors({double gap = 16}) => [
+        _SessionModeSelector(
+            key: const ValueKey('next/mode'), controller: controller),
+        SizedBox(key: const ValueKey('next/mode/gap'), height: gap),
         if (controller.isRemoteControl) ...[
-          _DirectionSelector(controller: controller),
-          const SizedBox(height: 16),
+          _DirectionSelector(
+              key: const ValueKey('next/dir'), controller: controller),
+          SizedBox(key: const ValueKey('next/dir/gap'), height: gap),
         ],
+      ];
+
+  /// USB or Wi-Fi.
+  List<Widget> _linkSelector() => [
         _LinkTypeSelector(controller: controller),
         const SizedBox(height: 16),
       ];
@@ -403,29 +469,6 @@ class _OpenViewButton extends StatelessWidget {
           foregroundColor: Colors.black,
           disabledBackgroundColor: Colors.white12,
           disabledForegroundColor: Colors.white38,
-          textStyle: const TextStyle(fontWeight: FontWeight.w600, fontSize: 16),
-        ),
-      ),
-    );
-  }
-}
-
-class _OpenRemoteButton extends StatelessWidget {
-  final HomeController controller;
-  const _OpenRemoteButton({required this.controller});
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      width: double.infinity,
-      height: 52,
-      child: FilledButton.icon(
-        onPressed: controller.onOpenRemoteView,
-        icon: const Icon(Icons.touch_app_outlined),
-        label: Text('home_open_remote'.tr),
-        style: FilledButton.styleFrom(
-          backgroundColor: const Color(0xFF00C8FF),
-          foregroundColor: Colors.black,
           textStyle: const TextStyle(fontWeight: FontWeight.w600, fontSize: 16),
         ),
       ),
@@ -470,9 +513,11 @@ class _ShareScreenButton extends StatelessWidget {
   }
 }
 
+/// Host, with remote control chosen for the next session: which side drives
+/// it. Options keyed `next/dir/<name>`.
 class _DirectionSelector extends StatelessWidget {
   final HomeController controller;
-  const _DirectionSelector({required this.controller});
+  const _DirectionSelector({super.key, required this.controller});
 
   @override
   Widget build(BuildContext context) {
@@ -501,6 +546,7 @@ class _DirectionSelector extends StatelessWidget {
               final selected = dir == active;
               final available = !(wifi && dir.isReverse);
               return Expanded(
+                key: ValueKey('next/dir/${dir.name}'),
                 child: Padding(
                   padding: EdgeInsets.only(
                       right: dir == RemoteDirection.values.first ? 8 : 0),
@@ -842,12 +888,13 @@ class _WifiClientCardState extends State<_WifiClientCard> {
   }
 }
 
-/// Host, idle: compact segmented control for which session to run — replaces
-/// the old dedicated Launcher screen so switching modes is one tap on Home
-/// instead of a forced screen on every launch.
+/// Host: compact segmented control for what the next session made runs as
+/// (one tap on Home, not a launcher screen). Over USB it sits in the add
+/// panel, over Wi-Fi with the link selector. Options keyed by what they
+/// choose (`next/mode/<name>`).
 class _SessionModeSelector extends StatelessWidget {
   final HomeController controller;
-  const _SessionModeSelector({required this.controller});
+  const _SessionModeSelector({super.key, required this.controller});
 
   @override
   Widget build(BuildContext context) {
@@ -857,6 +904,7 @@ class _SessionModeSelector extends StatelessWidget {
         children: SessionMode.values.map((mode) {
           final selected = mode == active;
           return Expanded(
+            key: ValueKey('next/mode/${mode.name}'),
             child: Padding(
               padding: EdgeInsets.only(
                   right: mode == SessionMode.values.first ? 8 : 0),

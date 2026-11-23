@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:get/get.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -14,6 +15,8 @@ import 'package:extendedscreen/shared/features/home/views/home_view.dart';
 import 'package:extendedscreen/shared/models/device_model.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
 import 'package:extendedscreen/shared/models/link_type.dart';
+import 'package:extendedscreen/shared/models/session_choice.dart';
+import 'package:extendedscreen/shared/models/session_mode.dart';
 import 'package:extendedscreen/shared/services/logger_service.dart';
 import 'package:extendedscreen/shared/services/settings_service.dart';
 import 'package:extendedscreen/shared/widgets/device_picker_card.dart';
@@ -27,8 +30,13 @@ class _FakeHostManager extends HostConnectionManager {
   List<DeviceModel> adbDevices = const [];
   int refreshCalls = 0;
 
+  /// What the hub was asked to connect, with the mode each was given;
+  /// nothing is connected. Every connect of the hub's comes through here.
+  final connects = <(String?, SessionChoice?)>[];
+
   @override
-  Future<void> connect({String? serial}) async {}
+  Future<void> connectWith(String? serial, {SessionChoice? choice}) async =>
+      connects.add((serial, choice));
 
   @override
   Future<void> autoConnect() async {}
@@ -59,6 +67,13 @@ const _phone = DeviceModel(
 
 Finder _inPicker(Finder matching) =>
     find.descendant(of: find.byType(DevicePickerCard), matching: matching);
+
+/// The add panel's tile for the device [serial].
+Finder _tile(String serial) => find.byKey(ValueKey('device/$serial'));
+
+/// The add panel's selector option for what the next tablet runs as:
+/// `mode/<name>` or `dir/<name>`.
+Finder _next(String option) => find.byKey(ValueKey('next/$option'));
 
 /// A live session for [serial] that the hub holds, as far as Home can tell.
 HostSession _live(HostConnectionManager hub, String serial) {
@@ -222,5 +237,177 @@ void main() {
     await tester.pump();
 
     expect(picked, isNot(contains('SERIAL-C')));
+  });
+
+  group('the mode selectors above the tiles', () {
+    late SettingsService settings;
+
+    /// Screen Recording and Accessibility granted, so a tile press connects.
+    void grant() {
+      const channel = MethodChannel('extended_screen/permissions');
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(
+        channel,
+        (_) async => {'screen_recording': true, 'accessibility': true},
+      );
+      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+    }
+
+    Future<void> home(WidgetTester tester) async {
+      tester.view.physicalSize = const Size(1000, 2000);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      grant();
+      settings = Get.find<SettingsService>();
+      await tester.pumpWidget(const GetMaterialApp(home: HomeView()));
+      cm.availableDevices.value = const [_tablet, _phone];
+      await tester.pump();
+      await tester.pump();
+      cm.connects.clear();
+    }
+
+    testWidgets('the tiles stay keyed by their device, under the selectors, '
+        'and each press is its own: an option only saves, a tile only '
+        'connects', (tester) async {
+      await home(tester);
+
+      expect(_inPicker(_tile('SERIAL-A')), findsOneWidget);
+      expect(_inPicker(_tile('SERIAL-B')), findsOneWidget);
+      expect(_inPicker(_next('mode/extendedScreen')), findsOneWidget);
+      expect(_inPicker(_next('mode/remoteControl')), findsOneWidget);
+      expect(_next('dir/macControlsTab'), findsNothing);
+      // Header, the mode for the next tablet, then the tablets.
+      final header = tester.getBottomLeft(find.text('home_add_tablet')).dy;
+      final caption = tester.getTopLeft(find.text('home_next_tablet_mode')).dy;
+      final option = tester.getBottomLeft(_next('mode/remoteControl')).dy;
+      expect(caption, greaterThan(header));
+      expect(option, greaterThan(caption));
+      expect(tester.getTopLeft(_tile('SERIAL-A')).dy, greaterThan(option));
+
+      // An option: saved, nothing connected, the tiles as they were (the
+      // direction now stands between them and the mode).
+      await tester.tap(_next('mode/remoteControl'));
+      await tester.pump();
+      await tester.pump();
+      expect(settings.sessionMode, SessionMode.remoteControl);
+      expect(cm.connects, isEmpty);
+      expect(_inPicker(_next('dir/macControlsTab')), findsOneWidget);
+      expect(
+        tester.getTopLeft(_tile('SERIAL-A')).dy,
+        greaterThan(tester.getBottomLeft(_next('dir/macControlsTab')).dy),
+      );
+      await tester.tap(_next('dir/macControlsTab'));
+      await tester.pump();
+      await tester.pump();
+      expect(settings.remoteDirection, RemoteDirection.macControlsTab);
+      expect(cm.connects, isEmpty);
+
+      // A tile: that tablet, in the mode the selectors show; they stay.
+      await tester.tap(_tile('SERIAL-B'));
+      await tester.pump();
+      await tester.pump();
+      expect(cm.connects, [
+        (
+          'SERIAL-B',
+          const SessionChoice(
+            SessionMode.remoteControl,
+            RemoteDirection.macControlsTab,
+          ),
+        ),
+      ]);
+      expect(settings.sessionMode, SessionMode.remoteControl);
+      expect(settings.remoteDirection, RemoteDirection.macControlsTab);
+    });
+
+    testWidgets('a press on a tile that the panel moves away from under the '
+        'finger (a tablet connecting by itself puts its card above) changes '
+        'no selector', (tester) async {
+      await home(tester);
+      await settings.setSessionMode(SessionMode.remoteControl);
+      await tester.pump();
+      final before = settings.nextChoice;
+
+      final touch = await tester.startGesture(
+        tester.getCenter(_tile('SERIAL-B')),
+      );
+      // Tablet A connects by itself: its card pushes the panel down, and A
+      // leaves the tiles.
+      _live(cm, 'SERIAL-A').activeDevice.value = _tablet;
+      await tester.pump();
+      expect(find.byType(SessionCard), findsOneWidget);
+      expect(_tile('SERIAL-A'), findsNothing);
+      await touch.up();
+      await tester.pump();
+      await tester.pump();
+
+      expect(settings.nextChoice, before);
+      // At most the tablet that was pressed, never another.
+      expect(cm.connects.map((c) => c.$1), everyElement('SERIAL-B'));
+    });
+
+    testWidgets('a press on a tile is never an option\'s, and a press on an '
+        "option never a tile's, whatever the list does meanwhile", (
+      tester,
+    ) async {
+      final picked = <String>[];
+      final options = <String>[];
+      // As wide as the card and about as tall as a tile, as the real
+      // selectors are.
+      Widget option(String name) => SizedBox(
+        key: ValueKey('next/$name'),
+        width: double.infinity,
+        height: 56,
+        child: TextButton(
+          onPressed: () => options.add(name),
+          child: Text(name),
+        ),
+      );
+      Widget picker(List<DeviceModel> devices, List<String> leading) =>
+          MaterialApp(
+            home: Scaffold(
+              body: DevicePickerCard(
+                devices: devices,
+                leading: [for (final name in leading) option(name)],
+                onSelect: (d) => picked.add(d.serial),
+                onRefresh: () {},
+              ),
+            ),
+          );
+      await tester.pumpWidget(picker(const [_tablet, _phone], ['mode']));
+      expect(
+        tester.getTopLeft(_tile('SERIAL-A')).dy,
+        greaterThanOrEqualTo(tester.getBottomLeft(_next('mode')).dy),
+      );
+
+      // The finger is on tile A when one more row comes in above the tiles,
+      // so that row now stands where the finger is.
+      final at = tester.getCenter(_tile('SERIAL-A'));
+      var touch = await tester.startGesture(at);
+      await tester.pumpWidget(picker(const [_tablet, _phone], ['mode', 'dir']));
+      expect(tester.getRect(_next('dir')).contains(at), isTrue);
+      await touch.up();
+      await tester.pump();
+      expect(options, isEmpty);
+      expect(picked, everyElement('SERIAL-A'));
+      picked.clear();
+
+      // The finger is on that row when it goes again, so a tile now stands
+      // there.
+      final onOption = tester.getCenter(_next('dir'));
+      touch = await tester.startGesture(onOption);
+      await tester.pumpWidget(picker(const [_tablet, _phone], ['mode']));
+      expect(tester.getRect(_tile('SERIAL-A')).contains(onOption), isTrue);
+      await touch.up();
+      await tester.pump();
+      expect(picked, isEmpty);
+      expect(options, isEmpty);
+
+      // And with nothing moving, each takes its own press.
+      await tester.tap(_next('mode'));
+      await tester.tap(_tile('SERIAL-B'));
+      expect(options, ['mode']);
+      expect(picked, ['SERIAL-B']);
+    });
   });
 }

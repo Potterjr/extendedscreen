@@ -23,15 +23,19 @@ import 'package:extendedscreen/shared/models/client_panel.dart';
 import 'package:extendedscreen/shared/models/device_model.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
 import 'package:extendedscreen/shared/models/link_type.dart';
+import 'package:extendedscreen/shared/models/session_choice.dart';
 import 'package:extendedscreen/shared/models/session_mode.dart';
 import 'package:extendedscreen/shared/models/touch_event_model.dart';
 import 'package:extendedscreen/shared/services/logger_service.dart';
 import 'package:extendedscreen/shared/services/settings_service.dart';
 
+import 'support/recording_remote_video.dart';
+
 /// Several tablets' USB sessions side by side, built directly as the hub
 /// holds them: one media queue, one set of adb rules and one encoder budget
-/// between them; the last test goes through the hub itself. Real loopback
-/// sockets and real time
+/// between them; the later groups go through the hub itself (the mixed-mode
+/// ones with the Mac's decoders stood in for by [RecordingRemoteVideo]).
+/// Real loopback sockets and real time
 /// (`testWidgets`' fake clock never completes real I/O), and the capture
 /// channel's real frame demux behind a mocked `extended_screen/frames`.
 /// Ids come from each session's `nativeId`; no test assumes one.
@@ -60,7 +64,8 @@ class _QuietLogger extends LoggerService {
 /// been healthy for a while, which a test plays with [recover]. What was
 /// done to each session is kept by id, and every call in [calls], in order;
 /// a stop waits for its session's entry in [stopGates], a virtual display
-/// for its entry in [displayGates].
+/// for its entry in [displayGates], and a start's permission request for
+/// whatever [onPermission] answers.
 class _Capture extends ScreenCaptureChannel {
   final failing = <int>{};
   String failCode = 'ENCODER_BUSY';
@@ -121,8 +126,17 @@ class _Capture extends ScreenCaptureChannel {
     return hostInfo;
   }
 
+  /// Asked at every [requestPermission], the first thing a capture start
+  /// awaits (before it makes a display): a future holds that start there.
+  Future<void>? Function()? onPermission;
+
   @override
-  Future<bool> requestPermission() async => true;
+  Future<bool> requestPermission() async {
+    final hold = onPermission?.call();
+    if (hold != null) await hold;
+    return true;
+  }
+
   @override
   Future<VirtualDisplayResult> createVirtualDisplay(
     DisplayConfigModel config, {
@@ -350,7 +364,8 @@ void main() {
   });
 
   /// One queue, one set of tunnels and one budget for every session it
-  /// makes, as the hub keeps them; [cap] tablets at once.
+  /// makes, as the hub keeps them; [cap] tablets at once. Each session is
+  /// made as [choice]; with none, as the selectors stand when it is made.
   ({
     _CountingAdb adb,
     EncodeBudget budget,
@@ -360,6 +375,7 @@ void main() {
     List<FakeTablet> tablets, {
     EncoderEstimate? estimate,
     int Function()? cap,
+    SessionChoice? choice,
   }) {
     for (final t in tablets) {
       addTearDown(t.hangUp);
@@ -376,6 +392,7 @@ void main() {
         key: serial,
         link: LinkType.usb,
         serial: serial,
+        choice: choice,
         pipeline: pipeline,
         tunnels: tunnels,
         adb: adb,
@@ -1774,6 +1791,33 @@ void main() {
       expect(b.wrongDisplayRebuilds, 1);
     });
 
+    test("heard while a wake's round still waits for the media queue, it "
+        'asks for no round and counts nothing: the wake makes every '
+        'capture again', () async {
+      final a = adopted('A');
+      final b = adopted('B');
+      await a.rebuildCapture();
+      await b.rebuildCapture();
+      await settle();
+      capture.calls.clear();
+
+      // The queue is busy (another tablet's start, a teardown) when the
+      // Mac wakes; B's first frame is heard before the round gets its turn.
+      final busy = Completer<void>();
+      final holding = hub.pipeline.run(() => busy.future);
+      capture.onCaptureRestartNeeded!(null);
+      await Future<void>.delayed(Duration.zero);
+      mismatch(b);
+      expect(b.wrongDisplayRebuilds, 0);
+      busy.complete();
+      await holding;
+      await settle();
+      expect(capture.calls, [...stop(a), ...stop(b), ...start(a), ...start(b)],
+          reason: 'the wake round alone');
+      expect(b.wrongDisplayRebuilds, 0);
+      expect(b.notice.value, isNull);
+    });
+
     test("a joiner's first frame heard before its start has even returned "
         'is covered by the round that start asks for', () async {
       final a = adopted('A');
@@ -1844,6 +1888,780 @@ void main() {
       await settle();
       expect(capture.calls, isEmpty);
       expect(a.notice.value, 'error_extend_wrong_display');
+    });
+  });
+
+  group('captures of the main display beside virtual displays '
+      '(FB17797423)', () {
+    const extended = SessionChoice(SessionMode.extendedScreen);
+    const drivesMac = SessionChoice(
+      SessionMode.remoteControl,
+      RemoteDirection.tabControlsMac,
+    );
+    const macDrives = SessionChoice(
+      SessionMode.remoteControl,
+      RemoteDirection.macControlsTab,
+    );
+    late HostConnectionManager hub;
+
+    /// A live session the hub holds, made as [choice], on the hub's media
+    /// queue and in its display set.
+    HostSession adopted(String serial, [SessionChoice choice = extended]) {
+      final s = HostSession(
+        key: serial,
+        link: LinkType.usb,
+        serial: serial,
+        choice: choice,
+        pipeline: hub.pipeline,
+        displays: hub.displays,
+        socket: SocketService(),
+      )..phase.value = ConnectionPhase.streaming;
+      hub.adopt(s);
+      return s;
+    }
+
+    /// Until the media queue has nothing left to run, the rounds asked for
+    /// from a timer included.
+    Future<void> settle() async {
+      for (var i = 0; i < 5; i++) {
+        await Future<void>.delayed(Duration.zero);
+        await pumpEventQueue();
+        await hub.pipeline.run(() async {});
+      }
+    }
+
+    List<(String, int)> stop(HostSession s) => [
+      ('stopCapture', s.nativeId),
+      ('removeVirtualDisplay', s.nativeId),
+    ];
+
+    /// An Extend start: its display, then its capture.
+    List<(String, int)> start(HostSession s) => [
+      ('createVirtualDisplay', s.nativeId),
+      ('startCapture', s.nativeId),
+      ('requestIdr', s.nativeId),
+    ];
+
+    /// A start that captures the main display: no display is made.
+    List<(String, int)> mirrorStart(HostSession s) => [
+      ('startCapture', s.nativeId),
+      ('requestIdr', s.nativeId),
+    ];
+    List<(String, int)> callsOf(HostSession s) => [
+      for (final c in capture.calls)
+        if (c.$2 == s.nativeId) c,
+    ];
+    void wake() => capture.onCaptureRestartNeeded!(null);
+    void mismatch(HostSession s) => capture.onCaptureMismatch!(s.nativeId);
+    void matched(HostSession s) => capture.onCaptureMatched!(s.nativeId);
+
+    setUp(() {
+      final adb = _CountingAdb([]);
+      Get.put<AdbService>(adb);
+      Get.put<RemoteVideoChannel>(RecordingRemoteVideo());
+      hub = HostConnectionManager(adb: adb, devicePollInterval: null);
+      addTearDown(hub.disconnect);
+    });
+
+    test('a wake stops every tablet in key order, then starts the one that '
+        'shows the Mac before any display is made again', () async {
+      // The mirroring tablet sorts after the extending one: its start
+      // coming first is the rule, not the key order.
+      final b = adopted('B', drivesMac);
+      final a = adopted('A');
+      await a.rebuildCapture();
+      await b.rebuildCapture();
+      await settle();
+      expect(hub.displays.holders, [a]);
+      expect(capture.starts[b.nativeId]!.last.mode, DisplayMode.mirror);
+      capture.calls.clear();
+
+      wake();
+      await settle();
+      expect(capture.calls, [
+        ...stop(a), ...stop(b), //
+        ...mirrorStart(b), ...start(a),
+      ]);
+      expect(
+        capture.calls.indexOf(('removeVirtualDisplay', a.nativeId)),
+        lessThan(capture.calls.indexOf(('startCapture', b.nativeId))),
+      );
+      expect(
+        capture.calls.indexOf(('startCapture', b.nativeId)),
+        lessThan(capture.calls.indexOf(('createVirtualDisplay', a.nativeId))),
+      );
+    });
+
+    test('with several of each, a wake starts the mirroring ones in key '
+        'order, then the extending ones in key order', () async {
+      final d = adopted('D', drivesMac);
+      final c = adopted('C');
+      final b = adopted('B', drivesMac);
+      final a = adopted('A');
+      for (final s in [a, b, c, d]) {
+        await s.rebuildCapture();
+      }
+      await settle();
+      capture.calls.clear();
+
+      wake();
+      await settle();
+      expect(capture.calls, [
+        ...stop(a), ...stop(b), ...stop(c), ...stop(d), //
+        ...mirrorStart(b), ...mirrorStart(d), ...start(a), ...start(c),
+      ]);
+    });
+
+    test('an Extended tablet under the Mirror display mode starts with the '
+        'mirroring ones: the order goes by what each start captures',
+        () async {
+      await Get.find<SettingsService>().setDisplayMode(DisplayMode.mirror);
+      final b = adopted('B', drivesMac);
+      final a = adopted('A');
+      await a.rebuildCapture();
+      await b.rebuildCapture();
+      await settle();
+      expect(hub.displays.holders, isEmpty);
+      capture.calls.clear();
+
+      wake();
+      await settle();
+      expect(capture.calls, [
+        ...stop(a), ...stop(b), ...mirrorStart(a), ...mirrorStart(b), //
+      ]);
+    });
+
+    test("an Extend tablet joining beside another's display rebuilds the "
+        'displays in order and leaves the mirroring tablet alone', () async {
+      final a = adopted('A');
+      final m = adopted('M', drivesMac);
+      final b = adopted('B');
+      await a.rebuildCapture();
+      await m.rebuildCapture();
+      await settle();
+      capture.calls.clear();
+
+      await b.rebuildCapture();
+      await settle();
+      expect(capture.calls, [
+        ...stop(b), ...start(b), // B joins beside A's display
+        ...stop(a), ...stop(b), ...start(a), ...start(b),
+      ]);
+      expect(callsOf(m), isEmpty);
+      expect(m.wrongDisplayRebuilds, 0);
+      expect(m.notice.value, isNull);
+    });
+
+    test('a tablet the Mac controls is no target of a wake, of a display '
+        'round or of a repair, and a first-frame report for it does nothing',
+        () async {
+      final r = adopted('R', macDrives);
+      final a = adopted('A');
+      final b = adopted('B');
+      final m = adopted('M', drivesMac);
+      expect(r.spec.isReverseRemote, isTrue);
+      await r.rebuildCapture();
+      await a.rebuildCapture();
+      await m.rebuildCapture();
+      await settle();
+      expect(callsOf(r), isEmpty, reason: 'it has no capture on the Mac');
+      capture.calls.clear();
+
+      wake();
+      await settle();
+      expect(capture.calls, [
+        ...stop(a), ...stop(m), ...mirrorStart(m), ...start(a), //
+      ]);
+
+      // A display round (B joins), then a repair round (M's first frame).
+      await b.rebuildCapture();
+      await settle();
+      mismatch(m);
+      await settle();
+      expect(callsOf(m).where((c) => c.$1 == 'startCapture').length, 2,
+          reason: 'the wake and the repair');
+      expect(callsOf(r), isEmpty);
+
+      mismatch(r);
+      matched(r);
+      await settle();
+      expect(callsOf(r), isEmpty);
+      expect(r.notice.value, isNull);
+      expect(r.wrongDisplayRebuilds, 0);
+      expect(r.phase.value, ConnectionPhase.streaming);
+    });
+
+    test("a capture of the Mac's screen that shows another display, with a "
+        'virtual display there, has every display taken down and starts '
+        'first; at most twice in a row, then it only says so; a capture '
+        'that shows the Mac resets that', () async {
+      final b = adopted('B', drivesMac);
+      final a = adopted('A');
+      await a.rebuildCapture();
+      await b.rebuildCapture();
+      await settle();
+      capture.calls.clear();
+      // A's display goes before B starts, and B starts before A's display
+      // is made again.
+      final round = [
+        ...stop(a), ...stop(b), ...mirrorStart(b), ...start(a), //
+      ];
+
+      mismatch(b);
+      expect(capture.calls, isEmpty, reason: 'queued from a timer');
+      await settle();
+      expect(capture.calls, round);
+      expect(b.wrongDisplayRebuilds, 1);
+      expect(b.notice.value, isNull);
+      expect(hub.displays.holders, [a]);
+
+      mismatch(b);
+      await settle();
+      expect(capture.calls, [...round, ...round]);
+      expect(b.wrongDisplayRebuilds, 2);
+      expect(b.notice.value, isNull);
+
+      mismatch(b);
+      await settle();
+      expect(capture.calls, [...round, ...round],
+          reason: 'a third one in a row is only said');
+      expect(b.notice.value, 'error_mirror_wrong_display');
+      expect(a.notice.value, isNull);
+      expect(a.wrongDisplayRebuilds, 0);
+
+      // A start whose first frame has the Mac's shape: the next wrong one
+      // is repaired again.
+      capture.calls.clear();
+      matched(b);
+      expect(b.wrongDisplayRebuilds, 0);
+      mismatch(b);
+      await settle();
+      expect(capture.calls, round);
+      expect(b.wrongDisplayRebuilds, 1);
+      expect(b.notice.value, isNull, reason: 'its new capture cleared it');
+      expect(a.phase.value, ConnectionPhase.streaming);
+      expect(b.phase.value, ConnectionPhase.streaming);
+    });
+
+    test('a repair takes every extending tablet, in key order after the '
+        'mirroring one, and no other mirroring tablet', () async {
+      final a = adopted('A');
+      final b = adopted('B', drivesMac);
+      final c = adopted('C');
+      final d = adopted('D', drivesMac);
+      await a.rebuildCapture();
+      await settle();
+      await c.rebuildCapture();
+      await settle();
+      await b.rebuildCapture();
+      await d.rebuildCapture();
+      await settle();
+      capture.calls.clear();
+
+      mismatch(d);
+      await settle();
+      expect(capture.calls, [
+        ...stop(a), ...stop(c), ...stop(d), //
+        ...mirrorStart(d), ...start(a), ...start(c),
+      ]);
+      expect(callsOf(b), isEmpty);
+
+      // Both asking before the round runs make one round, both first.
+      capture.calls.clear();
+      mismatch(d);
+      mismatch(b);
+      await settle();
+      expect(capture.calls, [
+        ...stop(a), ...stop(b), ...stop(c), ...stop(d), //
+        ...mirrorStart(b), ...mirrorStart(d), ...start(a), ...start(c),
+      ]);
+      expect(b.wrongDisplayRebuilds, 1);
+      expect(d.wrongDisplayRebuilds, 2);
+    });
+
+    test("with no virtual display, a capture of the Mac's screen that shows "
+        'another display is only said, and nothing is rebuilt', () async {
+      final b = adopted('B', drivesMac);
+      final c = adopted('C', drivesMac);
+      await b.rebuildCapture();
+      await c.rebuildCapture();
+      await settle();
+      capture.calls.clear();
+
+      mismatch(b);
+      await settle();
+      expect(capture.calls, isEmpty);
+      expect(b.notice.value, 'error_mirror_wrong_display');
+      expect(b.wrongDisplayRebuilds, 0);
+      expect(c.notice.value, isNull);
+    });
+
+    test('heard while a wake is about to make that capture again, it asks '
+        'for no round and counts nothing', () async {
+      final b = adopted('B', drivesMac);
+      final a = adopted('A');
+      await a.rebuildCapture();
+      await b.rebuildCapture();
+      await settle();
+      capture.calls.clear();
+
+      // The wake's round is stopping A; B's old capture still runs.
+      final gate = capture.stopGates[a.nativeId] = Completer<void>();
+      wake();
+      await _until(() => capture.calls.contains(('stopCapture', a.nativeId)));
+      mismatch(b);
+      gate.complete();
+      capture.stopGates.remove(a.nativeId);
+      await settle();
+      final round = [
+        ...stop(a), ...stop(b), ...mirrorStart(b), ...start(a), //
+      ];
+      expect(capture.calls, round);
+      expect(b.wrongDisplayRebuilds, 0);
+      expect(b.notice.value, isNull);
+
+      // A frame of the capture the wake made is what still asks.
+      capture.calls.clear();
+      mismatch(b);
+      await settle();
+      expect(capture.calls, round);
+      expect(b.wrongDisplayRebuilds, 1);
+    });
+
+    test('heard again while its repair is due or has not started it yet, it '
+        'asks for no second round and counts once', () async {
+      final b = adopted('B', drivesMac);
+      final a = adopted('A');
+      await a.rebuildCapture();
+      await b.rebuildCapture();
+      await settle();
+      capture.calls.clear();
+      final round = [
+        ...stop(a), ...stop(b), ...mirrorStart(b), ...start(a), //
+      ];
+
+      // Twice before the round's timer has run.
+      mismatch(b);
+      mismatch(b);
+      expect(b.wrongDisplayRebuilds, 1);
+      // And once more while the round stops A.
+      final gate = capture.stopGates[a.nativeId] = Completer<void>();
+      await _until(() => capture.calls.contains(('stopCapture', a.nativeId)));
+      mismatch(b);
+      gate.complete();
+      capture.stopGates.remove(a.nativeId);
+      await settle();
+      expect(capture.calls, round);
+      expect(b.wrongDisplayRebuilds, 1);
+      expect(b.notice.value, isNull);
+    });
+
+    test('a wake that comes before the repair has run makes that capture '
+        'again once, first', () async {
+      final b = adopted('B', drivesMac);
+      final a = adopted('A');
+      await a.rebuildCapture();
+      await b.rebuildCapture();
+      await settle();
+      capture.calls.clear();
+
+      mismatch(b);
+      wake();
+      await settle();
+      expect(capture.calls, [
+        ...stop(a), ...stop(b), ...mirrorStart(b), ...start(a), //
+      ], reason: "the wake's round was its repair: the display round the "
+          'repair asked for has nothing left to do, and leaves A alone');
+      expect(b.wrongDisplayRebuilds, 1);
+      expect(b.notice.value, isNull);
+    });
+
+    test("heard while a wake's round still waits for the media queue, it "
+        'asks for no round and counts nothing', () async {
+      final b = adopted('B', drivesMac);
+      final a = adopted('A');
+      await a.rebuildCapture();
+      await b.rebuildCapture();
+      await settle();
+      capture.calls.clear();
+
+      // The queue is busy (another tablet's start, a teardown) when the
+      // Mac wakes; B's first frame is heard before the round gets its turn.
+      final busy = Completer<void>();
+      final holding = hub.pipeline.run(() => busy.future);
+      wake();
+      await Future<void>.delayed(Duration.zero);
+      mismatch(b);
+      expect(b.wrongDisplayRebuilds, 0);
+      busy.complete();
+      await holding;
+      await settle();
+      expect(capture.calls, [
+        ...stop(a), ...stop(b), ...mirrorStart(b), ...start(a), //
+      ], reason: 'the wake round alone: A is not rebuilt a second time');
+      expect(b.wrongDisplayRebuilds, 0);
+      expect(b.notice.value, isNull);
+    });
+
+    test('heard while a round that leaves that capture alone has every '
+        'display down for a moment, it is still repaired', () async {
+      final a = adopted('A');
+      final c = adopted('C');
+      final m = adopted('M', drivesMac);
+      await a.rebuildCapture();
+      await m.rebuildCapture();
+      await settle();
+      capture.calls.clear();
+
+      // C joins beside A's display: a display round, which M is no target
+      // of. Its first start is held where a start first waits (the
+      // permission request), after every stop: nobody holds a display.
+      final gate = Completer<void>();
+      var held = false;
+      capture.onPermission = () {
+        if (held ||
+            !hub.displays.rebuilding ||
+            hub.displays.holders.isNotEmpty) {
+          return null;
+        }
+        held = true;
+        return gate.future;
+      };
+      await c.rebuildCapture();
+      await _until(() => held);
+      expect(hub.displays.holders, isEmpty);
+      expect(callsOf(m), isEmpty);
+
+      // M's stream was made beside A's display, and shows a display.
+      mismatch(m);
+      expect(m.wrongDisplayRebuilds, 1);
+      gate.complete();
+      await settle();
+      expect(capture.calls, [
+        ...stop(c), ...start(c), // C joins
+        ...stop(a), ...stop(c), ...start(a), ...start(c), // its round
+        ...stop(a), ...stop(c), ...stop(m), // the repair
+        ...mirrorStart(m), ...start(a), ...start(c),
+      ]);
+      expect(m.wrongDisplayRebuilds, 1);
+      expect(m.notice.value, isNull);
+      expect(hub.displays.holders, unorderedEquals([a, c]));
+    });
+
+    test("a capture of the Mac's screen that a wake has just made, with no "
+        'display made again yet, is only said when it shows another '
+        'display: no virtual display was there to be mistaken for it',
+        () async {
+      final b = adopted('B', drivesMac);
+      final a = adopted('A');
+      await a.rebuildCapture();
+      await b.rebuildCapture();
+      await settle();
+      capture.calls.clear();
+
+      // The wake's round has started B again and holds A's start at its
+      // permission request, before A's display is made.
+      final gate = Completer<void>();
+      var held = false;
+      capture.onPermission = () {
+        if (held || !capture.calls.contains(('requestIdr', b.nativeId))) {
+          return null;
+        }
+        held = true;
+        return gate.future;
+      };
+      wake();
+      await _until(() => held);
+      expect(hub.displays.holders, isEmpty);
+      mismatch(b);
+      gate.complete();
+      await settle();
+      expect(capture.calls, [
+        ...stop(a), ...stop(b), ...mirrorStart(b), ...start(a), //
+      ]);
+      expect(b.notice.value, 'error_mirror_wrong_display');
+      expect(b.wrongDisplayRebuilds, 0);
+    });
+
+    test('a display a round took down and could not make again is not one '
+        'on its way back: a capture the round leaves alone that shows '
+        'another display, heard after that start, is only said', () async {
+      final a = adopted('A');
+      final z = adopted('Z');
+      final m = adopted('M', drivesMac);
+      // Z extends with no display of its own (none could be made): it
+      // mirrors, and holds nothing in the display set.
+      capture.noDisplay.add(z.nativeId);
+      await a.rebuildCapture();
+      await z.rebuildCapture();
+      await m.rebuildCapture();
+      await settle();
+      expect(hub.displays.holders, [a]);
+      // M's connect has started its capture and is not live yet: a wake's
+      // round does not take it.
+      m.phase.value = ConnectionPhase.configuring;
+      expect(m.canRebuild, isFalse);
+      capture.calls.clear();
+
+      // The wake's round takes A's display down and cannot make it again.
+      // It has started A again and holds Z's start at its permission
+      // request: no display exists, and none is coming back.
+      capture.noDisplay.add(a.nativeId);
+      final gate = Completer<void>();
+      var held = false;
+      capture.onPermission = () {
+        if (held || !capture.calls.contains(('requestIdr', a.nativeId))) {
+          return null;
+        }
+        held = true;
+        return gate.future;
+      };
+      wake();
+      await _until(() => held);
+      expect(hub.displays.holders, isEmpty);
+      expect(hub.displays.rebuilding, isTrue);
+      expect(capture.calls, [
+        ...stop(a), ...stop(z), ...start(a), //
+      ]);
+
+      mismatch(m);
+      expect(m.notice.value, 'error_mirror_wrong_display');
+      expect(m.wrongDisplayRebuilds, 0);
+      expect(hub.repairsDue, isEmpty);
+      gate.complete();
+      await settle();
+      expect(callsOf(m), isEmpty, reason: 'no repair round was run for it');
+      expect(capture.calls, [
+        ...stop(a), ...stop(z), ...start(a), ...start(z), //
+      ]);
+      m.phase.value = ConnectionPhase.streaming;
+    });
+
+    test('a repair whose tablet ended before the round ran stops no '
+        'extending tablet', () async {
+      final a = adopted('A');
+      final c = adopted('C');
+      final m = adopted('M', drivesMac);
+      await a.rebuildCapture();
+      await settle();
+      await c.rebuildCapture();
+      await settle();
+      await m.rebuildCapture();
+      await settle();
+      capture.calls.clear();
+
+      final busy = Completer<void>();
+      final holding = hub.pipeline.run(() => busy.future);
+      mismatch(m);
+      await Future<void>.delayed(Duration.zero);
+      expect(hub.repairsDue, [m]);
+      final ending = hub.disconnectSession('M');
+      expect(hub.repairsDue, isEmpty,
+          reason: 'an ended session is let go of at once');
+      busy.complete();
+      await holding;
+      await ending;
+      await settle();
+      expect(callsOf(a), isEmpty);
+      expect(callsOf(c), isEmpty);
+      expect(callsOf(m).map((c) => c.$1), isNot(contains('startCapture')));
+      expect(hub.displays.holders, unorderedEquals([a, c]));
+    });
+
+    test('a repair whose tablet lost its link before the round ran does not '
+        'start that capture again: its session is being torn down, though '
+        'it still reads live and is still in the hub', () async {
+      final a = adopted('A');
+      final b = adopted('B', drivesMac);
+      await a.rebuildCapture();
+      await settle();
+      await b.rebuildCapture();
+      await settle();
+      capture.calls.clear();
+
+      final busy = Completer<void>();
+      final holding = hub.pipeline.run(() => busy.future);
+      mismatch(b);
+      await Future<void>.delayed(Duration.zero);
+      expect(hub.repairsDue, [b]);
+      // Its link goes: the teardown has begun (the capture is no longer
+      // its session's), and its stop waits behind the queue.
+      // ignore: invalid_use_of_protected_member
+      final lost = b.handleLinkFailure(retry: false);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(hub.sessions['B'], same(b));
+      busy.complete();
+      await holding;
+      await lost;
+      await settle();
+
+      expect(callsOf(b), stop(b),
+          reason: "its own teardown's stop, and no start");
+      expect(callsOf(a), isEmpty,
+          reason: 'with no repair left, the extending tablet is not stopped');
+      expect(b.phase.value, ConnectionPhase.error);
+      expect(hub.repairsDue, isEmpty);
+      expect(hub.displays.holders, [a]);
+    });
+
+    test('an extending tablet whose wrong first frame was left to the '
+        'round a repair had asked for still gets that round when the '
+        "repair's tablet ends first", () async {
+      final a = adopted('A');
+      final c = adopted('C');
+      final m = adopted('M', drivesMac);
+      await a.rebuildCapture();
+      await settle();
+      await c.rebuildCapture();
+      await settle();
+      await m.rebuildCapture();
+      await settle();
+      capture.calls.clear();
+
+      final busy = Completer<void>();
+      final holding = hub.pipeline.run(() => busy.future);
+      mismatch(m);
+      // C's capture shows another display too: the round already due
+      // makes it again, so it asks for none and counts nothing.
+      mismatch(c);
+      expect(c.wrongDisplayRebuilds, 0);
+      await Future<void>.delayed(Duration.zero);
+      final ending = hub.disconnectSession('M');
+      busy.complete();
+      await holding;
+      await ending;
+      await settle();
+      expect(capture.calls.take(10).toList(), [
+        ...stop(a), ...stop(c), ...start(a), ...start(c), //
+      ]);
+      expect(callsOf(m).map((c) => c.$1), isNot(contains('startCapture')));
+      expect(c.notice.value, isNull);
+      expect(c.wrongDisplayRebuilds, 0);
+    });
+
+    test('the display of a session on its way out goes before the repaired '
+        'capture starts, and a tablet that ended meanwhile is not started',
+        () async {
+      final a = adopted('A');
+      final b = adopted('B', drivesMac);
+      final c = adopted('C');
+      final d = adopted('D', drivesMac);
+      await a.rebuildCapture();
+      await settle();
+      await c.rebuildCapture();
+      await settle();
+      await b.rebuildCapture();
+      await d.rebuildCapture();
+      await settle();
+      capture.calls.clear();
+
+      // The queue is busy; both mirroring tablets ask. Then A (extending)
+      // and D (mirroring) end: their own stops queue behind the round.
+      final busy = Completer<void>();
+      final holding = hub.pipeline.run(() => busy.future);
+      mismatch(b);
+      mismatch(d);
+      await Future<void>.delayed(Duration.zero);
+      final endingA = hub.disconnectSession('A');
+      final endingD = hub.disconnectSession('D');
+      busy.complete();
+      await holding;
+      await endingA;
+      await endingD;
+      await settle();
+      expect(capture.calls.take(11).toList(), [
+        ...stop(a), // on its way out: its display goes first
+        ...stop(b), ...stop(c), ...mirrorStart(b), ...start(c),
+      ]);
+      expect(callsOf(d).map((c) => c.$1), isNot(contains('startCapture')));
+      expect(callsOf(a).map((c) => c.$1), isNot(contains('startCapture')));
+      expect(hub.displays.holders, [c]);
+      expect(b.phase.value, ConnectionPhase.streaming);
+      expect(c.phase.value, ConnectionPhase.streaming);
+    });
+
+    test('an extending tablet whose capture shows another display, beside '
+        'a mirroring one only, is still only said: a capture of the main '
+        'display is no virtual display to rebuild', () async {
+      final a = adopted('A');
+      final b = adopted('B', drivesMac);
+      await a.rebuildCapture();
+      await b.rebuildCapture();
+      await settle();
+      capture.calls.clear();
+
+      mismatch(a);
+      await settle();
+      expect(capture.calls, isEmpty);
+      expect(a.notice.value, 'error_extend_wrong_display');
+      expect(b.notice.value, isNull);
+    });
+
+    test('through the hub: a tablet that drives the Mac joins beside an '
+        'extending one, its first frame shows the wrong display, and after '
+        'the repair both stream on', () async {
+      final tabletA = FakeTablet('A');
+      final tabletB = FakeTablet('B');
+      addTearDown(tabletA.hangUp);
+      addTearDown(tabletB.hangUp);
+      final adb = _CountingAdb([tabletA, tabletB]);
+      Get.put<AdbService>(adb);
+      final settings = Get.find<SettingsService>();
+      final hub = HostConnectionManager(
+        adb: adb,
+        devicePollInterval: null,
+        hostGranted: () async => true,
+      );
+      addTearDown(hub.disconnect);
+      await hub.hostInfoReady;
+      hub.budget.estimate = EncoderEstimate.forChip('Apple M3 Max');
+
+      await hub.connect(serial: 'A');
+      await settings.setSessionMode(SessionMode.remoteControl);
+      await settings.setRemoteDirection(RemoteDirection.tabControlsMac);
+      await hub.connect(serial: 'B');
+      final a = hub.sessions['A']!;
+      final b = hub.sessions['B']!;
+      expect(a.phase.value, ConnectionPhase.streaming);
+      expect(b.phase.value, ConnectionPhase.streaming);
+      expect(a.spec.displayMode, DisplayMode.extend);
+      expect(b.spec.displayMode, DisplayMode.mirror);
+      await hub.pipeline.run(() async {});
+      await pumpEventQueue();
+      expect(capture.displaysMade, [a.nativeId],
+          reason: 'B makes no display, so its joining asks for no round');
+      capture.calls.clear();
+
+      capture.onCaptureMismatch!(b.nativeId);
+      await _until(
+        () => capture.calls.contains(('requestIdr', a.nativeId)),
+      );
+      await hub.pipeline.run(() async {});
+      await pumpEventQueue();
+      expect(capture.calls, [
+        ('stopCapture', a.nativeId),
+        ('removeVirtualDisplay', a.nativeId),
+        ('stopCapture', b.nativeId),
+        ('removeVirtualDisplay', b.nativeId),
+        ('startCapture', b.nativeId),
+        ('requestIdr', b.nativeId),
+        ('createVirtualDisplay', a.nativeId),
+        ('startCapture', a.nativeId),
+        ('requestIdr', a.nativeId),
+      ]);
+      expect(a.phase.value, ConnectionPhase.streaming);
+      expect(b.phase.value, ConnectionPhase.streaming);
+      expect(b.notice.value, isNull);
+      expect(hub.budget.contains(a.nativeId), isTrue);
+      expect(hub.budget.contains(b.nativeId), isTrue);
+
+      // Both carry on: each one's frames reach its own tablet.
+      final framesA = tabletA.frames, framesB = tabletB.frames;
+      encode(a.nativeId, [0, 0, 0, 1, 0x65]);
+      encode(b.nativeId, [0, 0, 0, 1, 0x65]);
+      await _until(
+        () => tabletA.frames == framesA + 1 && tabletB.frames == framesB + 1,
+      );
     });
   });
 
@@ -2191,6 +3009,550 @@ void main() {
     );
   });
 
+  group('mixed modes: one tablet extends, one drives the Mac and one is '
+      'driven by it', () {
+    const extended = SessionChoice(SessionMode.extendedScreen);
+    const drivesMac = SessionChoice(
+      SessionMode.remoteControl,
+      RemoteDirection.tabControlsMac,
+    );
+    const macDrives = SessionChoice(
+      SessionMode.remoteControl,
+      RemoteDirection.macControlsTab,
+    );
+    const panelC = ClientPanel(2400, 1080, 60);
+    // A keyframe, as a tablet's encoder sends one.
+    final keyframe = Uint8List.fromList([0, 0, 0, 1, 0x65, 1, 2, 3]);
+
+    late FakeTablet tabletA;
+    late FakeTablet tabletB;
+    late FakeTablet tabletC;
+    late _CountingAdb adb;
+    late RecordingRemoteVideo remote;
+
+    setUp(() {
+      tabletA = FakeTablet('A', panel: const ClientPanel(2960, 1848, 120));
+      tabletB = FakeTablet('B');
+      tabletC = FakeTablet('C', panel: panelC);
+      for (final tablet in [tabletA, tabletB, tabletC]) {
+        addTearDown(tablet.hangUp);
+      }
+      adb = _CountingAdb([tabletA, tabletB, tabletC]);
+      Get.put<AdbService>(adb);
+      // Before any hub: the hub takes the decoders' slots when it is made.
+      remote =
+          Get.put<RemoteVideoChannel>(RecordingRemoteVideo())
+              as RecordingRemoteVideo;
+    });
+
+    /// A hub over the three tablets, with room in the encoder for all of
+    /// them at their own rates.
+    Future<HostConnectionManager> newHub() async {
+      final hub = HostConnectionManager(
+        adb: adb,
+        devicePollInterval: null,
+        hostGranted: () async => true,
+      );
+      addTearDown(hub.disconnect);
+      await hub.hostInfoReady;
+      hub.budget.estimate = const EncoderEstimate(
+        engines: 4,
+        h264PerEngine: 4000,
+        h265PerEngine: 4000,
+      );
+      return hub;
+    }
+
+    int sent(FakeTablet tablet, int command) =>
+        tablet.controls.where((c) => c == command).length;
+
+    /// The tablet has heard a whole start as [choice], its [starts]th
+    /// since its controls were last cleared: the mode and direction, then
+    /// the stream's rate, or for the one the Mac drives the ask for its
+    /// screen and for a keyframe.
+    Future<void> heard(FakeTablet tablet, SessionChoice choice, int starts) =>
+        _until(
+          () =>
+              sent(tablet, 0xF9) == starts &&
+              tablet.mode == choice.mode &&
+              tablet.direction == choice.direction &&
+              (choice.isReverse
+                  ? sent(tablet, 0xF8) == starts &&
+                        sent(tablet, 0xFF) >= starts &&
+                        tablet.sharing
+                  : sent(tablet, 0xFB) >= starts),
+        );
+
+    /// Until the media queue has nothing left to run.
+    Future<void> settle(HostConnectionManager hub) async {
+      for (var i = 0; i < 3; i++) {
+        await Future<void>.delayed(Duration.zero);
+        await pumpEventQueue();
+        await hub.pipeline.run(() async {});
+      }
+    }
+
+    /// The user's picks: A with the selectors on Extended screen, B on
+    /// Tablet -> Mac, C on Mac -> Tablet, each live and heard by its
+    /// tablet before the next.
+    Future<
+      ({HostConnectionManager hub, HostSession a, HostSession b, HostSession c})
+    >
+    mixed() async {
+      final settings = Get.find<SettingsService>();
+      final hub = await newHub();
+      Future<HostSession> pick(FakeTablet tablet, SessionChoice choice) async {
+        await settings.setSessionMode(choice.mode);
+        await settings.setRemoteDirection(choice.direction);
+        await hub.connect(serial: tablet.serial);
+        final session = hub.sessions[tablet.serial]!;
+        expect(session.phase.value, ConnectionPhase.streaming);
+        expect(session.choice, choice);
+        await heard(tablet, choice, 1);
+        return session;
+      }
+
+      final a = await pick(tabletA, extended);
+      final b = await pick(tabletB, drivesMac);
+      final c = await pick(tabletC, macDrives);
+      await settle(hub);
+      return (hub: hub, a: a, b: b, c: c);
+    }
+
+    bool live(HostConnectionManager hub, String key) =>
+        hub.sessions[key]?.phase.value == ConnectionPhase.streaming;
+
+    test('each tablet is told its own mode; the one that drives the Mac '
+        'shares the encoder and has no display, the one the Mac drives takes '
+        'neither', () async {
+      final (:hub, :a, :b, :c) = await mixed();
+      final settings = Get.find<SettingsService>();
+      expect(hub.cap, 4, reason: 'no mode means one tablet at a time');
+      expect(hub.sessions.keys, ['A', 'B', 'C']);
+      expect({a.nativeId, b.nativeId, c.nativeId}, hasLength(3));
+      expect(adb.reverses.keys, ['A', 'B', 'C']);
+
+      // What each tablet was told (0xF9), and nothing of another's.
+      expect(tabletA.mode, SessionMode.extendedScreen);
+      expect(tabletA.direction, RemoteDirection.tabControlsMac);
+      expect(tabletB.mode, SessionMode.remoteControl);
+      expect(tabletB.direction, RemoteDirection.tabControlsMac);
+      expect(tabletC.mode, SessionMode.remoteControl);
+      expect(tabletC.direction, RemoteDirection.macControlsTab);
+      for (final tablet in [tabletA, tabletB, tabletC]) {
+        expect(sent(tablet, 0xF9), 1, reason: tablet.serial);
+      }
+      expect(tabletC.controls, [0xF9, 0xF8, 0xFF]);
+      for (final tablet in [tabletA, tabletB]) {
+        expect(tablet.captureRequests, 0, reason: tablet.serial);
+        expect(tablet.keyframeRequests, 0, reason: tablet.serial);
+        expect(tablet.sharing, isFalse, reason: tablet.serial);
+      }
+
+      // A extends onto a display of its own; B shows the Mac's screen, so
+      // it makes none; nothing is captured for C.
+      expect(a.spec.displayMode, DisplayMode.extend);
+      expect(b.spec.displayMode, DisplayMode.mirror);
+      expect(c.spec.isReverseRemote, isTrue);
+      expect(capture.displaysMade, [a.nativeId]);
+      expect(hub.displays.holders, [a]);
+      expect(capture.starts[a.nativeId]!.single.mode, DisplayMode.extend);
+      expect(capture.starts[b.nativeId]!.single.mode, DisplayMode.mirror);
+      expect(capture.starts[c.nativeId], isNull);
+      expect(capture.calls.where((call) => call.$2 == c.nativeId), isEmpty);
+
+      // The encoder is A's and B's.
+      expect(hub.budget.count, 2);
+      expect(hub.budget.contains(a.nativeId), isTrue);
+      expect(hub.budget.contains(b.nativeId), isTrue);
+      expect(hub.budget.contains(c.nativeId), isFalse);
+      expect(a.granted.value?.shared, isTrue);
+      expect(b.granted.value?.shared, isTrue);
+      expect(c.granted.value, isNull);
+
+      // The one decoder is C's, the size of its panel.
+      expect(remote.made, hasLength(1));
+      expect(remote.made.single.session, c.nativeId);
+      expect(remote.made.single.width, panelC.width);
+      expect(remote.made.single.height, panelC.height);
+      expect(
+        c.remoteTextureId.value,
+        RecordingRemoteVideo.textureFor(c.nativeId),
+      );
+      expect(a.remoteTextureId.value, isNull);
+      expect(b.remoteTextureId.value, isNull);
+      expect(hub.reverseActive.value, 1);
+      expect(hub.remoteSessions, [c]);
+
+      // Each is remembered as it was picked.
+      expect(settings.knownChoice('A'), extended);
+      expect(settings.knownChoice('B'), drivesMac);
+      expect(settings.knownChoice('C'), macDrives);
+    });
+
+    test("each tablet's input, frames and keyframe requests stay its own",
+        () async {
+      final (:hub, :a, :b, :c) = await mixed();
+
+      // Touches from the two that drive the Mac, each under its session.
+      tabletB.sendMouse(_move(0.25, 0.75));
+      tabletB.sendMouse(_move(0.3, 0.7));
+      tabletA.sendMouse(_move(0.9, 0.1));
+      await _until(() => input.mice.length == 3);
+      expect(input.miceFor(b.nativeId), 2);
+      expect(input.miceFor(a.nativeId), 1);
+      expect(input.miceFor(c.nativeId), 0);
+      expect(
+        input.mice.firstWhere((m) => m.$1 == b.nativeId).$2.normalizedX,
+        closeTo(0.25, 1e-6),
+      );
+
+      // The Mac's two encoders: each one's frames to its own tablet.
+      encode(a.nativeId, [0, 0, 0, 1, 0x65, 0xAA]);
+      encode(b.nativeId, [0, 0, 0, 1, 0x65, 0xBB]);
+      encode(b.nativeId, [0, 0, 0, 1, 0x41, 0xBB]);
+      await _until(() => tabletA.frames == 1 && tabletB.frames == 2);
+
+      // C's screen goes to C's decoder. A frame from a tablet the Mac does
+      // not view (a capture left running from an earlier session, say)
+      // reaches no decoder.
+      tabletC.sendFrame(keyframe);
+      await _until(() => remote.fed[c.nativeId] == 1);
+      tabletB.sharing = true;
+      tabletB.sendFrame(keyframe);
+      tabletC.sendFrame(keyframe);
+      await _until(() => remote.fed[c.nativeId] == 2);
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      expect(remote.fed.keys, [c.nativeId]);
+      expect(c.tabletStreaming.value, isTrue);
+      expect(b.tabletStreaming.value, isFalse);
+      expect(tabletC.frames, 0, reason: 'the Mac encodes nothing for C');
+      expect(tabletA.frames, 1);
+      expect(tabletB.frames, 2);
+
+      // A keyframe C's decoder asks for is asked of C's tablet alone, and
+      // of no encoder on the Mac.
+      final asked = capture.keyframeRequests.length;
+      await remote.idr(c.nativeId);
+      await _until(() => tabletC.keyframeRequests == 2);
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      expect(tabletA.keyframeRequests, 0);
+      expect(tabletB.keyframeRequests, 0);
+      expect(capture.keyframeRequests, hasLength(asked));
+      // And one B's decoder asks for goes to B's encoder on the Mac.
+      tabletB.requestKeyframe();
+      await _until(() => capture.keyframeRequests.length > asked);
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      expect(capture.keyframeRequests.sublist(asked), [b.nativeId]);
+      expect(tabletC.keyframeRequests, 2);
+
+      // The Mac's taps reach the tablet it drives, in that tablet's own
+      // pixels, and no other.
+      c.sendRemoteTap(0.5, 0.5);
+      a.sendRemoteTap(0.5, 0.5);
+      b.sendRemoteTap(0.5, 0.5);
+      expect(adb.taps, [('C', 1200, 540)]);
+      expect(hub.sessions.length, 3);
+    });
+
+    test('ending the tablet that extends leaves the other two as they were',
+        () async {
+      final (:hub, :a, :b, :c) = await mixed();
+      // The last pick is the one the hub shows.
+      expect(hub.focused, same(c));
+
+      final ending = hub.disconnectSession('A');
+      expect(hub.sessions.keys, ['B', 'C']);
+      await ending;
+      await settle(hub);
+
+      expect(a.phase.value, ConnectionPhase.disconnected);
+      expect(capture.stops, [a.nativeId]);
+      expect(capture.displaysRemoved, contains(a.nativeId));
+      expect(capture.displaysRemoved.toSet(), {a.nativeId});
+      expect(input.releases.toSet(), {a.nativeId});
+      expect(hub.displays.holders, isEmpty);
+      expect(hub.budget.contains(a.nativeId), isFalse);
+      expect(adb.reverses.keys, ['B', 'C']);
+
+      // B: the same capture, never restarted, now alone in the encoder.
+      expect(b.phase.value, ConnectionPhase.streaming);
+      expect(capture.starts[b.nativeId], hasLength(1));
+      expect(hub.budget.contains(b.nativeId), isTrue);
+      expect(b.granted.value?.shared, isFalse);
+      expect(sent(tabletB, 0xF9), 1);
+      // C: the same decoder, its tablet never told to stop.
+      expect(c.phase.value, ConnectionPhase.streaming);
+      expect(hub.focused, same(c));
+      expect(remote.made, hasLength(1));
+      expect(remote.disposed, isEmpty);
+      expect(tabletC.captureStops, 0);
+      expect(tabletC.sharing, isTrue);
+      expect(sent(tabletC, 0xF9), 1);
+      expect(adb.inputShellsClosed, isEmpty);
+      expect(hub.reverseActive.value, 1);
+
+      // Both carry on.
+      encode(b.nativeId, [0, 0, 0, 1, 0x65]);
+      tabletB.sendMouse(_move(0.5, 0.5));
+      tabletC.sendFrame(keyframe);
+      c.sendRemoteTap(0.25, 0.5);
+      await _until(
+        () =>
+            tabletB.frames == 1 &&
+            input.miceFor(b.nativeId) == 1 &&
+            remote.fed[c.nativeId] == 1,
+      );
+      expect(adb.taps, [('C', 600, 540)]);
+      expect(input.miceFor(a.nativeId), 0);
+    });
+
+    test('a settings restart brings all three back in their own modes, '
+        'whatever the selectors say by then', () async {
+      final (:hub, :a, :b, :c) = await mixed();
+      final settings = Get.find<SettingsService>();
+      final ids = [a.nativeId, b.nativeId, c.nativeId];
+      // The selectors moved on, for a tablet still to come.
+      await settings.setSessionMode(SessionMode.extendedScreen);
+      for (final tablet in [tabletA, tabletB, tabletC]) {
+        tablet.mode = tablet.direction = null;
+      }
+
+      await hub.reconnect();
+      await _until(() => ['A', 'B', 'C'].every((key) => live(hub, key)));
+      await heard(tabletA, extended, 2);
+      await heard(tabletB, drivesMac, 2);
+      await heard(tabletC, macDrives, 2);
+      await settle(hub);
+
+      // The same sessions, under the same ids.
+      expect(hub.sessions['A'], same(a));
+      expect(hub.sessions['B'], same(b));
+      expect(hub.sessions['C'], same(c));
+      expect([a.nativeId, b.nativeId, c.nativeId], ids);
+      expect(a.choice, extended);
+      expect(b.choice, drivesMac);
+      expect(c.choice, macDrives);
+
+      // Each pipeline was made again as what it was.
+      expect(
+        capture.starts[a.nativeId]!.map((s) => s.mode),
+        [DisplayMode.extend, DisplayMode.extend],
+      );
+      expect(
+        capture.starts[b.nativeId]!.map((s) => s.mode),
+        [DisplayMode.mirror, DisplayMode.mirror],
+      );
+      expect(capture.starts[c.nativeId], isNull);
+      expect(capture.displaysMade.toSet(), {a.nativeId});
+      expect(hub.displays.holders, [a]);
+      expect(hub.budget.count, 2);
+      expect(hub.budget.contains(c.nativeId), isFalse);
+      // C was told to stop, then asked for its screen again, and has a new
+      // decoder under its id.
+      expect(tabletC.captureStops, 1);
+      expect(tabletC.captureRequests, 2);
+      expect(remote.made.map((m) => m.session), [c.nativeId, c.nativeId]);
+      expect(remote.disposed.toSet(), {c.nativeId});
+      expect(tabletA.captureRequests, 0);
+      expect(tabletB.captureRequests, 0);
+      expect(hub.reverseActive.value, 1);
+    });
+
+    test('a new launch over the same preferences connects all three by '
+        'itself, each in the mode it ran in last', () async {
+      final first = await mixed();
+      final before = Get.find<SettingsService>();
+      final vdSerials = [
+        first.a.vdSerial,
+        first.b.vdSerial,
+        first.c.vdSerial,
+      ];
+      // The selectors are left on what none of the three runs as: Extended
+      // screen, with the saved direction Mac -> Tablet.
+      const selectors = SessionChoice(
+        SessionMode.extendedScreen,
+        RemoteDirection.macControlsTab,
+      );
+      await before.setSessionMode(selectors.mode);
+      await before.setRemoteDirection(selectors.direction);
+      await first.hub.disconnect();
+      expect(first.hub.sessions, isEmpty);
+      await settle(first.hub);
+      for (final tablet in [tabletA, tabletB, tabletC]) {
+        tablet.controls.clear();
+        tablet.mode = tablet.direction = null;
+      }
+      final decodersBefore = remote.made.length;
+
+      // The next launch: the preferences read again from the store, and a
+      // hub that has never seen a tablet.
+      SharedPreferences.resetStatic();
+      await Get.delete<SettingsService>(force: true);
+      final settings = SettingsService();
+      await settings.init();
+      Get.put(settings);
+      expect(settings.nextChoice, selectors);
+      expect(settings.knownDevices.map((d) => d.serial), ['A', 'B', 'C']);
+      final hub = await newHub();
+
+      await hub.autoConnect();
+      await _until(() => ['A', 'B', 'C'].every((key) => live(hub, key)));
+      final a = hub.sessions['A']!;
+      final b = hub.sessions['B']!;
+      final c = hub.sessions['C']!;
+      expect(a, isNot(same(first.a)));
+      expect(a.choice, extended);
+      expect(b.choice, drivesMac);
+      expect(c.choice, macDrives);
+      // On the wire too: A's direction byte is the one it was picked with,
+      // not the selectors'.
+      await heard(tabletA, extended, 1);
+      await heard(tabletB, drivesMac, 1);
+      await heard(tabletC, macDrives, 1);
+      await settle(hub);
+
+      expect(a.spec.displayMode, DisplayMode.extend);
+      expect(b.spec.displayMode, DisplayMode.mirror);
+      expect(c.spec.isReverseRemote, isTrue);
+      expect([a.vdSerial, b.vdSerial, c.vdSerial], vdSerials);
+      expect(hub.displays.holders, [a]);
+      expect(hub.budget.contains(a.nativeId), isTrue);
+      expect(hub.budget.contains(b.nativeId), isTrue);
+      expect(hub.budget.contains(c.nativeId), isFalse);
+      expect(capture.starts[c.nativeId], isNull);
+      expect(remote.made.sublist(decodersBefore).map((m) => m.session), [
+        c.nativeId,
+      ]);
+      expect(hub.reverseActive.value, 1);
+      // Nothing moved the selectors, and each tablet is still remembered
+      // as it was.
+      expect(settings.nextChoice, selectors);
+      expect(settings.knownChoice('A'), extended);
+      expect(settings.knownChoice('B'), drivesMac);
+      expect(settings.knownChoice('C'), macDrives);
+    });
+  });
+
+  group('two tablets drive the Mac', () {
+    test('both share the encoder with no display of their own, each '
+        "one's mouse is injected under its own session, and ending one lets "
+        'go of its own input only', () async {
+      const big = ClientPanel(2960, 1848, 120);
+      const small = ClientPanel(2560, 1600, 60);
+      final tablet1 = FakeTablet('${syntheticSerialPrefix}1', panel: big);
+      final tablet2 = FakeTablet('${syntheticSerialPrefix}2', panel: small);
+      addTearDown(tablet1.hangUp);
+      addTearDown(tablet2.hangUp);
+      final adb = _CountingAdb([tablet1, tablet2]);
+      Get.put<AdbService>(adb);
+      final settings = Get.find<SettingsService>();
+      await settings.setSessionMode(SessionMode.remoteControl);
+      await settings.setRemoteDirection(RemoteDirection.tabControlsMac);
+      final hub = HostConnectionManager(
+        adb: adb,
+        devicePollInterval: null,
+        hostGranted: () async => true,
+      );
+      addTearDown(hub.disconnect);
+      await hub.hostInfoReady;
+      // An encoder small enough that both give up rate, though both fit at
+      // their own resolution: 400 Mpx/s for either codec, on one engine.
+      hub.budget.estimate = const EncoderEstimate(
+        engines: 1,
+        h264PerEngine: 400,
+        h265PerEngine: 400,
+      );
+      expect(hub.cap, 4);
+
+      // Alone, the first gets what it asks for: Max at its panel's 120 Hz.
+      await hub.connect(serial: tablet1.serial);
+      final one = hub.sessions[tablet1.serial]!;
+      expect(one.phase.value, ConnectionPhase.streaming);
+      await _until(() => tablet1.rate != null);
+      expect(tablet1.mode, SessionMode.remoteControl);
+      expect(tablet1.direction, RemoteDirection.tabControlsMac);
+      expect(tablet1.rates, [120]);
+      expect(one.granted.value?.fps, 120);
+      expect(one.granted.value?.shared, isFalse);
+
+      // The second joins: admitted, and both held to a shared ceiling.
+      await hub.connect(serial: tablet2.serial);
+      final two = hub.sessions[tablet2.serial]!;
+      expect(two.phase.value, ConnectionPhase.streaming);
+      expect(hub.sessions.length, 2);
+      expect(hub.budget.count, 2);
+      final ceiling1 = hub.budget.ceilings()[one.nativeId]!;
+      final ceiling2 = hub.budget.ceilings()[two.nativeId]!;
+      expect(ceiling1, lessThan(120));
+      expect(ceiling2, lessThan(60));
+      expect(capture.ceilings, contains((one.nativeId, ceiling1)));
+      expect(capture.starts[two.nativeId]!.single.toMap()['fpsCeiling'],
+          ceiling2);
+      await _until(() => tablet1.rates.length == 2 && tablet2.rate != null);
+      expect(tablet1.rates, [120, ceiling1]);
+      expect(tablet2.rates, [ceiling2]);
+      expect(tablet2.mode, SessionMode.remoteControl);
+      expect(tablet2.direction, RemoteDirection.tabControlsMac);
+      expect(one.granted.value?.fps, ceiling1);
+      expect(one.granted.value?.shared, isTrue);
+      expect(two.granted.value?.shared, isTrue);
+      // The first was not restarted for it.
+      expect(capture.starts[one.nativeId], hasLength(1));
+      expect(capture.stops, isEmpty);
+
+      // Both show the Mac's own screen: no virtual display, so no display
+      // round either.
+      await hub.pipeline.run(() async {});
+      await pumpEventQueue();
+      expect(capture.starts[one.nativeId]!.single.mode, DisplayMode.mirror);
+      expect(capture.starts[two.nativeId]!.single.mode, DisplayMode.mirror);
+      expect(capture.displaysMade, isEmpty);
+      expect(hub.displays.holders, isEmpty);
+      expect(capture.starts[two.nativeId], hasLength(1));
+      // Neither is a tablet the Mac views.
+      expect(hub.reverseActive.value, 0);
+      expect(hub.remoteSessions, isEmpty);
+
+      // Each one's mouse is injected under its own session.
+      tablet1.sendMouse(_move(0.1, 0.1));
+      tablet2.sendMouse(_move(0.9, 0.9));
+      tablet2.sendMouse(_move(0.8, 0.8));
+      await _until(() => input.mice.length == 3);
+      expect(input.miceFor(one.nativeId), 1);
+      expect(input.miceFor(two.nativeId), 2);
+      expect(
+        input.mice.firstWhere((m) => m.$1 == one.nativeId).$2.normalizedX,
+        closeTo(0.1, 1e-6),
+      );
+      expect(
+        input.mice.firstWhere((m) => m.$1 == two.nativeId).$2.normalizedX,
+        closeTo(0.9, 1e-6),
+      );
+      expect(input.releases, isEmpty);
+
+      // Ending the first lets go of its own input, and of nothing of the
+      // second's, which may climb back to its own rate.
+      await hub.disconnectSession(tablet1.serial);
+      await hub.pipeline.run(() async {});
+      expect(input.releases, isNotEmpty);
+      expect(input.releases.toSet(), {one.nativeId});
+      expect(capture.stops, [one.nativeId]);
+      expect(hub.sessions.keys, [tablet2.serial]);
+      expect(two.phase.value, ConnectionPhase.streaming);
+      expect(hub.budget.ceilings(), {two.nativeId: 60});
+      expect(capture.ceilings.last, (two.nativeId, 60));
+      expect(capture.starts[two.nativeId], hasLength(1));
+
+      tablet2.sendMouse(_move(0.5, 0.5));
+      await _until(() => input.miceFor(two.nativeId) == 3);
+      expect(input.miceFor(one.nativeId), 1);
+      expect(input.releases.toSet(), {one.nativeId});
+      expect(settings.knownDevices, isEmpty,
+          reason: 'stand-in tablets are never remembered');
+    });
+  });
+
   group('synthetic tablets in a debug build', () {
     const adbChannel = MethodChannel('extended_screen/adb');
     const remoteChannel = MethodChannel('extended_screen/remote_video');
@@ -2302,6 +3664,161 @@ void main() {
       await adb.removeForward(serial: 'synth-1', remotePort: 7001);
       expect(calls, isEmpty);
       expect(adb.keysDelivered, {'synth-1': 1});
+    });
+
+    test("the routing adb keeps a synthetic tablet's taps and swipes and "
+        "asks adb for none of them, while a real tablet's still go to "
+        'adb', () async {
+      final calls = <MethodCall>[];
+      messenger.setMockMethodCallHandler(adbChannel, (call) async {
+        calls.add(call);
+        return null;
+      });
+      final synth = SyntheticTablets(2);
+      for (final t in synth.tablets) {
+        addTearDown(t.hangUp);
+      }
+      final adb = synth.adb;
+
+      await adb.inputTap(serial: 'synth-1', x: 10, y: 20);
+      await adb.inputSwipe(serial: 'synth-2', x1: 1, y1: 2, x2: 3, y2: 4);
+      await adb.inputSwipe(
+        serial: 'synth-1',
+        x1: 5,
+        y1: 6,
+        x2: 7,
+        y2: 8,
+        durationMs: 300,
+      );
+      await adb.inputTap(serial: 'synth-2', x: 30, y: 40);
+      expect(adb.taps, [('synth-1', 10, 20), ('synth-2', 30, 40)]);
+      expect(adb.swipes, [
+        ('synth-2', 1, 2, 3, 4, 50),
+        ('synth-1', 5, 6, 7, 8, 300),
+      ]);
+      expect(calls, isEmpty);
+
+      await adb.inputTap(serial: 'R5CX', x: 100, y: 200);
+      await adb.inputSwipe(
+        serial: 'R5CX',
+        x1: 1,
+        y1: 2,
+        x2: 3,
+        y2: 4,
+        durationMs: 80,
+      );
+      // Through the real tablet's input shell, as numbers.
+      expect(calls.map((c) => c.method), ['inputShell', 'inputShell']);
+      expect(calls.map((c) => c.arguments), [
+        {
+          'serial': 'R5CX',
+          'command': 'tap',
+          'values': [100, 200],
+        },
+        {
+          'serial': 'R5CX',
+          'command': 'swipe',
+          'values': [1, 2, 3, 4, 80],
+        },
+      ]);
+      expect(adb.taps, hasLength(2), reason: "a real tablet's is not kept");
+      expect(adb.swipes, hasLength(2));
+
+      // The end of an input shell: a synthetic tablet has none for adb to
+      // end, a real one's is adb's.
+      calls.clear();
+      await adb.closeInputShell(serial: 'synth-1');
+      await adb.closeInputShell(serial: 'synth-2');
+      expect(calls, isEmpty);
+      expect(adb.inputShellsClosed, ['synth-1', 'synth-2']);
+      await adb.closeInputShell(serial: 'R5CX');
+      expect(calls.map((c) => c.method), ['closeInputShell']);
+      expect(calls.single.arguments, {'serial': 'R5CX'});
+      expect(adb.inputShellsClosed, ['synth-1', 'synth-2'],
+          reason: "a real tablet's is not kept");
+
+      // The screen-off helper: a synthetic tablet still has no panel, and a
+      // real one's hold and release still go to adb.
+      calls.clear();
+      expect(await adb.holdTabletScreenOff(serial: 'synth-1'), isNotNull);
+      await adb.releaseTabletScreenOff(serial: 'synth-1');
+      expect(calls, isEmpty);
+      expect(adb.holds, isEmpty);
+      expect(adb.releases, ['synth-1']);
+      await adb.holdTabletScreenOff(serial: 'R5CX');
+      await adb.releaseTabletScreenOff(serial: 'R5CX');
+      expect(calls.map((c) => c.method), [
+        'holdTabletScreenOff',
+        'releaseTabletScreenOff',
+      ]);
+      expect(adb.releases, ['synth-1']);
+    });
+
+    test("a synthetic tablet the Mac controls: nothing of its input ever "
+        "reaches adb's input shell, through a whole session and its end, "
+        'while a real tablet whose plugin has no shell falls back to one '
+        '`adb shell input`', () async {
+      final calls = <MethodCall>[];
+      messenger.setMockMethodCallHandler(adbChannel, (call) async {
+        calls.add(call);
+        if (call.method == 'inputShell') throw MissingPluginException();
+        return null;
+      });
+      Get.put<RemoteVideoChannel>(RecordingRemoteVideo());
+      final synth = SyntheticTablets(1);
+      final tablet = synth.tablets.single;
+      addTearDown(tablet.hangUp);
+      final adb = synth.adb;
+      Get.put<AdbService>(adb);
+
+      final session = HostSession(
+        key: 'synth-1',
+        link: LinkType.usb,
+        serial: 'synth-1',
+        choice: const SessionChoice(
+          SessionMode.remoteControl,
+          RemoteDirection.macControlsTab,
+        ),
+        pipeline: PipelineQueue(),
+        tunnels: TabletTunnels(),
+        adb: adb,
+        socket: SocketService(),
+      );
+      addTearDown(() async {
+        await session.disconnect();
+        session.dispose();
+      });
+      await session.connect();
+      expect(session.phase.value, ConnectionPhase.streaming);
+      expect(session.spec.isReverseRemote, isTrue);
+
+      session.sendRemoteTap(0.5, 0.5);
+      session.sendRemoteSwipe(0, 0, 1, 1);
+      await session.disconnect();
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(adb.taps, hasLength(1));
+      expect(adb.swipes, hasLength(1));
+      expect(adb.inputShellsClosed, ['synth-1']);
+      expect(
+        calls.map((c) => c.method),
+        isNot(anyOf(contains('inputShell'), contains('closeInputShell'),
+            contains('shellInput'))),
+      );
+      expect(
+        calls.map((c) => (c.arguments as Map?)?['serial']),
+        isNot(contains('synth-1')),
+        reason: 'no adb call at all names the synthetic tablet',
+      );
+
+      // A real one, with a plugin that has no input shell.
+      calls.clear();
+      await adb.inputTap(serial: 'R5CX', x: 7, y: 8);
+      expect(calls.map((c) => c.method), ['inputShell', 'shellInput']);
+      expect(calls.last.arguments, {
+        'serial': 'R5CX',
+        'args': ['tap', '7', '8'],
+      });
+      expect(adb.taps, hasLength(1));
     });
 
     test('a synthetic session persists nothing and is offered no Wi-Fi '

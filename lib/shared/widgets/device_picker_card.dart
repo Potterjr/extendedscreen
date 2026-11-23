@@ -6,9 +6,9 @@ import 'package:extendedscreen/shared/models/device_model.dart';
 /// Android device to stream to (instead of auto-picking the first one). On
 /// Home over USB it is the panel that adds a tablet beside those connected.
 ///
-/// Plain widget over a snapshot: [devices] and [disabledReasons] must be plain
-/// values read inside the caller's `Obx`, not the `RxList` itself, or a list
-/// change doesn't rebuild the card.
+/// Plain widget over a snapshot: [devices], [disabledReasons] and [subtitles]
+/// must be plain values read inside the caller's `Obx`, not the `RxList`
+/// itself, or a list change doesn't rebuild the card.
 class DevicePickerCard extends StatelessWidget {
   final List<DeviceModel> devices;
   final ValueChanged<DeviceModel> onSelect;
@@ -28,6 +28,16 @@ class DevicePickerCard extends StatelessWidget {
   /// tile shows. Such a tile is dimmed and ignores taps.
   final Map<String, String> disabledReasons;
 
+  /// What stands between the header and the tiles (on Home: the mode the
+  /// next tablet added runs in). Above the tiles, so a tablet that joins or
+  /// leaves the list moves nothing of it, and each one keyed by the caller
+  /// if it can come and go.
+  final List<Widget> leading;
+
+  /// One more line under a device's serial, by serial (on Home: the mode
+  /// a known tablet ran in last time).
+  final Map<String, String> subtitles;
+
   const DevicePickerCard({
     super.key,
     required this.devices,
@@ -38,6 +48,8 @@ class DevicePickerCard extends StatelessWidget {
     this.header,
     this.emptyText,
     this.disabledReasons = const {},
+    this.leading = const [],
+    this.subtitles = const {},
   });
 
   @override
@@ -88,6 +100,7 @@ class DevicePickerCard extends StatelessWidget {
                 fontSize: 12,
               ),
             ),
+          ...leading,
           if (devices.isEmpty)
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 8),
@@ -108,6 +121,7 @@ class DevicePickerCard extends StatelessWidget {
               (d) => _DeviceTile(
                 key: ValueKey('device/${d.serial}'),
                 device: d,
+                subtitle: subtitles[d.serial],
                 disabledReason: disabledReasons[d.serial],
                 onTap: () => onSelect(d),
               ),
@@ -122,6 +136,9 @@ class _DeviceTile extends StatelessWidget {
   final DeviceModel device;
   final VoidCallback onTap;
 
+  /// One more line about the device, under its serial.
+  final String? subtitle;
+
   /// Why it can't be picked now; null when it can.
   final String? disabledReason;
 
@@ -129,6 +146,7 @@ class _DeviceTile extends StatelessWidget {
     super.key,
     required this.device,
     required this.onTap,
+    this.subtitle,
     this.disabledReason,
   });
 
@@ -166,6 +184,14 @@ class _DeviceTile extends StatelessWidget {
                         fontSize: 12,
                       ),
                     ),
+                    if (subtitle case final subtitle?)
+                      Text(
+                        subtitle,
+                        style: TextStyle(
+                          color: Colors.white.withValues(alpha: 0.4),
+                          fontSize: 12,
+                        ),
+                      ),
                     if (disabledReason case final reason?)
                       Text(
                         reason,

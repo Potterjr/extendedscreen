@@ -69,6 +69,10 @@ class AppTranslations extends Translations {
     'error_extend_wrong_display':
         'Extend may be showing another display. Disconnect and connect '
             'this tablet again.',
+    'error_mirror_wrong_display':
+        "This tablet may be showing another tablet's screen instead of the "
+            "Mac's",
+    'error_remote_decoder': "This Mac couldn't decode this tablet's screen",
     'error_wifi_identity':
         'Could not create this Mac\'s Wi-Fi identity (openssl failed).',
     'error_usb_unverified_client':
@@ -130,6 +134,10 @@ class AppTranslations extends Translations {
     'remote_tablet_screen_hint':
         'The tablet keeps running and you can still control it: only its screen goes dark.',
     'remote_tablet_screen_failed': "Couldn't turn the tablet's screen off",
+    'remote_grid_empty': 'No tablet is being controlled from this Mac',
+    'remote_tile_expand': 'Expand',
+    'remote_tile_show_all': 'Show all',
+    'remote_tile_reconnecting': 'Reconnecting…',
 
     // ── Home ────────────────────────────────────────────────────────────
     'home_open_view': 'Open View',
@@ -148,13 +156,20 @@ class AppTranslations extends Translations {
     'home_appbar_tablets': '@n tablets',
     'home_at_limit': 'No room for another tablet right now',
     'home_disconnecting': 'Disconnecting…',
-    'home_remote_single': 'Remote control works with one tablet at a time',
     'home_all_attached_connected': 'Every attached tablet is connected',
     'session_granted': 'Encoding @size at up to @fps fps',
     'session_granted_shared':
         'Encoding @size at up to @fps fps, sharing this Mac\'s encoder',
     'session_unplugged':
         'Unplugged. Plug it in again; the Mac keeps trying.',
+    'home_next_tablet_mode': 'Mode for the next tablet you add',
+    'home_tile_last_mode': 'Last time: @mode',
+    'session_change_mode': 'Change mode',
+    'session_mode_hint_restart': 'Restarts this tablet only',
+    'session_mode_hint_to_reverse':
+        'Restarts this tablet; then tap @share on it',
+    'session_mode_hint_from_reverse':
+        'Restarts this tablet; then tap @open on it',
 
     // ── Loopback preview (host, debug builds with SYNTH_TABLETS) ────────
     'loopback_preview_title': 'Loopback preview',
@@ -163,6 +178,8 @@ class AppTranslations extends Translations {
     'loopback_preview_no_stream': 'No stream',
     'loopback_preview_display': 'display @id',
     'loopback_preview_fell_back': 'fell back to the main display',
+    'loopback_no_picture_reverse':
+        'No picture here: a stand-in tablet has no screen to send the Mac',
 
     // ── Connection card ─────────────────────────────────────────────────
     'conn_card_active_subtitle': '@link  •  @codec',
@@ -217,8 +234,8 @@ class AppTranslations extends Translations {
     // ── Settings: several tablets (host) ────────────────────────────────
     'settings_max_tablets': 'Maximum tablets',
     'settings_max_tablets_desc':
-        'How many tablets may connect at once over USB in Extended Screen '
-            'mode. This Mac\'s encoder can allow fewer. Tablets already '
+        'How many tablets can connect over USB at once, in any mode. '
+            'This Mac\'s encoder can allow fewer. Tablets already '
             'connected stay connected.',
     'settings_encoder': 'Encoder',
     'settings_encoder_estimated': '@mpx Mpx/s (estimated)',
@@ -396,6 +413,9 @@ class AppTranslations extends Translations {
     'error_extend_wrong_display':
         'โหมดขยายจออาจกำลังแสดงจออื่นอยู่ ให้ตัดการเชื่อมต่อแท็บเล็ตเครื่องนี้'
             'แล้วเชื่อมต่อใหม่',
+    'error_mirror_wrong_display':
+        'แท็บเล็ตเครื่องนี้อาจแสดงจอของแท็บเล็ตเครื่องอื่นแทนจอ Mac',
+    'error_remote_decoder': 'Mac ถอดรหัสภาพจากแท็บเล็ตเครื่องนี้ไม่ได้',
     'error_wifi_identity':
         'สร้างข้อมูลยืนยันตัวตน Wi-Fi ของ Mac เครื่องนี้ไม่สำเร็จ (openssl ล้มเหลว)',
     'error_usb_unverified_client':
@@ -452,6 +472,10 @@ class AppTranslations extends Translations {
     'remote_tablet_screen_on': 'เปิดจอแท็บเล็ต',
     'remote_tablet_screen_hint': 'แท็บเล็ตยังทำงานและคุมได้ตามปกติ แค่จอดับ',
     'remote_tablet_screen_failed': 'ปิดจอแท็บเล็ตไม่ได้',
+    'remote_grid_empty': 'ไม่มีแท็บเล็ตที่ควบคุมจาก Mac นี้',
+    'remote_tile_expand': 'ขยาย',
+    'remote_tile_show_all': 'แสดงทั้งหมด',
+    'remote_tile_reconnecting': 'กำลังเชื่อมต่อใหม่…',
 
     // ── Home ────────────────────────────────────────────────────────────
     'home_open_view': 'เปิดหน้าจอ',
@@ -470,12 +494,19 @@ class AppTranslations extends Translations {
     'home_appbar_tablets': '@n เครื่อง',
     'home_at_limit': 'ตอนนี้เพิ่มแท็บเล็ตอีกเครื่องไม่ได้',
     'home_disconnecting': 'กำลังตัดการเชื่อมต่อ…',
-    'home_remote_single': 'ควบคุมระยะไกลใช้ได้ทีละเครื่อง',
     'home_all_attached_connected': 'แท็บเล็ตที่เสียบอยู่เชื่อมต่อครบทุกเครื่องแล้ว',
     'session_granted': 'เข้ารหัสที่ @size สูงสุด @fps fps',
     'session_granted_shared':
         'เข้ารหัสที่ @size สูงสุด @fps fps ใช้ตัวเข้ารหัสของ Mac ร่วมกัน',
     'session_unplugged': 'ถอดสายอยู่ เสียบใหม่ได้เลย Mac จะลองเชื่อมต่อต่อไป',
+    'home_next_tablet_mode': 'โหมดสำหรับแท็บเล็ตเครื่องถัดไปที่เพิ่ม',
+    'home_tile_last_mode': 'ครั้งก่อน: @mode',
+    'session_change_mode': 'เปลี่ยนโหมด',
+    'session_mode_hint_restart': 'เริ่มแท็บเล็ตเครื่องนี้ใหม่เท่านั้น',
+    'session_mode_hint_to_reverse':
+        'เริ่มแท็บเล็ตเครื่องนี้ใหม่ แล้วกด @share บนแท็บเล็ต',
+    'session_mode_hint_from_reverse':
+        'เริ่มแท็บเล็ตเครื่องนี้ใหม่ แล้วกด @open บนแท็บเล็ต',
 
     // ── Loopback preview (host, debug builds with SYNTH_TABLETS) ────────
     'loopback_preview_title': 'พรีวิวสตรีมวนกลับ',
@@ -484,6 +515,8 @@ class AppTranslations extends Translations {
     'loopback_preview_no_stream': 'ไม่มีสตรีม',
     'loopback_preview_display': 'จอ @id',
     'loopback_preview_fell_back': 'ถอยไปจับภาพจอหลักแทน',
+    'loopback_no_picture_reverse':
+        'ไม่มีภาพตรงนี้: แท็บเล็ตจำลองไม่มีหน้าจอส่งให้ Mac',
 
     // ── Connection card ─────────────────────────────────────────────────
     'conn_card_active_subtitle': '@link  •  @codec',
@@ -538,7 +571,7 @@ class AppTranslations extends Translations {
     // ── Settings: several tablets (host) ────────────────────────────────
     'settings_max_tablets': 'จำนวนแท็บเล็ตสูงสุด',
     'settings_max_tablets_desc':
-        'จำนวนแท็บเล็ตที่เชื่อมต่อพร้อมกันได้ผ่าน USB ในโหมดจอเสริม '
+        'จำนวนแท็บเล็ตที่เชื่อมต่อผ่าน USB ได้พร้อมกัน ในทุกโหมด '
             'ตัวเข้ารหัสวิดีโอของ Mac เครื่องนี้อาจรับได้น้อยกว่านี้ '
             'แท็บเล็ตที่เชื่อมต่ออยู่แล้วจะยังเชื่อมต่อต่อไป',
     'settings_encoder': 'ตัวเข้ารหัสวิดีโอ',

@@ -106,8 +106,8 @@ class SettingsController extends GetxController {
   /// The link this device is set to use (picked on Home), for the Info rows.
   bool get isWifi => _settings.linkTypeRx.value == LinkType.wifi;
 
-  /// Host: how many tablets may be connected at once (USB, Extended
-  /// screen; the encoder estimate can allow fewer).
+  /// Host: how many tablets may be connected at once (over USB, in any
+  /// mode; the encoder estimate can allow fewer).
   RxInt get maxTablets => _settings.maxTabletsRx;
 
   /// Saved only: the hub reads it at the next pick or admission, and a
@@ -200,7 +200,12 @@ class SettingsController extends GetxController {
 
   @override
   void onClose() {
-    _reconnectDebounce?.cancel();
+    // A change still waiting out its debounce is applied now: leaving
+    // Settings must not leave a saved value that no tablet runs with.
+    if (_reconnectDebounce?.isActive ?? false) {
+      _reconnectDebounce!.cancel();
+      unawaited(_doReconnect());
+    }
     scrollController.dispose();
     super.onClose();
   }
@@ -257,7 +262,9 @@ class SettingsController extends GetxController {
     if (mode.value == m) return;
     mode.value = m;
     _settings.setDisplayMode(m);
-    _reconnect();
+    // A remote-control session mirrors whatever this says: only the
+    // tablets the Mac extends onto restart.
+    _reconnect(all: false);
   }
 
   void setEncodePreset(EncodePreset preset) {
@@ -271,14 +278,14 @@ class SettingsController extends GetxController {
       codec.value = c;
       _settings.setCodec(c);
     }
-    _reconnect();
+    _reconnect(all: true);
   }
 
   void setCodec(CodecType c) {
     if (codec.value == c) return;
     codec.value = c;
     _settings.setCodec(c);
-    _reconnect();
+    _reconnect(all: true);
   }
 
   void setCustomResolution(int w, int h) {
@@ -286,46 +293,93 @@ class SettingsController extends GetxController {
     customWidth.value = w;
     customHeight.value = h;
     _settings.setCustomResolution(w, h);
-    _reconnect();
+    _reconnect(all: true);
   }
 
   void setCustomBitrate(int mbps) {
     if (customBitrateMbps.value == mbps) return;
     customBitrateMbps.value = mbps;
     _settings.setCustomBitrateMbps(mbps);
-    _reconnect();
+    _reconnect(all: true);
   }
 
   void setCustomRefreshRate(int hz) {
     if (customRefreshRate.value == hz) return;
     customRefreshRate.value = hz;
     _settings.setCustomRefreshRate(hz);
-    _reconnect();
+    _reconnect(all: true);
   }
 
   Timer? _reconnectDebounce;
   bool _reconnecting = false;
 
+  /// Whether a change waiting to be applied needs every session restarted
+  /// (preset, codec, the custom values: a tablet the Mac controls gets its
+  /// codec, rate and bitrate from them too). The display mode alone does
+  /// not. Kept as the OR of every change since the last reconnect that
+  /// started, and read and cleared only when one starts.
+  bool _pendingAll = false;
+
+  /// A change's debounce ran out while a reconnect was still running: run
+  /// once more when it returns.
+  bool _again = false;
+
   /// Every setting change persists the value, then restarts the connection so
   /// the host's capture + encode pipeline picks it up. Debounced so changing
   /// several fields in one sheet visit (e.g. preset + codec, or the three
   /// custom values) collapses into a single reconnect instead of one per
-  /// field. No-op (just saves) when nothing is connected.
-  Future<void> _reconnect() async {
+  /// field. [all]: every session restarts; otherwise only the tablets the
+  /// Mac extends onto ([BaseConnectionManager.reconnectExtendedOnly]), and
+  /// several changes in one debounce restart everything if any of them
+  /// asks for it. No-op (just saves) when nothing is connected.
+  void _reconnect({required bool all}) {
+    if (all) _pendingAll = true;
     isApplying.value = true;
     _reconnectDebounce?.cancel();
     _reconnectDebounce =
         Timer(const Duration(milliseconds: 350), _doReconnect);
   }
 
+  /// Runs the reconnect the pending changes need. One at a time: a change
+  /// whose debounce ends while one runs is not dropped (it used to be, so
+  /// its value reached no tablet until the next change), it makes the
+  /// running one be followed by exactly one more, for everything changed
+  /// meanwhile.
   Future<void> _doReconnect() async {
-    if (_reconnecting) return;
+    if (_reconnecting) {
+      _again = true;
+      return;
+    }
     _reconnecting = true;
+    Object? failure;
+    StackTrace? failureTrace;
     try {
-      await _cm.reconnect();
+      do {
+        _again = false;
+        // This round starts after every change so far was saved, so it
+        // applies them all: one still waiting out its debounce (it can be,
+        // when this is the round after another) needs none of its own.
+        _reconnectDebounce?.cancel();
+        // Taken before the first await: a change made from here on is the
+        // next round's.
+        final all = _pendingAll;
+        _pendingAll = false;
+        try {
+          await (all ? _cm.reconnect() : _cm.reconnectExtendedOnly());
+        } catch (e, st) {
+          // The round a later change asked for still runs.
+          failure ??= e;
+          failureTrace ??= st;
+        }
+      } while (_again);
     } finally {
       _reconnecting = false;
-      isApplying.value = false;
+      // A change made near the end is still waiting out its debounce:
+      // its own reconnect follows, so the rows stay disabled until then.
+      isApplying.value = _reconnectDebounce?.isActive ?? false;
+    }
+    if (failure != null) {
+      Error.throwWithStackTrace(failure, failureTrace ?? StackTrace.current);
     }
   }
 

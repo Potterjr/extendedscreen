@@ -149,15 +149,22 @@ class AdbService extends GetxService {
   }
 
   // ─── Input injection (reverse remote: Mac controls the tablet) ────────────
-  // Runs `adb shell input …` on the device. Coordinates are device pixels.
+  // Runs `input …` on the device. Coordinates are device pixels.
   // Fire-and-forget: a dropped tap shouldn't stall the control loop.
+  //
+  // Taps and swipes go through the tablet's input shell: one long-lived
+  // `adb shell` per serial that AdbManagerPlugin opens at the first event
+  // and feeds a line per event, in order, so an event costs no new adb
+  // process ([closeInputShell] ends it). The plugin gets numbers only and
+  // builds the line itself. Key events and text still take one
+  // `adb shell input …` each.
 
   Future<void> inputTap({
     required String serial,
     required int x,
     required int y,
   }) =>
-      _shellInput(serial, ['tap', '$x', '$y']);
+      _inputShell(serial, 'tap', [x, y]);
 
   Future<void> inputSwipe({
     required String serial,
@@ -167,7 +174,17 @@ class AdbService extends GetxService {
     required int y2,
     int durationMs = 50,
   }) =>
-      _shellInput(serial, ['swipe', '$x1', '$y1', '$x2', '$y2', '$durationMs']);
+      _inputShell(serial, 'swipe', [x1, y1, x2, y2, durationMs]);
+
+  /// Ends [serial]'s input shell, if it has one: its session is over. The
+  /// next tap opens a new one.
+  Future<void> closeInputShell({required String serial}) async {
+    try {
+      await _channel.invokeMethod('closeInputShell', {'serial': serial});
+    } catch (e) {
+      _log.w('ADB: input shell not closed: $e');
+    }
+  }
 
   Future<void> inputKeyevent({required String serial, required int keycode}) =>
       _shellInput(serial, ['keyevent', '$keycode']);
@@ -228,6 +245,34 @@ class AdbService extends GetxService {
     final match =
         RegExp(r'Broadcast completed: result=(-?\d+)').firstMatch(output);
     return match == null ? null : int.tryParse(match.group(1)!);
+  }
+
+  /// One tap or swipe through [serial]'s input shell. Only when the plugin
+  /// has no such shell at all (an older build of it) or adb could not take
+  /// the event (`ADB_FAILED`) does it go the old way, as one
+  /// `adb shell input …`; values the plugin refuses (`BAD_ARGS`: off any
+  /// screen, a swipe longer than it allows) are dropped.
+  Future<void> _inputShell(
+      String serial, String command, List<int> values) async {
+    try {
+      await _channel.invokeMethod('inputShell', {
+        'serial': serial,
+        'command': command,
+        'values': values,
+      });
+      return;
+    } on MissingPluginException {
+      // Fall back below.
+    } on PlatformException catch (e) {
+      if (e.code != 'ADB_FAILED') {
+        _log.w('ADB input dropped ($command $values): ${e.code}');
+        return;
+      }
+    } catch (e) {
+      _log.w('ADB input failed: $e');
+      return;
+    }
+    await _shellInput(serial, [command, for (final v in values) '$v']);
   }
 
   Future<void> _shellInput(String serial, List<String> args) async {

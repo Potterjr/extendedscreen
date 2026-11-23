@@ -1,13 +1,18 @@
+import 'dart:async';
+
 import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
 import 'package:extendedscreen/app/routes/app_routes.dart';
+import 'package:extendedscreen/modules/remote_screen/host/remote_host/controllers/remote_grid_controller.dart';
 import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
 import 'package:extendedscreen/shared/connection/connection_state.dart';
 import 'package:extendedscreen/shared/connection/host_connection_manager.dart';
+import 'package:extendedscreen/shared/connection/host_session.dart';
 import 'package:extendedscreen/shared/connection/wifi_discovery_service.dart';
 import 'package:extendedscreen/shared/connection/wifi_pairing_service.dart';
 import 'package:extendedscreen/shared/models/device_model.dart';
 import 'package:extendedscreen/shared/models/link_type.dart';
+import 'package:extendedscreen/shared/models/session_choice.dart';
 import 'package:extendedscreen/shared/models/session_mode.dart';
 import 'package:extendedscreen/shared/platform/battery_channel.dart';
 import 'package:extendedscreen/shared/platform/permissions_channel.dart';
@@ -27,10 +32,21 @@ class HomeController extends GetxController with WidgetsBindingObserver {
   /// inline banner on Home instead of a forced trip to the Settings screen.
   final missingPermissions = <String>[].obs;
 
-  /// Host: which session to run this connection as. Exposed here (instead of a
-  /// dedicated launcher screen) so switching modes is a single tap on Home.
+  /// Host: the mode the next session made runs in: the tablet added next
+  /// from the add panel, or the next Wi-Fi session. It is no tablet's own
+  /// mode: a session that exists keeps the one it was made for, and changes
+  /// it from its card ([onSessionMode]). Exposed here (instead of a
+  /// dedicated launcher screen) so picking it is a single tap on Home.
   Rx<SessionMode> get sessionMode => _settings.sessionModeRx;
-  void onSelectSessionMode(SessionMode mode) => _settings.setSessionMode(mode);
+
+  /// The selector was pressed: [mode] is what the next session made runs
+  /// in. Saved, and nothing that runs changes (but see
+  /// [_retryWifiAsChosen]).
+  void onSelectSessionMode(SessionMode mode) {
+    // The observable changes at once; the write to disk follows.
+    unawaited(_settings.setSessionMode(mode));
+    _retryWifiAsChosen();
+  }
 
   ConnectionPhase get phase => _connection.phase.value;
   DeviceModel? get device => _connection.activeDevice.value;
@@ -49,16 +65,35 @@ class HomeController extends GetxController with WidgetsBindingObserver {
   /// unchanged, nothing else on screen would move.
   final refreshingDevices = false.obs;
 
-  /// Remote-control direction picker (host, while idle in remote-control mode).
+  /// Remote-control direction picker (host, with the mode picker): which
+  /// side drives the next remote-control session made. Like [sessionMode],
+  /// it says nothing about a session that exists.
   bool get isRemoteControl =>
       _settings.sessionModeRx.value == SessionMode.remoteControl;
   Rx<RemoteDirection> get remoteDirection => _settings.remoteDirectionRx;
-  void onSelectDirection(RemoteDirection dir) =>
-      _settings.setRemoteDirection(dir);
 
-  /// Host, reverse remote (Mac controls tablet): true once the tablet stream is
-  /// live. Reads the session-mode/direction observables so it is reactive.
-  bool get isReverseRemote => _settings.isReverseRemote;
+  /// The direction selector was pressed: saved for the next session made.
+  void onSelectDirection(RemoteDirection dir) {
+    unawaited(_settings.setRemoteDirection(dir));
+    _retryWifiAsChosen();
+  }
+
+  /// Host, over Wi-Fi: the selectors show beside the one Wi-Fi session
+  /// while it waits to retry, and a session keeps the mode it was made
+  /// for. So a change made then replaces that session with one in the mode
+  /// now chosen, which listens at once; the hub refuses a change that
+  /// comes to the same thing (the direction, which Wi-Fi forces anyway).
+  /// With no Wi-Fi session the choice is only saved, for the next one.
+  void _retryWifiAsChosen() {
+    final hub = _connection;
+    if (hub is! HostConnectionManager || !isWifi) return;
+    final session = hub.sessions[HostConnectionManager.wifiKey];
+    if (session == null || session.phase.value != ConnectionPhase.error) {
+      return;
+    }
+    unawaited(
+        hub.changeMode(HostConnectionManager.wifiKey, _settings.nextChoice));
+  }
 
   // ─── Link type (USB / Wi-Fi) ──────────────────────────────────────────────
 
@@ -136,9 +171,27 @@ class HomeController extends GetxController with WidgetsBindingObserver {
     await _connection.connect();
   }
 
-  /// Host: (re)open the remote view — used to get back in after backing out of
-  /// it while a reverse-remote session is still live.
-  void onOpenRemoteView() => Get.toNamed(AppRoutes.remoteHost);
+  /// Host: (re)open the remote view, to get back in after backing out of it
+  /// while a tablet the Mac controls is still live. With [key] (a tablet's
+  /// card) the view is asked to show that tablet's tile alone, which it
+  /// does only beside other tiles. The hub's focus is left as it is: the
+  /// view shows every such tablet, whichever one the hub shows.
+  void onOpenRemoteView({String? key}) {
+    if (Get.currentRoute == AppRoutes.remoteHost &&
+        Get.isRegistered<RemoteGridController>()) {
+      // Already open: nothing to push, only the tile to show.
+      if (key != null) Get.find<RemoteGridController>().expand(key);
+      return;
+    }
+    Get.toNamed(AppRoutes.remoteHost,
+        arguments: key == null ? null : {'focus': key});
+  }
+
+  /// The remote view, by itself: only from Home, so it never opens over
+  /// Settings or a second time over itself.
+  void _openRemoteFromHome() {
+    if (Get.currentRoute == AppRoutes.home) Get.toNamed(AppRoutes.remoteHost);
+  }
 
   /// Navigation workers registered in [onInit], disposed in [onClose].
   final _workers = <Worker>[];
@@ -189,23 +242,25 @@ class HomeController extends GetxController with WidgetsBindingObserver {
         });
       }
     } else {
-      // Host: in reverse remote (Mac controls tablet) the Mac is the viewer —
-      // open the remote view once the tablet stream is live.
-      void openRemote(ConnectionPhase p) {
-        if (p.isActive &&
-            _settings.isReverseRemote &&
-            Get.currentRoute == AppRoutes.home) {
-          Get.toNamed(AppRoutes.remoteHost);
-        }
-      }
-
-      _workers.add(ever<ConnectionPhase>(_connection.phase, openRemote));
+      // Host: the Mac is the viewer of every tablet it controls (remote
+      // control, Mac controls tablet). The remote view opens when the first
+      // of them goes live: the count of live ones leaving 0, whichever
+      // tablet the hub shows and whatever the selectors say now. A tablet
+      // that joins later gets a tile in the view and opens nothing, and an
+      // Extended or tablet-controls-Mac session never counts.
+      var live = _connection.reverseActive.value;
+      _workers.add(ever<int>(_connection.reverseActive, (now) {
+        final before = live;
+        live = now;
+        if (before == 0 && now > 0) _openRemoteFromHome();
+      }));
       // Already live when Home opens: the launch connected by itself
       // (HostConnectionManager.autoConnect), before the splash moved on or
       // while the window was hidden, and `ever` only sees changes.
-      if (_connection.phase.value.isActive) {
-        WidgetsBinding.instance.addPostFrameCallback(
-            (_) => openRemote(_connection.phase.value));
+      if (live > 0) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (_connection.reverseActive.value > 0) _openRemoteFromHome();
+        });
       }
     }
   }
@@ -310,9 +365,31 @@ class HomeController extends GetxController with WidgetsBindingObserver {
   /// session's connect again, on the same session.
   Future<void> onSessionRetry(String key) => _connect(serial: key);
 
-  /// Host: a tablet's card was tapped; the hub's values (the remote view,
-  /// the screen toggle) follow that tablet from now on. Checked, not cast:
-  /// Home also runs over stand-in managers in tests.
+  /// Host, a tablet's card: its mode menu picked [choice] for [session],
+  /// the session the menu was opened on. The hub ends that session and
+  /// makes the tablet a new one as [choice]; the other tablets run on.
+  /// Nothing when the tablet's session is another one by now (the menu
+  /// stayed open over a replacement), and the hub refuses what it cannot do
+  /// (a session on its way to being live, a change that changes nothing).
+  /// A mode in which the Mac captures its screen and takes the tablet's
+  /// input needs the two permissions, like a connect from Home.
+  Future<void> onSessionMode(HostSession session, SessionChoice choice) async {
+    final hub = _connection;
+    if (hub is! HostConnectionManager ||
+        !identical(hub.sessions[session.key], session)) {
+      return;
+    }
+    if (choice.encodesOnMac && !await _ensureHostPermissions()) return;
+    // Whatever happened while the permissions were asked about, the hub
+    // changes this session or none.
+    await hub.changeMode(session.key, choice, expected: session);
+  }
+
+  /// Host: a tablet's card was tapped; the values the hub shows as its own
+  /// (the session it retries or replaces on the next pick, what Settings
+  /// labels its presets with) follow that tablet from now on. The remote
+  /// view does not: it has a tile for every tablet the Mac controls.
+  /// Checked, not cast: Home also runs over stand-in managers in tests.
   void onFocus(String key) {
     final hub = _connection;
     if (hub is HostConnectionManager) hub.focus(key);
@@ -323,10 +400,17 @@ class HomeController extends GetxController with WidgetsBindingObserver {
   /// missing, bounce to Settings (scrolled to Permissions) instead of failing
   /// mid-handshake.
   Future<void> _connect({String? serial}) async {
-    // The user connects again: the auto-connect they paused, and the
-    // tablet they stopped, are theirs to connect by itself again.
-    _connection.allowDevice(serial);
     if (isHost && !await _ensureHostPermissions()) return;
+    // The user connects again: the auto-connect they paused, and the
+    // tablet they stopped, are theirs to connect by itself again. Only
+    // now, in one step with the connect and with no await between the
+    // two: the hub holds the tablet as being picked before it awaits
+    // anything, so no automatic connect ever finds it allowed and not yet
+    // picked. Lifted before the permissions were asked about, a policy run
+    // already under way connected a stopped tablet as it was remembered,
+    // and this pick, in the mode the selectors show, was refused as a
+    // second one. A press that ends in Settings lifts nothing.
+    _connection.allowDevice(serial);
     await _connection.connect(serial: serial);
   }
 

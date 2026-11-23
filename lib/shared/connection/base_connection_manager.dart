@@ -7,6 +7,7 @@ import 'package:extendedscreen/shared/connection/connection_state.dart';
 import 'package:extendedscreen/shared/models/device_model.dart';
 import 'package:extendedscreen/shared/models/link_type.dart';
 import 'package:extendedscreen/shared/models/packet_model.dart';
+import 'package:extendedscreen/shared/models/session_choice.dart';
 import 'package:extendedscreen/shared/models/touch_event_model.dart';
 import 'package:extendedscreen/shared/protocol/packet_codec.dart';
 import 'package:extendedscreen/shared/services/logger_service.dart';
@@ -103,6 +104,11 @@ abstract class BaseConnectionManager extends GetxService
 
   /// Reverse remote, client only: the tablet is actively capturing + streaming.
   final isScreenSharing = false.obs;
+
+  /// Host only: how many tablets the Mac views and drives (remote control,
+  /// Mac controls tablet) are live right now. The hub keeps it, counting
+  /// every session, not only the one it shows; the client never sets it.
+  final reverseActive = 0.obs;
 
   /// Client only: begin screen sharing (shows the consent prompt, then captures
   /// + streams). No-op on the host and in non-reverse modes.
@@ -224,6 +230,14 @@ abstract class BaseConnectionManager extends GetxService
   /// when null the last-used device (or the first detected) is chosen.
   Future<void> connect({String? serial});
 
+  /// [connect], with the mode the session it makes is to run as. The host's
+  /// hub does all its connecting here ([connect] is its user's path, with
+  /// the mode Home's selectors show); anything with one link and no mode of
+  /// its own to give (the client, a host session) just connects.
+  @protected
+  Future<void> connectWith(String? serial, {SessionChoice? choice}) =>
+      connect(serial: serial);
+
   /// Entry-point auto-connect (called from splash).
   Future<void> autoConnect();
 
@@ -287,6 +301,17 @@ abstract class BaseConnectionManager extends GetxService
   /// encoder refused it. No-op on the client.
   Future<void> retryNow(String key) async {}
 
+  /// Host: restarts the one tablet's session [key] as [reconnect] restarts
+  /// them all (same session, same rule for which may restart), leaving the
+  /// others running. No-op on the client, which has one link.
+  Future<void> reconnectSession(String key) async {}
+
+  /// Host: the tablet whose session is [key] is to run as [choice] from now
+  /// on: its session ends and a new one is made for it in that mode, the
+  /// other tablets running on. Says whether that began; never on the
+  /// client, which learns its mode from the host.
+  Future<bool> changeMode(String key, SessionChoice choice) async => false;
+
   /// Host: the user stopped connecting; nothing connects by itself until
   /// they connect again ([allowDevice]). No-op on the client.
   void pauseAutoConnect() {}
@@ -307,6 +332,11 @@ abstract class BaseConnectionManager extends GetxService
     await disconnect();
     await connect(serial: isHost ? serial : null);
   }
+
+  /// [reconnect], for a change that only reaches sessions the Mac extends
+  /// onto (the display mode: a remote-control session always mirrors). The
+  /// hub restarts those alone; anything with one link restarts it.
+  Future<void> reconnectExtendedOnly() => reconnect();
 
   Future<void> disconnect() async {
     _attempt++;

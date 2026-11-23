@@ -12,11 +12,13 @@ import 'package:extendedscreen/shared/models/device_model.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
 import 'package:extendedscreen/shared/models/link_type.dart';
 import 'package:extendedscreen/shared/models/packet_model.dart';
+import 'package:extendedscreen/shared/models/session_choice.dart';
 import 'package:extendedscreen/shared/models/session_spec.dart';
 import 'package:extendedscreen/shared/models/touch_event_model.dart';
 import 'package:extendedscreen/shared/platform/host_name.dart';
 import 'package:extendedscreen/shared/protocol/annexb.dart';
 import 'package:extendedscreen/shared/protocol/packet_codec.dart';
+import 'package:extendedscreen/shared/services/settings_service.dart';
 import 'package:extendedscreen/modules/extended_screen/host/screen_capture_channel.dart';
 import 'package:extendedscreen/modules/extended_screen/host/input_inject_channel.dart';
 import 'package:extendedscreen/modules/remote_screen/host/remote_video_channel.dart';
@@ -53,8 +55,8 @@ import 'package:extendedscreen/shared/connection/wifi_pairing_service.dart';
 /// Get, so it adds no app-lifecycle observer: the hub forwards what it
 /// needs, along with the native plugins' callbacks for it
 /// ([captureNeedsRestart], [frameRateChanged], [displayBoundsChanged],
-/// [decoderWantsKeyframe], [captureMismatch], [captureMatched],
-/// [onTabletScreenRestored]).
+/// [decoderWantsKeyframe], [decoderFailed], [decoderReady],
+/// [captureMismatch], [captureMatched], [onTabletScreenRestored]).
 ///
 /// With a [budget] its capture starts only once the budget has admitted it
 /// (see [EncodeBudget]), at what the budget grants; without one (tests that
@@ -65,6 +67,7 @@ class HostSession extends BaseConnectionManager {
     required this.key,
     required this.link,
     this.serial,
+    SessionChoice? choice,
     required PipelineQueue pipeline,
     TabletTunnels? tunnels,
     VirtualDisplays? displays,
@@ -76,6 +79,7 @@ class HostSession extends BaseConnectionManager {
     super.socket,
     super.port,
   })  : assert(link == LinkType.wifi || serial != null),
+        choice = choice ?? Get.find<SettingsService>().nextChoice,
         _pipeline = pipeline,
         _tunnels = tunnels,
         _displays = displays,
@@ -106,6 +110,18 @@ class HostSession extends BaseConnectionManager {
   /// retries look for this device and no other. Null over Wi-Fi.
   final String? serial;
 
+  /// What this session was made to be (its mode and, for remote control,
+  /// which side drives), fixed for its life: every attempt, retry and
+  /// reconnect runs as this, whatever the settings say by then. There is no
+  /// setter: a tablet's mode changes by ending its session and making a new
+  /// one for it (the hub's `changeMode`), so no session ever runs as two
+  /// things and each teardown undoes what its own attempt built.
+  ///
+  /// The hub gives every session it makes one. A session built without one
+  /// (tests) takes what Home's selectors say as it is made
+  /// ([SettingsService.nextChoice]), and keeps that.
+  final SessionChoice choice;
+
   /// This session's id in the native capture, input and decode plugins:
   /// its virtual display, stream, encoder, mouse state and remote decoder are
   /// kept under it, and its encoded frames come back tagged with it. Never
@@ -127,6 +143,11 @@ class HostSession extends BaseConnectionManager {
   // shows its own clears it ([captureMatched]).
   int _wrongDisplayRebuilds = 0;
   static const _maxWrongDisplayRebuilds = 2;
+
+  // What the capture last started was asked to show (its config's mode):
+  // a first frame is judged as that capture's, whatever the settings say
+  // by the time it arrives.
+  DisplayMode? _capturedMode;
   late final Worker _phaseWorker;
 
   // The encoder every session shares, and how many tablets it may take at
@@ -159,13 +180,19 @@ class HostSession extends BaseConnectionManager {
   /// Something about this session's capture its card should say, as a
   /// translation key: Extend fell back to mirroring
   /// (`error_extend_unavailable`), the capture may show another display
-  /// (`error_extend_wrong_display`), or a rebuild found the encoder full
-  /// (`error_encode_limit`). Null when there is nothing to say; cleared by
-  /// [connect] and by a capture that starts.
+  /// (`error_extend_wrong_display`, or for a capture of the Mac's own
+  /// screen `error_mirror_wrong_display`), a rebuild found the encoder full
+  /// (`error_encode_limit`), or, for a tablet the Mac views, the Mac has no
+  /// decoder for its picture (`error_remote_decoder`). Null when there is
+  /// nothing to say; cleared by [connect], by a capture that starts and,
+  /// the last one, by a decoder that is made again ([decoderReady]).
   final notice = RxnString();
 
   // The hub has ended this session ([retire]): it never connects again.
   bool _retired = false;
+
+  /// The hub has ended this session for good ([retire]).
+  bool get isRetired => _retired;
 
   /// Whether this session may still change its tablet's adb rule and screen
   /// hold: not once the hub has made a newer session for that tablet (an
@@ -179,9 +206,19 @@ class HostSession extends BaseConnectionManager {
       _tunnels?.run(serial, operation) ?? operation();
 
   /// What this session is (mode, direction, display mode), as of the start
-  /// of its last connect attempt; the live settings before its first.
-  SessionSpec get spec => _spec ?? SessionSpec.of(settings, link);
+  /// of its last connect attempt; before its first, what an attempt begun
+  /// now would be.
+  SessionSpec get spec => _spec ?? _specNow();
   SessionSpec? _spec;
+
+  /// What an attempt begun now runs as: this session's [choice] on its link
+  /// with the display mode set now.
+  SessionSpec _specNow() =>
+      SessionSpec.from(choice, link, displayMode: settings.displayMode);
+
+  /// The mode and direction this session runs as ([spec]'s: what its
+  /// [choice] comes to on its link), for the UI.
+  SessionChoice get effectiveChoice => SessionChoice(spec.mode, spec.direction);
 
   /// The tablet's panel: what its HELLO reported this attempt, else what it
   /// reported last time, else the last panel any tablet reported.
@@ -424,7 +461,7 @@ class HostSession extends BaseConnectionManager {
     notice.value = null;
     errorKey.value = null;
     final wifi = _wifiSession;
-    _spec = SessionSpec.of(settings, link);
+    _spec = _specNow();
     _panel = null;
     _authedConnection = null;
     _usbKey = null;
@@ -593,13 +630,23 @@ class HostSession extends BaseConnectionManager {
       }
       if (isCancelled(attempt)) return abandon();
 
+      // A tablet the Mac viewed can still be capturing its screen: the stop
+      // its last session sent never arrived if that link was already dead,
+      // and the tablet stops nothing by itself when a link drops. A session
+      // in which the Mac views nothing says it again, once per attempt and
+      // before the pipeline starts (so also when that start fails), or the
+      // tablet would go on encoding and sending its screen beside this
+      // session's own mode. With no capture running the tablet only takes
+      // back its offer to start one.
+      if (!spec.isReverseRemote) _sendStopCapture();
+
       // Start the media pipeline. Reverse-remote (Mac controls tablet) decodes
       // the tablet's stream; every other mode captures + encodes the Mac. Both
       // are non-fatal so the link stays up even if the pipeline can't start,
       // except for a tablet the encoder has no room for beside the others.
       try {
         await _exclusive(() => spec.isReverseRemote
-            ? _startRemoteReceive()
+            ? _startRemoteReceive(attempt)
             : _startCapture(attempt));
       } on CaptureLimit {
         rethrow;
@@ -616,10 +663,11 @@ class HostSession extends BaseConnectionManager {
         // on every attempt let a failed retry (e.g. falling back to an
         // emulator while the tablet was unplugged) overwrite the real
         // last-used device. Its virtual display's serial is kept from now
-        // on too, so the tablet keeps its place on the desktop next time.
+        // on too, so the tablet keeps its place on the desktop next time,
+        // and so is the mode it was picked for.
         if (device != null) {
           await settings.rememberDevice(device.serial,
-              model: device.model, vdSerial: vdSerial);
+              model: device.model, vdSerial: vdSerial, choice: choice);
           if (isCancelled(attempt)) return;
         }
         _usbSessionSeq = seq;
@@ -879,6 +927,7 @@ class HostSession extends BaseConnectionManager {
     // A rate the encoder reports from here on (a ceiling raised during the
     // start) is newer than [fps], and is what the tablet is told.
     _reportedFps = null;
+    _capturedMode = config.mode;
     final started = await _capture.startCapture(config, session: nativeId);
     if (stale()) return;
     captured.value = started;
@@ -1185,6 +1234,17 @@ class HostSession extends BaseConnectionManager {
       !spec.isReverseRemote &&
       (_displays?.holds(this) ?? false);
 
+  /// Whether the hub's repair round makes this session's capture again: a
+  /// capture of the main display (Mirror, which every remote-control
+  /// session whose tablet drives the Mac is), in a session the hub has not
+  /// ended. One whose connect has just started its capture counts: its
+  /// first frame can arrive before it is live.
+  bool get repairsMirror =>
+      !_retired &&
+      _capturing &&
+      !spec.isReverseRemote &&
+      _capturedMode == DisplayMode.mirror;
+
   /// The first half of a rebuild: this session's capture and virtual
   /// display go. Only from inside an operation already running on the
   /// pipeline queue (this session's rebuild, or the hub's for a wake, which
@@ -1269,13 +1329,25 @@ class HostSession extends BaseConnectionManager {
     granted.value = granted.value?.copyWith(fps: fps);
   }
 
-  /// This session's capture of its own virtual display came out with bars
-  /// on its first frame: it may be showing another display (Apple bug
-  /// FB17797423). With another session's display there, the hub rebuilds
-  /// the whole set in order, at most [_maxWrongDisplayRebuilds] times in a
-  /// row for this session; after that, or alone (a display of another
-  /// shape cannot be ours, but one alone has nothing to be confused with),
-  /// it is only said, on its card.
+  /// This session's capture came out in another shape than the display it
+  /// asked for on its first frame: it may be showing another display
+  /// (Apple bug FB17797423).
+  ///
+  /// Extend (its own virtual display, which has the frame's shape, came
+  /// out with bars): with another session's display there, the hub
+  /// rebuilds the whole set in order, at most [_maxWrongDisplayRebuilds]
+  /// times in a row for this session; after that, or alone (a display of
+  /// another shape cannot be ours, but one alone has nothing to be confused
+  /// with), it is only said, on its card.
+  ///
+  /// Mirror (the picture has not the main display's shape): while any
+  /// virtual display exists, or a rebuild round that does not make this
+  /// capture again has one down for a moment
+  /// ([VirtualDisplays.besideDisplays]), the hub runs a repair round
+  /// ([VirtualDisplays.requestMirrorRepair]): every display goes, this
+  /// capture starts first, then the Extend ones. The same limit applies;
+  /// past it, or with no virtual display to be mistaken for the Mac's
+  /// screen, it is only said (`error_mirror_wrong_display`).
   void captureMismatch() {
     if (!_captureWired) return;
     final displays = _displays;
@@ -1283,8 +1355,22 @@ class HostSession extends BaseConnectionManager {
     // under way and not yet past this session, makes this capture again:
     // it neither asks for another nor counts against the limit.
     if (displays != null && displays.willRestart(this)) {
-      log.w('Host: $key may be showing another display — the display round '
-          'already due makes it again');
+      log.w('Host: $key may be showing another display — the round already '
+          'due makes it again');
+      return;
+    }
+    if (_capturedMode == DisplayMode.mirror) {
+      if (displays != null &&
+          displays.besideDisplays(this) &&
+          _wrongDisplayRebuilds < _maxWrongDisplayRebuilds &&
+          displays.requestMirrorRepair(this)) {
+        _wrongDisplayRebuilds++;
+        log.w('Host: $key may be showing a virtual display instead of the '
+            "Mac's — taking every display down and starting it first "
+            '($_wrongDisplayRebuilds of $_maxWrongDisplayRebuilds)');
+        return;
+      }
+      notice.value = 'error_mirror_wrong_display';
       return;
     }
     if (displays != null &&
@@ -1300,14 +1386,15 @@ class HostSession extends BaseConnectionManager {
     notice.value = 'error_extend_wrong_display';
   }
 
-  /// This session's capture of its own virtual display filled its first
-  /// frame: the next wrong one may be rebuilt again.
+  /// This session's capture showed the display it asked for on its first
+  /// frame (its own virtual display filling the frame, or a picture in the
+  /// main display's shape): the next wrong one may be rebuilt again.
   void captureMatched() {
     if (_captureWired) _wrongDisplayRebuilds = 0;
   }
 
-  /// The display rounds this session has asked for in a row because its
-  /// first frame showed another display (tests).
+  /// The rounds this session has asked for in a row because its first
+  /// frame showed another display (tests).
   @visibleForTesting
   int get wrongDisplayRebuilds => _wrongDisplayRebuilds;
 
@@ -1315,6 +1402,30 @@ class HostSession extends BaseConnectionManager {
   /// decode; ask the tablet for a keyframe.
   void decoderWantsKeyframe() {
     if (_remoteWired) requestIdr();
+  }
+
+  /// The translation key [notice] holds while the Mac has no decoder for
+  /// this tablet's picture.
+  static const _noDecoderNotice = 'error_remote_decoder';
+
+  /// Reverse remote: this session's decoder could not be made ([code] is
+  /// the plugin's reason, another tablet's decoder holding the hardware
+  /// one, typically). The link stays up and the tablet goes on sending;
+  /// its card says so until [decoderReady].
+  void decoderFailed(String code) {
+    if (!_remoteWired) return;
+    // The plugin says so again on every keyframe it cannot start from
+    // (about one a second): logged once, until [decoderReady].
+    if (notice.value != _noDecoderNotice) {
+      log.w('Host: no decoder for $key\'s screen ($code)');
+    }
+    notice.value = _noDecoderNotice;
+  }
+
+  /// Reverse remote: this session's decoder was made again after
+  /// [decoderFailed]. Whatever else the card says stays.
+  void decoderReady() {
+    if (_remoteWired && notice.value == _noDecoderNotice) notice.value = null;
   }
 
   /// Re-fetches the virtual/main display's screen-space bounds after the
@@ -1334,7 +1445,13 @@ class HostSession extends BaseConnectionManager {
   /// Reverse remote (Mac controls tablet): the tablet captures + encodes its own
   /// screen, so the host decodes the incoming stream into a Flutter texture and
   /// injects input back via `adb shell input`. No ScreenCaptureKit here.
-  Future<void> _startRemoteReceive() async {
+  ///
+  /// [attempt] is the session this start belongs to, as for [_startCapture]:
+  /// once it has ended, at the queue or while the decoder is being made,
+  /// this does nothing more, and the teardown's queued stop, which runs
+  /// right after it, lets go of the decoder.
+  Future<void> _startRemoteReceive(int attempt) async {
+    if (isCancelled(attempt)) return;
     // Tell the client to switch into capture mode.
     _sendSessionMode();
 
@@ -1349,7 +1466,11 @@ class HostSession extends BaseConnectionManager {
       width: p.width,
       height: p.height,
     );
+    if (isCancelled(attempt)) return;
     remoteTextureId.value = texId;
+    // No texture: nothing of this tablet can be shown. It is still asked
+    // for its screen, so the session stays what the tablet was told it is.
+    if (texId == null) notice.value = _noDecoderNotice;
 
     // Here the *tablet's* encoder does the work, and Max's native @ 120 Hz is
     // beyond it (its HEVC encoder manages well under 120 fps at 4K), so Max
@@ -1469,12 +1590,37 @@ class HostSession extends BaseConnectionManager {
     ));
   }
 
+  /// 0xF7: the tablet stops capturing its screen for the Mac, and takes
+  /// back its "Start screen sharing" offer. It does that whatever mode it
+  /// was told, and with no capture running nothing else happens.
+  void _sendStopCapture() {
+    _sendToClient(Packet(
+      type: PacketType.control,
+      timestampUs: DateTime.now().microsecondsSinceEpoch,
+      payload: Uint8List.fromList([0xF7]),
+    ));
+  }
+
   // ─── Reverse-remote input (Mac → tablet via adb) ──────────────────────────
   // The remote-view widget reports normalized coords; map them to the tablet's
   // device pixels and drive `adb shell input`.
 
+  // The device the Mac's taps and swipes go to, or null when this session
+  // sends none: it is not a tablet the Mac controls, has no adb device
+  // (Wi-Fi), or the hub has ended it.
+  String? get _remoteInputSerial =>
+      spec.isReverseRemote && !_retired ? serial : null;
+
+  /// A tap on this tablet at ([nx], [ny]) of its screen. Only a tablet the
+  /// Mac controls takes any, on its own [serial], until the hub ends the
+  /// session. The phase is not asked: the tap travels through adb, not the
+  /// link, so a call made while the link reconnects lands too. The remote
+  /// view makes one only for a pointer over this session's texture, though,
+  /// and a lost link's teardown takes the texture away: in the app that is
+  /// a press already down as the link went, and every press once the next
+  /// attempt has made its decoder.
   void sendRemoteTap(double nx, double ny) {
-    final serial = activeDevice.value?.serial;
+    final serial = _remoteInputSerial;
     if (serial == null) return;
     final p = panel;
     _adb.inputTap(
@@ -1486,7 +1632,7 @@ class HostSession extends BaseConnectionManager {
 
   void sendRemoteSwipe(double nx1, double ny1, double nx2, double ny2,
       {int durationMs = 50}) {
-    final serial = activeDevice.value?.serial;
+    final serial = _remoteInputSerial;
     if (serial == null) return;
     final w = panel.width;
     final h = panel.height;
@@ -1518,14 +1664,10 @@ class HostSession extends BaseConnectionManager {
     }
     if (Get.isRegistered<WifiDiscoveryService>()) _discovery.stopResponder();
     final reverse = spec.isReverseRemote;
-    if (reverse) {
-      // Best-effort: tell the client to stop capturing before the socket drops.
-      _sendToClient(Packet(
-        type: PacketType.control,
-        timestampUs: DateTime.now().microsecondsSinceEpoch,
-        payload: Uint8List.fromList([0xF7]),
-      ));
-    }
+    // Best-effort: tell the client to stop capturing before the socket
+    // drops. On a link that is already dead it never arrives; the tablet's
+    // next session says it again if the Mac views nothing in it (connect()).
+    if (reverse) _sendStopCapture();
     // From here on nobody is authenticated, whoever the socket belongs to,
     // and this attempt's USB key opens nothing any more.
     _authedConnection = null;
@@ -1541,6 +1683,14 @@ class HostSession extends BaseConnectionManager {
     tabletScreenOff.value = false;
     _tabletScreenSeq++;
     changingTabletScreen.value = false;
+    // The shell the Mac's taps went through ends with the session, unless a
+    // newer session for this tablet already has it. By the session's own
+    // serial, which is where its taps went, and before anything is awaited:
+    // a reconnect's first tap then opens a shell of its own.
+    final own = serial;
+    if (reverse && own != null && _ownsTunnel(own)) {
+      unawaited(_adb.closeInputShell(serial: own));
+    }
     final device = activeDevice.value?.serial;
     if (reverse && !_wifiSession && device != null && _ownsTunnel(device)) {
       await _adb.releaseTabletScreenOff(serial: device);
@@ -1790,6 +1940,14 @@ class TabletTunnels {
 /// going to restart that capture anyway ([willRestart]). The displays that
 /// rebuild makes ask for nothing ([rebuilding]), so it never feeds itself.
 /// One display alone never asks.
+///
+/// A capture of the main display (Mirror) holds no display here, but the
+/// same bug can hand its stream a virtual display. One whose first frame
+/// has not the main display's shape asks for a repair round
+/// ([requestMirrorRepair]) while any display is held, or is down only
+/// until a round that leaves that capture alone makes it again
+/// ([besideDisplays]): the whole set goes, that capture starts with none
+/// there, and the Extend ones follow.
 class VirtualDisplays {
   final _holders = <HostSession>{};
 
@@ -1802,10 +1960,22 @@ class VirtualDisplays {
   /// not yet past [session]'s start, makes [session]'s capture again.
   bool Function(HostSession session)? coveredByRound;
 
+  /// The hub's: whether the rebuild round under way has taken down a
+  /// virtual display it has not made again yet, without making
+  /// [session]'s capture again itself.
+  bool Function(HostSession session)? downForRound;
+
   /// The hub's: rebuild every Extend session's capture, the display set
   /// emptied first. Called from inside a queued operation (the start that
   /// makes the display), so it must not run the rebuild itself.
   void Function()? onRebuildNeeded;
+
+  /// The hub's: [session]'s capture of the main display shows another
+  /// display. The hub rebuilds every Extend session's capture and that one,
+  /// the display set emptied first and that one started before any display
+  /// is made again. Called from a native callback, never from inside a
+  /// queued operation; the hub queues the round from a timer all the same.
+  void Function(HostSession session)? onMirrorRepairNeeded;
 
   /// The hub's ordered rebuild is making the displays again: what it makes
   /// is the fix, not a change to fix.
@@ -1820,6 +1990,14 @@ class VirtualDisplays {
   /// Whether another session than [session] has a virtual display.
   bool sharedWith(HostSession session) =>
       _holders.any((h) => !identical(h, session));
+
+  /// Whether a virtual display that [session]'s capture of the main
+  /// display may have been handed instead exists: another session holds
+  /// one, or the hub's round has one down that it is about to make again
+  /// while leaving [session]'s capture as it is (between a round's stops
+  /// and its starts nobody holds any, [downForRound]).
+  bool besideDisplays(HostSession session) =>
+      sharedWith(session) || (downForRound?.call(session) ?? false);
 
   /// [session] is about to make its virtual display (replacing its own, if
   /// it has one). With another one there (and outside the hub's own
@@ -1865,6 +2043,15 @@ class VirtualDisplays {
     final rebuild = onRebuildNeeded;
     if (rebuild == null) return false;
     rebuild();
+    return true;
+  }
+
+  /// Asks for the repair round for [session]'s capture of the main display
+  /// (see the class comment); false when nobody would run it.
+  bool requestMirrorRepair(HostSession session) {
+    final repair = onMirrorRepairNeeded;
+    if (repair == null) return false;
+    repair(session);
     return true;
   }
 }

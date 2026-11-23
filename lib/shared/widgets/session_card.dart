@@ -5,21 +5,21 @@ import 'package:extendedscreen/shared/connection/host_session.dart';
 import 'package:extendedscreen/shared/models/device_model.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
 import 'package:extendedscreen/shared/models/link_type.dart';
-import 'package:extendedscreen/shared/models/session_mode.dart';
+import 'package:extendedscreen/shared/models/session_choice.dart';
 import 'package:extendedscreen/shared/services/settings_service.dart';
 import 'package:extendedscreen/shared/widgets/connection_card.dart';
 import 'package:extendedscreen/shared/widgets/connection_steps.dart';
 import 'package:extendedscreen/shared/widgets/latency_chip.dart';
 
 /// Host, Home over USB: one tablet's session. Which tablet, how it is
-/// linked and what it runs, its phase with the one action that fits it
-/// (Disconnect, Cancel, or in `error` Retry beside Cancel), and while
-/// live its round trip, rate and what the shared encoder gave it.
+/// linked and what it runs (with a menu to have it run as something else),
+/// its phase with the one action that fits it (Disconnect, Cancel, or in
+/// `error` Retry beside Cancel), and while live its round trip, rate and
+/// what the shared encoder gave it.
 ///
-/// Tapping the card focuses its session: the hub's values, the remote view
-/// and the screen toggle follow the focused tablet. Its own `Obx` reads
-/// only [session]'s observables, so one tablet's latency ticking rebuilds
-/// no other card.
+/// Tapping the card focuses its session: the values the hub shows as its
+/// own follow the focused tablet. Its own `Obx` reads only [session]'s
+/// observables, so one tablet's latency ticking rebuilds no other card.
 class SessionCard extends StatelessWidget {
   final HostSession session;
 
@@ -37,6 +37,11 @@ class SessionCard extends StatelessWidget {
   /// Reverse remote: reopen the remote view of this tablet.
   final VoidCallback onOpenRemote;
 
+  /// The mode menu's pick: the session the menu was opened on (not
+  /// whichever one holds this card by the time an item is pressed) and what
+  /// it is to run as. Null: no menu (every session is being ended).
+  final void Function(HostSession session, SessionChoice choice)? onMode;
+
   const SessionCard({
     super.key,
     required this.session,
@@ -45,10 +50,15 @@ class SessionCard extends StatelessWidget {
     required this.onStop,
     required this.onRetry,
     required this.onOpenRemote,
+    this.onMode,
     this.listed,
   });
 
   static const _accent = Color(0xFF00C8FF);
+
+  /// The width the top row keeps for the tablet's model, whatever its
+  /// chips would take.
+  static const _minTitleWidth = 72.0;
 
   @override
   Widget build(BuildContext context) {
@@ -91,43 +101,80 @@ class SessionCard extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(
-                  children: [
-                    const Icon(Icons.tablet_android, color: _accent, size: 20),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            model ?? s.key,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.w600,
-                              fontSize: 14,
-                            ),
-                          ),
-                          if (model != null)
+                // The model keeps [_minTitleWidth] and the chips take what
+                // they need of the rest. When that is not enough (a narrow
+                // window, the longest mode's label), the mode chip is cut
+                // short instead of the row running over the card's edge.
+                LayoutBuilder(
+                  builder: (context, box) => Row(
+                    children: [
+                      const Icon(
+                        Icons.tablet_android,
+                        color: _accent,
+                        size: 20,
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
                             Text(
-                              s.key,
+                              model ?? s.key,
                               overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                color: Colors.white.withValues(alpha: 0.4),
-                                fontSize: 12,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w600,
+                                fontSize: 14,
                               ),
                             ),
-                        ],
+                            if (model != null)
+                              Text(
+                                s.key,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  color: Colors.white.withValues(alpha: 0.4),
+                                  fontSize: 12,
+                                ),
+                              ),
+                          ],
+                        ),
                       ),
-                    ),
-                    const SizedBox(width: 8),
-                    _Chip(
-                      icon: wifi ? Icons.wifi : Icons.usb,
-                      text: s.link.label,
-                    ),
-                    const SizedBox(width: 6),
-                    _Chip(text: s.spec.mode.label),
-                  ],
+                      const SizedBox(width: 8),
+                      ConstrainedBox(
+                        constraints: BoxConstraints(
+                          // Less the icon and the two gaps beside the model.
+                          maxWidth: (box.maxWidth - 40 - _minTitleWidth).clamp(
+                            0.0,
+                            double.infinity,
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            _Chip(
+                              icon: wifi ? Icons.wifi : Icons.usb,
+                              text: s.link.label,
+                            ),
+                            const SizedBox(width: 6),
+                            Flexible(
+                              child: _Chip(text: s.effectiveChoice.label),
+                            ),
+                            // A tablet's mode changes by replacing its
+                            // session, which the hub does for one that is
+                            // live or waits in `error`, not for one on its
+                            // way to being live.
+                            if (onMode case final onMode?
+                                when !wifi &&
+                                    (phase.isActive ||
+                                        phase == ConnectionPhase.error)) ...[
+                              const SizedBox(width: 2),
+                              _ModeMenu(session: s, onMode: onMode),
+                            ],
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
                 const SizedBox(height: 10),
                 ConnectionCard(
@@ -210,8 +257,9 @@ class SessionCard extends StatelessWidget {
                   ),
                 ],
                 // Reverse remote (the Mac controls this tablet): the Mac is
-                // the viewer. The remote view opens by itself on connect;
-                // this gets back in after backing out of it.
+                // the viewer. The remote view opens by itself when the first
+                // such tablet goes live; this gets back in after backing
+                // out of it.
                 if (s.spec.isReverseRemote && phase.isActive) ...[
                   const SizedBox(height: 10),
                   SizedBox(
@@ -243,8 +291,8 @@ class SessionCard extends StatelessWidget {
   /// What the card says went wrong, translated now (so a language switch
   /// reaches it): in `error`, an unplugged tablet in plain words, else the
   /// failure's own text; otherwise what the session noticed about its
-  /// capture (Extend fell back, the encoder was full on a rebuild), if
-  /// anything.
+  /// capture or its decoder (Extend fell back, the encoder was full on a
+  /// rebuild, the Mac could not make a decoder), if anything.
   static String? _errorLine(
     ConnectionPhase phase,
     String? key,
@@ -260,7 +308,122 @@ class SessionCard extends StatelessWidget {
   }
 }
 
-/// A small label in a pill, for the card's link and mode.
+/// The card's menu of what its tablet can run as. Its own tap target inside
+/// the card's, so opening it focuses nothing.
+///
+/// An item acts on the session the menu was opened on: the items are built
+/// as it opens and each keeps that session, where the button's own
+/// `onSelected` would be the one of whatever widget stands here when the
+/// item is pressed, by then perhaps a new session's under the same key.
+class _ModeMenu extends StatelessWidget {
+  final HostSession session;
+  final void Function(HostSession session, SessionChoice choice) onMode;
+  const _ModeMenu({required this.session, required this.onMode});
+
+  @override
+  Widget build(BuildContext context) {
+    final s = session;
+    return PopupMenuButton<SessionChoice>(
+      key: ValueKey('${s.key}/mode'),
+      tooltip: 'session_change_mode'.tr,
+      position: PopupMenuPosition.under,
+      borderRadius: BorderRadius.circular(20),
+      // Its own colours, like the cards': nothing here follows the theme.
+      color: const Color(0xFF1F2937),
+      surfaceTintColor: Colors.transparent,
+      constraints: const BoxConstraints(minWidth: 112, maxWidth: 360),
+      itemBuilder: (_) {
+        final current = s.effectiveChoice;
+        return [
+          for (final choice in SessionChoice.all)
+            _item(s, current, choice),
+        ];
+      },
+      child: Padding(
+        padding: const EdgeInsets.all(6),
+        child: Icon(
+          Icons.swap_horiz,
+          size: 18,
+          color: Colors.white.withValues(alpha: 0.6),
+        ),
+      ),
+    );
+  }
+
+  /// One choice: checked and not to be pressed when it is what the tablet
+  /// runs as, else with what picking it means for the tablet's user.
+  PopupMenuItem<SessionChoice> _item(
+    HostSession s,
+    SessionChoice current,
+    SessionChoice choice,
+  ) {
+    final isCurrent = choice.sameEffect(current);
+    return PopupMenuItem<SessionChoice>(
+      key: ValueKey(
+        '${s.key}/mode/${choice.mode.name}.${choice.direction.name}',
+      ),
+      value: choice,
+      enabled: !isCurrent,
+      onTap: () => onMode(s, choice),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: Row(
+          children: [
+            SizedBox(
+              width: 24,
+              child: isCurrent
+                  ? const Icon(Icons.check, size: 18, color: SessionCard._accent)
+                  : null,
+            ),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    choice.label,
+                    style: TextStyle(
+                      color: isCurrent ? Colors.white70 : Colors.white,
+                      fontSize: 14,
+                    ),
+                  ),
+                  if (!isCurrent)
+                    Text(
+                      _hint(current, choice),
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.5),
+                        fontSize: 12,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// What a change from [from] to [to] asks of the tablet's user. The Mac
+  /// cannot do it for them: capturing the tablet's screen takes a tap and a
+  /// consent there, and a tablet that was the one viewed stays on its Home
+  /// until its view is opened. Named by the tablet's own button labels.
+  static String _hint(SessionChoice from, SessionChoice to) {
+    if (to.isReverse) {
+      return 'session_mode_hint_to_reverse'
+          .trParams({'share': 'home_start_share'.tr});
+    }
+    if (from.isReverse) {
+      return 'session_mode_hint_from_reverse'
+          .trParams({'open': 'home_open_view'.tr});
+    }
+    return 'session_mode_hint_restart'.tr;
+  }
+}
+
+/// A small label in a pill, for the card's link and mode. In less width
+/// than its text needs, the text ends in an ellipsis.
 class _Chip extends StatelessWidget {
   final IconData? icon;
   final String text;
@@ -282,7 +445,17 @@ class _Chip extends StatelessWidget {
             Icon(icon, size: 13, color: color),
             const SizedBox(width: 4),
           ],
-          Text(text, style: TextStyle(color: color, fontSize: 12)),
+          // Cut short where the chip is given less than its text needs
+          // (the card's mode chip in a narrow window).
+          Flexible(
+            child: Text(
+              text,
+              maxLines: 1,
+              softWrap: false,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(color: color, fontSize: 12),
+            ),
+          ),
         ],
       ),
     );

@@ -7,6 +7,7 @@ import 'package:extendedscreen/shared/connection/adb_service.dart';
 import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
 import 'package:extendedscreen/shared/connection/connection_state.dart';
 import 'package:extendedscreen/shared/connection/host_connection_manager.dart';
+import 'package:extendedscreen/shared/connection/host_session.dart';
 import 'package:extendedscreen/shared/connection/socket_service.dart';
 import 'package:extendedscreen/shared/connection/wifi_pairing_service.dart';
 import 'package:extendedscreen/shared/features/home/controllers/home_controller.dart';
@@ -15,6 +16,7 @@ import 'package:extendedscreen/shared/features/settings/controllers/settings_con
 import 'package:extendedscreen/shared/features/settings/views/settings_view.dart';
 import 'package:extendedscreen/shared/models/device_model.dart';
 import 'package:extendedscreen/shared/models/link_type.dart';
+import 'package:extendedscreen/shared/models/session_choice.dart';
 import 'package:extendedscreen/shared/models/session_mode.dart';
 import 'package:extendedscreen/shared/platform/battery_channel.dart';
 import 'package:extendedscreen/shared/services/logger_service.dart';
@@ -25,6 +27,10 @@ import 'package:extendedscreen/shared/widgets/device_picker_card.dart';
 /// socket is ever opened.
 mixin _Recording on BaseConnectionManager {
   int connects = 0;
+
+  /// The mode each connect was given (the hub's own `connect` adds the
+  /// selectors'; the tablet's, and the policy's Wi-Fi start, give none).
+  final choices = <SessionChoice?>[];
   int disconnects = 0;
   int identityResets = 0;
 
@@ -35,9 +41,12 @@ mixin _Recording on BaseConnectionManager {
   /// waiting (`handshaking`), a disconnect ends everything.
   bool movesPhase = false;
 
+  // The one place every connect goes through: the hub's `connect` and its
+  // auto-connect policy both end here, and the tablet's `connect` below.
   @override
-  Future<void> connect({String? serial}) async {
+  Future<void> connectWith(String? serial, {SessionChoice? choice}) async {
     connects++;
+    choices.add(choice);
     if (movesPhase) phase.value = ConnectionPhase.handshaking;
   }
 
@@ -55,12 +64,25 @@ mixin _Recording on BaseConnectionManager {
 class _FakeClient extends BaseConnectionManager with _Recording {
   @override
   bool get isHost => false;
+
+  @override
+  Future<void> connect({String? serial}) => connectWith(serial);
 }
 
 /// The Mac's hub, with its own auto-connect policy and pause; connecting
 /// and disconnecting are recorded.
 class _FakeHub extends HostConnectionManager with _Recording {
   _FakeHub() : super(adb: _NoDevices(), devicePollInterval: null);
+
+  /// The mode changes asked for, recorded instead of done.
+  final modeChanges = <(String, SessionChoice)>[];
+
+  @override
+  Future<bool> changeMode(String key, SessionChoice choice,
+      {HostSession? expected}) async {
+    modeChanges.add((key, choice));
+    return true;
+  }
 }
 
 /// adb with nothing attached.
@@ -164,6 +186,55 @@ void main() {
       cm.phase.value = ConnectionPhase.streaming;
       await tester.pump();
       expect(find.text('wifi_host_title'), findsNothing);
+    });
+
+    testWidgets('over Wi-Fi the three selectors still show while idle, on '
+        'the page itself (there is no add panel to hold them), and go '
+        'together while the Mac listens', (tester) async {
+      tester.view.physicalSize = const Size(1000, 2000);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await settings.setLinkType(LinkType.wifi);
+      await settings.setSessionMode(SessionMode.remoteControl);
+      await start(host: true, permissions: false);
+      cm.movesPhase = true;
+      await tester.pumpWidget(const GetMaterialApp(home: HomeView()));
+      await tester.pump();
+
+      const selectors = [
+        'session_extended_desc',
+        'session_remote_desc',
+        'remote_dir_title',
+        'link_usb_desc',
+        'link_wifi_desc',
+      ];
+      expect(find.byType(DevicePickerCard), findsNothing);
+      expect(find.text('home_next_tablet_mode'), findsNothing,
+          reason: "the add panel's caption");
+      for (final text in selectors) {
+        expect(find.text(text), findsOneWidget, reason: text);
+      }
+      // Mode, direction, link, then where the Mac listens: as before.
+      double top(String text) => tester.getTopLeft(find.text(text)).dy;
+      expect(top('session_remote_desc'), lessThan(top('remote_dir_title')));
+      expect(top('remote_dir_title'), lessThan(top('link_wifi_desc')));
+      expect(top('link_wifi_desc'), lessThan(top('wifi_host_title')));
+      // The same options as the add panel's, by what they choose.
+      await tester.tap(find.byKey(const ValueKey('next/mode/extendedScreen')));
+      await tester.pump();
+      expect(settings.sessionMode, SessionMode.extendedScreen);
+      expect(find.text('remote_dir_title'), findsNothing);
+      await tester.tap(find.byKey(const ValueKey('next/mode/remoteControl')));
+      await tester.pump();
+      expect(find.text('remote_dir_title'), findsOneWidget);
+
+      await cm.connect();
+      await tester.pump();
+      expect(cm.phase.value, ConnectionPhase.handshaking);
+      for (final text in selectors) {
+        expect(find.text(text), findsNothing, reason: text);
+      }
+      expect(find.text('wifi_host_title'), findsOneWidget);
     });
 
     testWidgets('over USB the picker stays and nothing connects without a '
@@ -283,6 +354,119 @@ void main() {
       await tester.tap(find.text('remote_dir_mac_label'));
       await tester.pump();
       expect(settings.remoteDirection, RemoteDirection.macControlsTab);
+    });
+  });
+
+  // A session keeps the mode it was made for, so over Wi-Fi, where the
+  // selectors show beside the one session while it waits to retry, a change
+  // has to replace that session: the hub's changeMode.
+  group('host, the mode and the Wi-Fi session', () {
+    const extended = SessionChoice(SessionMode.extendedScreen);
+    const driving = SessionChoice(
+        SessionMode.remoteControl, RemoteDirection.tabControlsMac);
+
+    /// The hub's one Wi-Fi session, made to extend, in [phase].
+    HostSession wifiSession(_FakeHub hub, ConnectionPhase phase) {
+      final session = HostSession(
+        key: HostConnectionManager.wifiKey,
+        link: LinkType.wifi,
+        choice: extended,
+        pipeline: hub.pipeline,
+        adb: _NoDevices(),
+        socket: SocketService(),
+      )..phase.value = phase;
+      hub.adopt(session);
+      return session;
+    }
+
+    testWidgets('changing the mode while the Wi-Fi session waits to retry '
+        'has the hub replace it in the mode now chosen', (tester) async {
+      tester.view.physicalSize = const Size(1000, 2000);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await settings.setLinkType(LinkType.wifi);
+      await start(host: true, permissions: false);
+      final hub = cm as _FakeHub;
+      wifiSession(hub, ConnectionPhase.error).retryPending.value = true;
+      await tester.pumpWidget(const GetMaterialApp(home: HomeView()));
+      await tester.pump();
+      expect(hub.phase.value, ConnectionPhase.error);
+
+      await tester.tap(find.text('session_remote_label'));
+      await tester.pump();
+      expect(settings.sessionMode, SessionMode.remoteControl);
+      expect(hub.modeChanges, [(HostConnectionManager.wifiKey, driving)]);
+
+      // And back (the title names the session's own mode too).
+      await tester.tap(find.descendant(
+          of: find.byType(ListView),
+          matching: find.text('session_extended_label')));
+      await tester.pump();
+      expect(hub.modeChanges.last, (HostConnectionManager.wifiKey, extended));
+      expect(hub.modeChanges, hasLength(2));
+      expect(hub.connects, 0, reason: 'the hub replaces it; Home connects '
+          'nothing itself');
+      expect(hub.disconnects, 0);
+    });
+
+    testWidgets('only while it waits to retry: with the Wi-Fi session on '
+        'its way up, or live, a selector that is pressed anyway is only '
+        'saved', (tester) async {
+      await settings.setLinkType(LinkType.wifi);
+      await start(host: true, permissions: false);
+      final hub = cm as _FakeHub;
+      final home = Get.find<HomeController>();
+      // Home shows no selector then; its handlers are asked directly, as a
+      // press that was already under way would ask them.
+      final session = wifiSession(hub, ConnectionPhase.handshaking);
+      home.onSelectSessionMode(SessionMode.remoteControl);
+      expect(settings.nextChoice, driving);
+      session.phase.value = ConnectionPhase.streaming;
+      home.onSelectSessionMode(SessionMode.extendedScreen);
+      home.onSelectDirection(RemoteDirection.tabControlsMac);
+      expect(settings.nextChoice, extended);
+      expect(hub.modeChanges, isEmpty);
+      expect(hub.connects, 0);
+      expect(hub.disconnects, 0);
+
+      // The same press once it waits to retry does replace it.
+      session.phase.value = ConnectionPhase.error;
+      home.onSelectSessionMode(SessionMode.remoteControl);
+      expect(hub.modeChanges, [(HostConnectionManager.wifiKey, driving)]);
+    });
+
+    testWidgets('with no Wi-Fi session the choice is only saved, for the '
+        'next one', (tester) async {
+      await settings.setLinkType(LinkType.wifi);
+      await start(host: true, permissions: false);
+      final hub = cm as _FakeHub;
+      await tester.pumpWidget(const GetMaterialApp(home: HomeView()));
+      await tester.pump();
+
+      await tester.tap(find.text('session_remote_label'));
+      await tester.pump();
+      expect(settings.nextChoice, driving);
+      expect(hub.modeChanges, isEmpty);
+
+      // The Connect that follows is given it.
+      await hub.connect();
+      expect(hub.choices, [driving]);
+    });
+
+    testWidgets('over USB the selectors only save: a tablet waiting to '
+        'retry is not replaced from here', (tester) async {
+      await start(host: true, permissions: false);
+      final hub = cm as _FakeHub;
+      await tester.pumpWidget(const GetMaterialApp(home: HomeView()));
+      await tester.pump();
+
+      await tester.tap(find.text('session_remote_label'));
+      await tester.pump();
+      expect(settings.sessionMode, SessionMode.remoteControl);
+      await tester.tap(find.text('remote_dir_mac_label'));
+      await tester.pump();
+      expect(settings.remoteDirection, RemoteDirection.macControlsTab);
+      expect(hub.modeChanges, isEmpty);
     });
   });
 

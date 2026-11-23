@@ -1,7 +1,9 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:ui';
 
+import 'package:flutter/foundation.dart';
 import 'package:get/get.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:extendedscreen/shared/models/client_panel.dart';
@@ -9,9 +11,11 @@ import 'package:extendedscreen/shared/models/device_model.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
 import 'package:extendedscreen/shared/models/known_device.dart';
 import 'package:extendedscreen/shared/models/link_type.dart';
+import 'package:extendedscreen/shared/models/session_choice.dart';
 import 'package:extendedscreen/shared/models/session_mode.dart';
 import 'package:extendedscreen/shared/models/session_spec.dart';
 import 'package:extendedscreen/shared/services/app_translations.dart';
+import 'package:extendedscreen/shared/services/logger_service.dart';
 
 class SettingsService extends GetxService {
   late SharedPreferences _prefs;
@@ -212,6 +216,12 @@ class SettingsService extends GetxService {
     remoteDirectionRx.value = dir;
     await _prefs.setString(_keyRemoteDirection, dir.name);
   }
+
+  /// Host: the mode the next session made is asked to be, as Home's selectors
+  /// stand (the saved session mode and remote direction; the direction is
+  /// kept for Extended screen too). A session's link still has its say
+  /// ([SessionChoice.effective]).
+  SessionChoice get nextChoice => SessionChoice(sessionMode, remoteDirection);
 
   /// The direction a remote-control session actually runs in. Mac-controls-
   /// tablet injects its input with `adb shell input`, which needs the cable,
@@ -480,9 +490,40 @@ class SettingsService extends GetxService {
     return null;
   }
 
+  /// [SharedPreferences] puts a value in its cache before the call returns
+  /// and writes it out in the background, so [knownDevices] reads the new
+  /// list at once, whether or not the write is awaited.
   Future<void> _saveKnownDevices(List<KnownDevice> devices) =>
       _prefs.setString(_keyKnownDevices,
           jsonEncode(devices.map((d) => d.toJson()).toList()));
+
+  /// The mode known tablet [serial] is remembered in, if any (see
+  /// [KnownDevice.choice]).
+  SessionChoice? knownChoice(String serial) => knownDevice(serial)?.choice;
+
+  /// Host: known tablet [serial] is now to run as [choice]. [knownChoice]
+  /// reads it as soon as this returns; the write to disk follows by itself,
+  /// and a failure there is only logged. Nothing for a tablet that is not
+  /// known yet ([rememberDevice] adds it once its session is live) or for a
+  /// synthetic one.
+  void setKnownChoice(String serial, SessionChoice choice) {
+    if (isSyntheticKey(serial)) return;
+    final devices = knownDevices.toList();
+    final i = devices.indexWhere((d) => d.serial == serial);
+    if (i < 0) return;
+    devices[i] = devices[i].copyWith(choice: choice);
+    // then's onError, not catchError: the future underneath completes with
+    // a bool, which a catchError handler would have to return.
+    unawaited(_saveKnownDevices(devices).then<void>((_) {},
+        onError: (Object e, StackTrace st) {
+      const message = 'known_devices: could not save a tablet\'s mode';
+      if (Get.isRegistered<LoggerService>()) {
+        Get.find<LoggerService>().e(message, e, st);
+      } else {
+        debugPrint('$message: $e');
+      }
+    }));
+  }
 
   /// FNV-1a, 32 bits, over [text]'s UTF-8 bytes: a stable number per serial.
   static int fnv1a32(String text) {
@@ -526,18 +567,24 @@ class SettingsService extends GetxService {
   /// Host: tablet [serial] has a live session. Adds it to [knownDevices] with
   /// [vdSerial] (one it already has, and its install id, are kept), and makes
   /// it the last-used device, which Settings' "Target device" row and the
-  /// first-run auto-connect read. Nothing for a synthetic tablet.
+  /// first-run auto-connect read. [choice], when given, becomes the mode it
+  /// is remembered in; without one a stored mode stays. Nothing for a
+  /// synthetic tablet.
   Future<void> rememberDevice(String serial,
-      {String? model, required int vdSerial}) async {
+      {String? model, required int vdSerial, SessionChoice? choice}) async {
     if (isSyntheticKey(serial)) return;
     final hasModel = model != null && model.isNotEmpty;
     final devices = knownDevices.toList();
     final i = devices.indexWhere((d) => d.serial == serial);
     if (i < 0) {
       devices.add(KnownDevice(
-          serial: serial, model: hasModel ? model : null, vdSerial: vdSerial));
+          serial: serial,
+          model: hasModel ? model : null,
+          vdSerial: vdSerial,
+          choice: choice));
     } else {
-      devices[i] = devices[i].copyWith(model: hasModel ? model : null);
+      devices[i] = devices[i]
+          .copyWith(model: hasModel ? model : null, choice: choice);
     }
     await _saveKnownDevices(devices);
     await setLastDevice(serial);
