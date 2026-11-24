@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
 import 'package:extendedscreen/app/routes/app_routes.dart';
+import 'package:extendedscreen/modules/remote_screen/host/ios_screen_channel.dart';
+import 'package:extendedscreen/modules/remote_screen/host/ios_touch_service.dart';
 import 'package:extendedscreen/modules/remote_screen/host/remote_host/controllers/remote_grid_controller.dart';
 import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
 import 'package:extendedscreen/shared/connection/connection_state.dart';
@@ -13,7 +15,7 @@ import 'package:extendedscreen/shared/connection/wifi_pairing_service.dart';
 import 'package:extendedscreen/shared/models/device_model.dart';
 import 'package:extendedscreen/shared/models/link_type.dart';
 import 'package:extendedscreen/shared/models/session_choice.dart';
-import 'package:extendedscreen/shared/models/session_mode.dart';
+import 'package:extendedscreen/shared/models/session_spec.dart';
 import 'package:extendedscreen/shared/platform/battery_channel.dart';
 import 'package:extendedscreen/shared/platform/permissions_channel.dart';
 import 'package:extendedscreen/shared/services/settings_service.dart';
@@ -32,22 +34,6 @@ class HomeController extends GetxController with WidgetsBindingObserver {
   /// inline banner on Home instead of a forced trip to the Settings screen.
   final missingPermissions = <String>[].obs;
 
-  /// Host: the mode the next session made runs in: the tablet added next
-  /// from the add panel, or the next Wi-Fi session. It is no tablet's own
-  /// mode: a session that exists keeps the one it was made for, and changes
-  /// it from its card ([onSessionMode]). Exposed here (instead of a
-  /// dedicated launcher screen) so picking it is a single tap on Home.
-  Rx<SessionMode> get sessionMode => _settings.sessionModeRx;
-
-  /// The selector was pressed: [mode] is what the next session made runs
-  /// in. Saved, and nothing that runs changes (but see
-  /// [_retryWifiAsChosen]).
-  void onSelectSessionMode(SessionMode mode) {
-    // The observable changes at once; the write to disk follows.
-    unawaited(_settings.setSessionMode(mode));
-    _retryWifiAsChosen();
-  }
-
   ConnectionPhase get phase => _connection.phase.value;
   DeviceModel? get device => _connection.activeDevice.value;
 
@@ -60,40 +46,63 @@ class HomeController extends GetxController with WidgetsBindingObserver {
 
   bool get isHost => _connection.isHost;
 
+  /// Host: the iPhones and iPads plugged in over USB, as
+  /// [IosScreenChannel.listDevices] lists them, each with a card on Home
+  /// that opens its page. Listed when Home opens, on each resume, and every
+  /// [iosPollInterval] while Home is the route shown and the app is in
+  /// front.
+  final iosUsbDevices = <IosScreenDevice>[].obs;
+
+  /// How often [iosUsbDevices] is listed again; null: only when Home opens
+  /// and on resume (tests).
+  final Duration? iosPollInterval;
+
+  HomeController({this.iosPollInterval = const Duration(seconds: 2)});
+
+  Timer? _iosPoll;
+  Future<void>? _iosListing;
+
+  /// The app is in front (the poll lists nothing while it is not).
+  bool _resumed = true;
+
+  /// Whether touches reach a phone over USB; null without the service.
+  Rx<IosTouchState>? get iosTouchState => Get.isRegistered<IosTouchService>()
+      ? Get.find<IosTouchService>().state
+      : null;
+
+  /// Host: lists the iPhones and iPads on USB again, one listing at a time.
+  /// The list is replaced only when it changed, so a poll that finds the
+  /// same phone rebuilds nothing.
+  Future<void> refreshIosDevices() {
+    if (!isHost || !Get.isRegistered<IosScreenChannel>()) {
+      return Future.value();
+    }
+    return _iosListing ??= () async {
+      try {
+        final list = await Get.find<IosScreenChannel>().listDevices();
+        if (isClosed) return;
+        final same =
+            list.length == iosUsbDevices.length &&
+            [
+              for (var i = 0; i < list.length; i++)
+                list[i].id == iosUsbDevices[i].id &&
+                    list[i].name == iosUsbDevices[i].name,
+            ].every((same) => same);
+        if (!same) iosUsbDevices.assignAll(list);
+      } finally {
+        _iosListing = null;
+      }
+    }();
+  }
+
+  /// Host, an iPhone's card: its page, showing that phone.
+  void onOpenIphone(String id) =>
+      Get.toNamed(AppRoutes.iphoneRemote, arguments: {'id': id});
+
   /// Host: a manual device-list refresh (the picker's refresh button) is
   /// running. Lets the picker show it is working: when the list comes back
   /// unchanged, nothing else on screen would move.
   final refreshingDevices = false.obs;
-
-  /// Remote-control direction picker (host, with the mode picker): which
-  /// side drives the next remote-control session made. Like [sessionMode],
-  /// it says nothing about a session that exists.
-  bool get isRemoteControl =>
-      _settings.sessionModeRx.value == SessionMode.remoteControl;
-  Rx<RemoteDirection> get remoteDirection => _settings.remoteDirectionRx;
-
-  /// The direction selector was pressed: saved for the next session made.
-  void onSelectDirection(RemoteDirection dir) {
-    unawaited(_settings.setRemoteDirection(dir));
-    _retryWifiAsChosen();
-  }
-
-  /// Host, over Wi-Fi: the selectors show beside the one Wi-Fi session
-  /// while it waits to retry, and a session keeps the mode it was made
-  /// for. So a change made then replaces that session with one in the mode
-  /// now chosen, which listens at once; the hub refuses a change that
-  /// comes to the same thing (the direction, which Wi-Fi forces anyway).
-  /// With no Wi-Fi session the choice is only saved, for the next one.
-  void _retryWifiAsChosen() {
-    final hub = _connection;
-    if (hub is! HostConnectionManager || !isWifi) return;
-    final session = hub.sessions[HostConnectionManager.wifiKey];
-    if (session == null || session.phase.value != ConnectionPhase.error) {
-      return;
-    }
-    unawaited(
-        hub.changeMode(HostConnectionManager.wifiKey, _settings.nextChoice));
-  }
 
   // ─── Link type (USB / Wi-Fi) ──────────────────────────────────────────────
 
@@ -102,19 +111,12 @@ class HomeController extends GetxController with WidgetsBindingObserver {
   Rx<LinkType> get linkType => _settings.linkTypeRx;
   bool get isWifi => _settings.linkTypeRx.value == LinkType.wifi;
 
-  /// The direction a remote-control session will run in (Wi-Fi allows only
-  /// tablet-controls-Mac). Reactive.
-  RemoteDirection get effectiveDirection => _settings.effectiveRemoteDirection;
-
   Future<void> onSelectLinkType(LinkType type) async {
     if (_settings.linkType == type) return;
     await _settings.setLinkType(type);
-    if (isHost) {
-      // The host's selector only shows while idle: the next connect reads it.
-      _loadLocalAddresses();
-    } else {
-      await _redialClient();
-    }
+    // Only the tablet has a link selector on Home: the Mac's USB always
+    // runs, and Wi-Fi is the Add a device panel's last row.
+    if (!isHost) await _redialClient();
   }
 
   /// Host, Wi-Fi: this Mac's LAN addresses, shown so the user can check the
@@ -208,6 +210,18 @@ class HomeController extends GetxController with WidgetsBindingObserver {
       WidgetsBinding.instance.addObserver(this);
       _checkHostPermissions();
       _loadLocalAddresses();
+      if (Get.isRegistered<IosScreenChannel>()) {
+        unawaited(refreshIosDevices());
+        if (iosPollInterval case final every?) {
+          // "While Home is shown": not under Settings, the remote view or
+          // the iPhone's own page, and not with the app in the background.
+          _iosPoll = Timer.periodic(every, (_) {
+            if (Get.currentRoute == AppRoutes.home && _resumed) {
+              unawaited(refreshIosDevices());
+            }
+          });
+        }
+      }
     }
 
     // Client (Android): auto-open the display once the link is live. The home
@@ -219,13 +233,6 @@ class HomeController extends GetxController with WidgetsBindingObserver {
     // on home, and if the mode is learned (via 0xF9) after the view opened, we
     // pop back.
     if (!_connection.isHost) {
-      _workers.add(ever<ConnectionPhase>(_connection.phase, (p) {
-        if (p.isActive &&
-            !_settings.isReverseRemote &&
-            Get.currentRoute == AppRoutes.home) {
-          Get.toNamed(AppRoutes.display);
-        }
-      }));
       _workers.add(
           everAll([_settings.sessionModeRx, _settings.remoteDirectionRx], (_) {
         if (_settings.isReverseRemote && Get.currentRoute == AppRoutes.display) {
@@ -268,6 +275,7 @@ class HomeController extends GetxController with WidgetsBindingObserver {
   @override
   void onClose() {
     if (isHost) WidgetsBinding.instance.removeObserver(this);
+    _iosPoll?.cancel();
     // The phase/mode observables belong to permanent services and outlive this
     // controller; dispose the workers so a closed Home stops reacting to them.
     for (final worker in _workers) {
@@ -279,8 +287,13 @@ class HomeController extends GetxController with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      _resumed = true;
       _checkHostPermissions();
       _loadLocalAddresses(); // the Mac may have changed network meanwhile
+      unawaited(refreshIosDevices());
+    } else if (state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.paused) {
+      _resumed = false;
     }
   }
 
@@ -347,11 +360,113 @@ class HomeController extends GetxController with WidgetsBindingObserver {
     }
   }
 
-  /// Host: connect to the chosen Android client. Selecting a device is the only
-  /// way to connect. The display renders on the Android device (it auto-opens
-  /// there); the Mac stays on this screen as the capture source.
-  Future<void> onSelectDevice(DeviceModel device) =>
-      _connect(serial: device.serial);
+  /// Host, the Add a device panel: Connect on [device]. With no [choice]
+  /// (a device the Mac has had before, whose role fits) it connects in its
+  /// remembered role ([SettingsService.knownChoice], which cannot change
+  /// while the device has no session, so reading it before the permissions
+  /// are asked about is safe). With one (picked in the role chooser) it
+  /// connects as that.
+  ///
+  /// A pick from the chooser was made while the page could change under
+  /// the dialog (another tablet taking the last place, the auto-connect
+  /// taking this one), so it is checked again first: refused, a snackbar
+  /// says why and nothing is connected or saved. For a new device the pick
+  /// is kept as the role a new device gets by default
+  /// ([SettingsService.nextChoice], which the chooser preselects next
+  /// time), once the permissions have been granted: a press that ends in
+  /// Settings changes nothing.
+  Future<void> onConnectDevice(DeviceModel device, {SessionChoice? choice}) {
+    final known = _settings.knownChoice(device.serial);
+    if (choice != null) {
+      final refused = isFree(device.serial)
+          ? addBlockedReason(role: choice, serial: device.serial)
+          : 'home_row_taken'.tr;
+      if (refused != null) {
+        Get.snackbar(
+          'home_connect_refused'.tr,
+          refused,
+          snackPosition: SnackPosition.BOTTOM,
+          margin: const EdgeInsets.all(16),
+        );
+        return Future.value();
+      }
+    }
+    return _connect(
+      serial: device.serial,
+      choice: choice ?? known,
+      saveAsNext: choice != null && known == null,
+    );
+  }
+
+  /// Host: [serial] is attached with no session (a row of the Add a device
+  /// panel).
+  bool isFree(String serial) {
+    final hub = _connection;
+    return hub is! HostConnectionManager ||
+        hub.freeDevices.any((d) => d.serial == serial);
+  }
+
+  /// Host: why a device with no session cannot be connected now, in plain
+  /// words, or null when it can: every place is taken (by Maximum tablets,
+  /// or by what this Mac can drive, which the user cannot raise), or every
+  /// device is being disconnected. With [role] and [serial], also when the
+  /// encoder has no room for that device as that role. Reads the hub's
+  /// observables, so an `Obx` calling it follows them.
+  String? addBlockedReason({SessionChoice? role, String? serial}) {
+    final hub = _connection;
+    if (hub is! HostConnectionManager) return null;
+    final sessions = hub.sessions.values.toList();
+    final busy =
+        sessions.any(
+          (s) => s.phase.value.isConnecting || s.phase.value.isActive,
+        ) ||
+        hub.phase.value.isConnecting ||
+        hub.phase.value.isActive;
+    final cap = hub.cap;
+    // With one tablet at most (cap 1), connecting another one replaces the
+    // session there is while it is not under way, as it always has.
+    final canPick = hub.canAdd || (cap == 1 && sessions.length <= 1 && !busy);
+    if (!canPick) {
+      // A Disconnect of every device (the remote view's, say) is still
+      // ending them: the devices it freed are not short of room.
+      if (hub.endingAll.value) return 'home_disconnecting'.tr;
+      return (capIsTheMacs ? 'home_row_full_mac' : 'home_row_full').trParams({
+        'cap': '$cap',
+      });
+    }
+    if (role != null && serial != null && !fitsEncoder(serial, role)) {
+      return 'home_row_encoder_full'.tr;
+    }
+    return null;
+  }
+
+  /// Host: the cap on devices at once is lower than Maximum tablets (what
+  /// the Mac's encoder is estimated to drive, or the link), so Settings
+  /// cannot raise it.
+  bool get capIsTheMacs {
+    final hub = _connection;
+    return hub is HostConnectionManager && hub.cap < _settings.maxTablets;
+  }
+
+  /// Host: whether the Mac's encoder has room for [serial] as [choice]
+  /// now. A device the Mac only views takes nothing of it. True when the
+  /// manager is not the hub (stand-ins in tests).
+  bool fitsEncoder(String serial, SessionChoice choice) {
+    final hub = _connection;
+    if (choice.isReverse || hub is! HostConnectionManager) return true;
+    return hub.budget.wouldFit(
+      _settings.captureConfigFor(
+        _settings.clientPanelFor(serial) ?? _settings.lastClientPanel,
+        SessionSpec.from(
+          choice,
+          LinkType.usb,
+          displayMode: _settings.displayModeFor(serial),
+        ),
+        profile: _settings.deviceProfile(serial),
+      ),
+      cap: hub.cap,
+    );
+  }
 
   /// Host, a tablet's card: its Disconnect, or its Cancel while it connects
   /// or waits to retry. Ends that tablet's session alone, and the automatic
@@ -363,7 +478,8 @@ class HomeController extends GetxController with WidgetsBindingObserver {
     await _connection.disconnectSession(key, userStopped: true);
   }
 
-  /// Host, the add panel: Listen on Wi-Fi, turned on or off. Saved; the hub
+  /// Host, the Add a device panel's last row: Accept devices over Wi-Fi,
+  /// turned on or off. Saved; the hub
   /// starts or stops its listener (and the Wi-Fi devices' sessions) itself. Turning
   /// it on needs the two permissions, like a connect from Home.
   Future<void> onWifiListen(bool on) async {
@@ -377,11 +493,11 @@ class HomeController extends GetxController with WidgetsBindingObserver {
   /// session's connect again, on the same session.
   Future<void> onSessionRetry(String key) => _connect(serial: key);
 
-  /// Host, a tablet's card: its mode menu picked [choice] for [session],
-  /// the session the menu was opened on. The hub ends that session and
+  /// Host, a tablet's card: one of its role chips picked [choice] for
+  /// [session], the session the chip was built for. The hub ends that session and
   /// makes the tablet a new one as [choice]; the other tablets run on.
-  /// Nothing when the tablet's session is another one by now (the menu
-  /// stayed open over a replacement), and the hub refuses what it cannot do
+  /// Nothing when the tablet's session is another one by now (a press
+  /// that began before a replacement), and the hub refuses what it cannot do
   /// (a session on its way to being live, a change that changes nothing).
   /// A mode in which the Mac captures its screen and takes the tablet's
   /// input needs the two permissions, like a connect from Home.
@@ -411,8 +527,22 @@ class HomeController extends GetxController with WidgetsBindingObserver {
   /// and input injection need Screen Recording + Accessibility. If anything is
   /// missing, bounce to Settings (scrolled to Permissions) instead of failing
   /// mid-handshake.
-  Future<void> _connect({String? serial}) async {
+  ///
+  /// [choice]: the role a session made for [serial] runs as (none: the
+  /// hub's own rule; a session that exists keeps its own).
+  /// [saveAsNext]: [choice] becomes the role a new device gets by default,
+  /// once the permissions are granted.
+  Future<void> _connect({
+    String? serial,
+    SessionChoice? choice,
+    bool saveAsNext = false,
+  }) async {
     if (isHost && !await _ensureHostPermissions()) return;
+    if (saveAsNext && choice != null) {
+      // The observables change at once; the writes to disk follow.
+      unawaited(_settings.setSessionMode(choice.mode));
+      unawaited(_settings.setRemoteDirection(choice.direction));
+    }
     // The user connects again: the auto-connect they paused, and the
     // tablet they stopped, are theirs to connect by itself again. Only
     // now, in one step with the connect and with no await between the
@@ -423,7 +553,7 @@ class HomeController extends GetxController with WidgetsBindingObserver {
     // and this pick, in the mode the selectors show, was refused as a
     // second one. A press that ends in Settings lifts nothing.
     _connection.allowDevice(serial);
-    await _connection.connect(serial: serial);
+    await _connection.connectWith(serial, choice: choice);
   }
 
   Future<bool> _ensureHostPermissions() async {

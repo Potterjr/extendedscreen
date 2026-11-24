@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:get/get.dart';
+import 'package:extendedscreen/modules/remote_screen/host/ios_screen_channel.dart';
+import 'package:extendedscreen/modules/remote_screen/host/ios_touch_service.dart';
 import 'package:extendedscreen/shared/connection/socket_service.dart';
 import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
 import 'package:extendedscreen/shared/services/settings_service.dart';
@@ -65,6 +67,10 @@ class InitialBinding extends Bindings {
       // app's container). Inert until called; in the P0 spike only the
       // debug-only iPhones list in Settings calls it.
       Get.put(IosDeviceService(), permanent: true);
+      // An iPhone or iPad over USB: its screen (AVFoundation) and touches
+      // (the TouchRunner over usbmuxd). Inert until its view opens.
+      Get.put(IosScreenChannel(), permanent: true);
+      Get.put(IosTouchService(), permanent: true);
       // The Mac has no link selector since several devices can join on
       // Wi-Fi: USB always runs and Wi-Fi is Home's Listen switch. A Mac left
       // on the Wi-Fi link listens instead (both values change at once in

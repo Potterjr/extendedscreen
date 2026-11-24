@@ -7,6 +7,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:get/get.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:extendedscreen/app/routes/app_routes.dart';
+import 'package:extendedscreen/modules/remote_screen/host/ios_screen_channel.dart';
+import 'package:extendedscreen/modules/remote_screen/host/ios_touch_service.dart';
 import 'package:extendedscreen/modules/remote_screen/host/remote_host/controllers/remote_grid_controller.dart';
 import 'package:extendedscreen/shared/connection/adb_service.dart';
 import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
@@ -27,8 +29,9 @@ import 'package:extendedscreen/shared/models/session_mode.dart';
 import 'package:extendedscreen/shared/services/app_translations.dart';
 import 'package:extendedscreen/shared/services/logger_service.dart';
 import 'package:extendedscreen/shared/services/settings_service.dart';
-import 'package:extendedscreen/shared/widgets/device_picker_card.dart';
-import 'package:extendedscreen/shared/widgets/session_card.dart';
+import 'package:extendedscreen/shared/widgets/add_device_panel.dart';
+import 'package:extendedscreen/shared/widgets/device_card.dart';
+import 'package:extendedscreen/shared/widgets/device_settings_sheet.dart';
 
 /// The Mac's hub with what Home asks of it recorded instead of done: the
 /// sessions are adopted, never connected.
@@ -39,7 +42,7 @@ class _Hub extends HostConnectionManager {
   final stops = <(String, bool)>[];
   final connects = <String?>[];
 
-  /// The mode each of [connects] was given.
+  /// The role each of [connects] was given.
   final choices = <SessionChoice?>[];
   int disconnects = 0;
 
@@ -49,8 +52,8 @@ class _Hub extends HostConnectionManager {
     bool userStopped = false,
   }) async => stops.add((key, userStopped));
 
-  // Where every connect of the hub's goes through: Home's (the hub's own
-  // `connect`, which adds the selectors' mode) and the policy's.
+  // Where every connect of the hub's goes through: Home's (with the
+  // device's role) and the policy's.
   @override
   Future<void> connectWith(String? serial, {SessionChoice? choice}) async {
     connects.add(serial);
@@ -60,7 +63,7 @@ class _Hub extends HostConnectionManager {
   @override
   Future<void> disconnect() async => disconnects++;
 
-  /// The mode changes asked for (tablet, mode, the session it was asked
+  /// The role changes asked for (tablet, role, the session it was asked
   /// of), recorded instead of done.
   final modeChanges = <(String, SessionChoice, HostSession?)>[];
 
@@ -77,9 +80,9 @@ class _Hub extends HostConnectionManager {
   @override
   Future<void> autoConnect() async {}
 
-  /// Tablets between two sessions, as the hub holds one while its mode is
+  /// Tablets between two sessions, as the hub holds one while its role is
   /// being changed (the change itself is only recorded here): in no
-  /// session, its place kept, not offered as a tablet to add.
+  /// session, its place kept, not offered as a device to add.
   final between = <String>{}.obs;
 
   @override
@@ -100,6 +103,18 @@ class _Adb extends AdbService {
   List<DeviceModel> devices = const [];
   @override
   Future<List<DeviceModel>?> listDevicesOrNull() async => devices;
+}
+
+/// The iPhones and iPads the Mac lists on USB, as the test sets them.
+class _Phones extends IosScreenChannel {
+  List<IosScreenDevice> list = const [];
+  int listings = 0;
+
+  @override
+  Future<List<IosScreenDevice>> listDevices() async {
+    listings++;
+    return list;
+  }
 }
 
 /// The pushes of the remote view, with what each was given.
@@ -136,26 +151,84 @@ Finder _action(String key, String label) => find.byKey(ValueKey('$key/$label'));
 
 Finder _card(String key) => find.byKey(ValueKey('session/$key'));
 
-/// The button on [key]'s card that opens its mode menu.
-Finder _modeMenu(String key) => find.byKey(ValueKey('$key/mode'));
-
-/// The item for [choice] in [key]'s open mode menu.
-Finder _modeItem(String key, SessionChoice choice) => find.byKey(
-  ValueKey('$key/mode/${choice.mode.name}.${choice.direction.name}'),
+/// [key]'s role chip for [choice].
+Finder _role(String key, SessionChoice choice) => find.byKey(
+  ValueKey('$key/role/${choice.mode.name}.${choice.direction.name}'),
 );
 
-/// The add panel's selector option for what the next tablet runs as:
-/// `mode/<name>` or `dir/<name>`.
-Finder _next(String option) => find.byKey(ValueKey('next/$option'));
+/// The Add a device panel's row for [serial], and its two buttons: Connect
+/// on a remembered device, Connect on a new one (which asks for the role).
+Finder _row(String serial) => find.byKey(ValueKey('device/$serial'));
+Finder _connectBtn(String serial) =>
+    find.byKey(ValueKey('device/$serial/connect'));
+Finder _chooseBtn(String serial) =>
+    find.byKey(ValueKey('device/$serial/choose'));
 
-Finder _inPicker(Finder matching) =>
-    find.descendant(of: find.byType(DevicePickerCard), matching: matching);
+/// [choice] in the role chooser open for [serial].
+Finder _option(String serial, SessionChoice choice) => find.byKey(
+  ValueKey('choose/$serial/${choice.mode.name}.${choice.direction.name}'),
+);
+
+final _summary = find.byKey(const ValueKey('home/summary'));
+final _wifiRow = find.byKey(const ValueKey('add/wifi-listen'));
+
+/// What Home offered the Mac before: the selectors for the next tablet.
+final _selectors = [
+  find.byKey(const ValueKey('next/mode')),
+  find.byKey(const ValueKey('next/mode/extendedScreen')),
+  find.byKey(const ValueKey('next/mode/remoteControl')),
+  find.byKey(const ValueKey('next/dir')),
+  find.byKey(const ValueKey('next/caption')),
+  find.byKey(const ValueKey('next/wifi-listen')),
+];
+
+Finder _inAdd(Finder matching) =>
+    find.descendant(of: find.byType(AddDevicePanel), matching: matching);
 
 Finder _inCards(Finder matching) =>
-    find.descendant(of: find.byType(SessionCard), matching: matching);
+    find.descendant(of: find.byType(DeviceCard), matching: matching);
 
 Finder _inTitle(Finder matching) =>
     find.descendant(of: find.byType(AppBar), matching: matching);
+
+/// What the Text found by [finder] says.
+String _said(WidgetTester tester, Finder finder) =>
+    tester.widget<Text>(finder).data!;
+
+RoleChip _chip(WidgetTester tester, String key, SessionChoice choice) =>
+    tester.widget<RoleChip>(_role(key, choice));
+
+/// Whether a button found by [finder] can be pressed.
+bool _pressable(WidgetTester tester, Finder finder) =>
+    tester.widget<ButtonStyleButton>(finder).onPressed != null;
+
+/// Whether the chooser's option [choice] for [serial] can be picked.
+bool _pickable(WidgetTester tester, String serial, SessionChoice choice) =>
+    tester
+        .widget<InkWell>(
+          find.descendant(
+            of: _option(serial, choice),
+            matching: find.byType(InkWell),
+          ),
+        )
+        .onTap !=
+    null;
+
+/// No mode, direction or link selector anywhere on the page.
+void _noSelectors() {
+  for (final f in _selectors) {
+    expect(f, findsNothing);
+  }
+  for (final text in [
+    'home_next_tablet_mode',
+    'remote_dir_title',
+    'link_usb_desc',
+    'link_wifi_desc',
+    'session_extended_desc',
+  ]) {
+    expect(find.text(text), findsNothing, reason: text);
+  }
+}
 
 void main() {
   late SettingsService settings;
@@ -216,11 +289,18 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
   }
 
+  /// A dialog or sheet opening or closing.
+  Future<void> dialog(WidgetTester tester) async {
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+  }
+
   /// Home over [count] live tablets, `SERIAL-A`, `SERIAL-B`, … (the first
   /// one focused), all attached, each made as [choice]. With [routed], Home
   /// is the app's `/home` route, as in the app (the remote view opens by
   /// itself only from there), and `/remote-host` a stand-in page with the
-  /// remote view's own controller; [routed] hears the pushes.
+  /// remote view's own controller; [routed] hears the pushes. [iosPoll] is
+  /// how often Home lists the iPhones on USB (none: only as it opens).
   Future<List<HostSession>> start(
     WidgetTester tester,
     int count, {
@@ -228,6 +308,7 @@ void main() {
     bool translated = false,
     SessionChoice? choice,
     NavigatorObserver? routed,
+    Duration? iosPoll,
   }) async {
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
@@ -260,7 +341,7 @@ void main() {
               name: AppRoutes.home,
               page: () => const HomeView(),
               binding: BindingsBuilder(() {
-                Get.put(HomeController());
+                Get.put(HomeController(iosPollInterval: iosPoll));
               }),
             ),
             GetPage(
@@ -274,13 +355,17 @@ void main() {
               name: AppRoutes.settings,
               page: () => const Scaffold(body: Text('settings')),
             ),
+            GetPage(
+              name: AppRoutes.iphoneRemote,
+              page: () => const Scaffold(body: Text('iphone page')),
+            ),
           ],
         ),
       );
       await settle(tester);
       return sessions;
     }
-    Get.put(HomeController());
+    Get.put(HomeController(iosPollInterval: iosPoll));
     await tester.pumpWidget(
       translated ? app() : const GetMaterialApp(home: HomeView()),
     );
@@ -289,64 +374,73 @@ void main() {
     return sessions;
   }
 
-  testWidgets('two tablets: a card each, and the title says how many', (
-    tester,
-  ) async {
+  testWidgets('two tablets: a card each under Devices, the summary counts '
+      'their places, each card highlights its own role, and Home has no '
+      'selector of its own', (tester) async {
     // Tall enough for both cards and the add panel below them.
     tester.view.physicalSize = const Size(1000, 2400);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
     await start(tester, 2);
 
-    expect(find.byType(SessionCard), findsNWidgets(2));
-    expect(find.text('home_appbar_tablets'), findsOneWidget);
+    expect(find.byType(DeviceCard), findsNWidgets(2));
+    expect(find.text('home_devices'), findsOneWidget);
+    // Not translated here: the keys themselves. Neither tablet is
+    // capturing, and with 2 places at most (the conservative estimate)
+    // both are taken.
     expect(
-      _inCards(find.text('session_extended_label')),
-      findsNWidgets(2),
-      reason: "each card's mode chip",
+      _said(tester, _summary),
+      hub.cap == 2
+          ? 'home_devices_connected · home_devices_at_cap'
+          : 'home_devices_connected',
     );
+    // The title is the app's name alone: the roles are on the cards.
+    expect(_inTitle(find.text('app_name')), findsOneWidget);
+    expect(find.text('home_appbar_tablets'), findsNothing);
+    expect(_inTitle(find.text('role_extended')), findsNothing);
+    for (final key in ['SERIAL-A', 'SERIAL-B']) {
+      expect(_chip(tester, key, _extended).selected, isTrue, reason: key);
+      expect(_chip(tester, key, _driving).selected, isFalse, reason: key);
+      expect(_chip(tester, key, _reverse).selected, isFalse, reason: key);
+    }
+    expect(_inCards(find.text('role_extended')), findsNWidgets(2));
     expect(
-      _inTitle(find.text('session_extended_label')),
-      findsNothing,
-      reason: 'the title no longer shows a mode',
+      _inAdd(find.text('home_all_attached_connected')),
+      findsOneWidget,
     );
-    expect(find.text('home_all_attached_connected'), findsOneWidget);
-    // The mode of the next tablet is offered once, in the add panel; the
-    // cards' own modes are theirs. The link is every tablet's: not now.
-    expect(find.text('session_extended_desc'), findsOneWidget);
-    expect(_inPicker(find.text('session_extended_desc')), findsOneWidget);
-    expect(_inPicker(find.text('home_next_tablet_mode')), findsOneWidget);
-    expect(find.text('link_usb_desc'), findsNothing);
+    // Nothing on the page says what the next tablet runs as, and the Mac
+    // has no link selector; nor the old phone button in the bar.
+    _noSelectors();
+    expect(find.byKey(const ValueKey('home/iphone-remote')), findsNothing);
   });
 
-  testWidgets("one tablet: today's Home, with its card in place of the "
-      'connection card', (tester) async {
+  testWidgets('one tablet: its card in the list, the permission banner '
+      'above, its role highlighted on the card; waiting to retry it offers '
+      'Cancel and Retry', (tester) async {
     tester.view.physicalSize = const Size(1000, 2400);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
     final sessions = await start(tester, 1);
 
-    expect(find.byType(SessionCard), findsOneWidget);
+    expect(find.byType(DeviceCard), findsOneWidget);
     expect(find.text('perm_required_title'), findsOneWidget);
-    // The title shows the session's mode, as before, and so does the card.
-    expect(_inTitle(find.text('session_extended_label')), findsOneWidget);
-    expect(_inCards(find.text('session_extended_label')), findsOneWidget);
-    expect(find.text('home_appbar_tablets'), findsNothing);
-    expect(find.text('link_usb_desc'), findsNothing, reason: 'live');
-    // What the next tablet would run as is in the add panel all along.
-    expect(_inPicker(_next('mode/extendedScreen')), findsOneWidget);
-    expect(_inPicker(_next('mode/remoteControl')), findsOneWidget);
+    expect(
+      tester.getBottomLeft(find.text('perm_required_title')).dy,
+      lessThan(tester.getTopLeft(_card('SERIAL-A')).dy),
+    );
+    expect(_chip(tester, 'SERIAL-A', _extended).selected, isTrue);
+    expect(_inTitle(find.text('app_name')), findsOneWidget);
+    expect(_action('SERIAL-A', 'common_disconnect'), findsOneWidget);
+    _noSelectors();
 
-    // Waiting to retry is idle: the link selector is back.
     sessions[0]
       ..retryPending.value = true
       ..phase.value = ConnectionPhase.error;
     await tester.pump();
-    expect(find.text('link_usb_desc'), findsNothing,
-        reason: 'the Mac has no link selector');
-    expect(_inPicker(find.text('link_usb_desc')), findsNothing);
     expect(_action('SERIAL-A', 'common_cancel'), findsOneWidget);
-    expect(_inPicker(_next('mode/extendedScreen')), findsOneWidget);
+    expect(_action('SERIAL-A', 'common_retry'), findsOneWidget);
+    expect(_action('SERIAL-A', 'common_disconnect'), findsNothing);
+    _noSelectors();
   });
 
   testWidgets("a card's Disconnect ends that tablet alone", (tester) async {
@@ -372,7 +466,19 @@ void main() {
     await tester.pump();
 
     expect(find.text('common_retry'), findsOneWidget);
-    expect(find.text('error_encode_limit'), findsOneWidget);
+    expect(
+      find.descendant(of: _card('SERIAL-B'), matching: find.text('error_encode_limit')),
+      findsOneWidget,
+    );
+    // Its status line says it waits for the user, not that it retries.
+    expect(
+      find.descendant(
+        of: _card('SERIAL-B'),
+        matching: find.textContaining('home_status_waiting_you'),
+      ),
+      findsOneWidget,
+    );
+    expect(find.textContaining('home_status_retrying'), findsNothing);
     await tester.tap(_action('SERIAL-B', 'common_retry'));
     await tester.pump();
     await tester.pump();
@@ -406,6 +512,13 @@ void main() {
     b.phase.value = ConnectionPhase.error;
     await tester.pump();
 
+    expect(
+      find.descendant(
+        of: _card('SERIAL-B'),
+        matching: find.textContaining('home_status_retrying'),
+      ),
+      findsOneWidget,
+    );
     expect(_action('SERIAL-B', 'common_cancel'), findsOneWidget);
     await tester.tap(_action('SERIAL-B', 'common_retry'));
     await tester.pump();
@@ -414,22 +527,18 @@ void main() {
     expect(hub.stops, isEmpty);
   });
 
-  // With one tablet at a time (Maximum tablets 1; the mode no longer makes
-  // it so), whatever the mode.
+  // With one tablet at a time (Maximum tablets 1; the role no longer makes
+  // it so), whatever the role.
   for (final remote in [false, true]) {
     testWidgets('with Maximum tablets 1'
         '${remote ? ', in remote control' : ''}, while a Disconnect of every '
         'tablet still runs, the freed tablet is not short of room, and there '
         'is nothing to disconnect', (tester) async {
       await settings.setMaxTablets(1);
-      if (remote) {
-        await settings.setSessionMode(SessionMode.remoteControl);
-        await settings.setRemoteDirection(RemoteDirection.tabControlsMac);
-      }
       tester.view.physicalSize = const Size(1000, 2400);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
-      await start(tester, 1);
+      await start(tester, 1, choice: remote ? _driving : null);
       expect(hub.cap, 1);
 
       // The remote view's Disconnect: the session is out of the hub at
@@ -438,42 +547,29 @@ void main() {
       hub.sessions.remove('SERIAL-A');
       await tester.pump();
       expect(hub.phase.value, ConnectionPhase.streaming);
-      expect(find.text('home_disconnecting'), findsOneWidget);
-      expect(find.text('home_at_limit'), findsNothing);
+      expect(
+        find.descendant(of: _row('SERIAL-A'), matching: find.text('home_disconnecting')),
+        findsOneWidget,
+      );
+      expect(find.text('home_row_full'), findsNothing);
+      expect(_pressable(tester, _chooseBtn('SERIAL-A')), isFalse);
       expect(find.text('common_disconnect'), findsNothing);
 
       hub.endingAll.value = false;
       hub.phase.value = ConnectionPhase.disconnected;
       await tester.pump();
       expect(find.text('home_disconnecting'), findsNothing);
-      expect(find.text('home_at_limit'), findsNothing);
+      expect(find.text('home_row_full'), findsNothing);
+      expect(_pressable(tester, _chooseBtn('SERIAL-A')), isTrue);
     });
   }
 
-  group('the mode of the next tablet', () {
+  group('the role of a device', () {
     const extra = DeviceModel(
       serial: 'SERIAL-X',
       model: 'Tablet X',
       status: DeviceStatus.connected,
     );
-
-    Finder inPicker(Finder matching) => find.descendant(
-      of: find.byType(DevicePickerCard),
-      matching: matching,
-    );
-
-    /// Whether the add panel's tile for [extra] can be pressed.
-    bool tileEnabled(WidgetTester tester) => tester
-        .widget<InkWell>(
-          find
-              .ancestor(
-                of: inPicker(find.text('Tablet X')),
-                matching: find.byType(InkWell),
-              )
-              .first,
-        )
-        .onTap !=
-        null;
 
     /// One more tablet attached, with no session.
     Future<void> attachExtra(WidgetTester tester) async {
@@ -491,73 +587,307 @@ void main() {
       hub.budget.admit(999, DisplayConfigModel.defaultConfig, cap: 8);
     }
 
-    testWidgets('a tablet the Mac would only view needs a place, not room on '
-        'the encoder: with the encoder full its tile stays enabled, while '
-        "one to extend onto can't be added", (tester) async {
+    testWidgets('a device the Mac would only view needs a place, not room '
+        "on the encoder: with the encoder full a new device's row stays "
+        'enabled and its chooser offers only that role; a remembered one '
+        'that the Mac would encode for asks for its role instead of '
+        'connecting as it was', (tester) async {
       tester.view.physicalSize = const Size(1000, 2400);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
-      await start(tester, 1);
+      await start(tester, 1, permissions: true);
       fillEncoder();
       await attachExtra(tester);
       expect(hub.canAdd, isTrue);
 
-      // Extended screen: the Mac would have to encode for it.
-      expect(settings.nextChoice.isReverse, isFalse);
-      expect(inPicker(find.text('home_at_limit')), findsOneWidget);
-      expect(tileEnabled(tester), isFalse);
-
-      // Tablet drives the Mac: the Mac encodes for that one too.
-      await settings.setSessionMode(SessionMode.remoteControl);
-      await settings.setRemoteDirection(RemoteDirection.tabControlsMac);
+      // New: never short of the encoder.
+      expect(_pressable(tester, _chooseBtn('SERIAL-X')), isTrue);
+      expect(find.text('home_row_encoder_full'), findsNothing);
+      await tester.tap(_chooseBtn('SERIAL-X'));
+      await dialog(tester);
+      for (final c in [_extended, _driving]) {
+        expect(_pickable(tester, 'SERIAL-X', c), isFalse, reason: '$c');
+        expect(
+          find.descendant(
+            of: _option('SERIAL-X', c),
+            matching: find.text('home_row_encoder_full'),
+          ),
+          findsOneWidget,
+          reason: '$c',
+        );
+      }
+      expect(_pickable(tester, 'SERIAL-X', _reverse), isTrue);
+      await tester.tap(_option('SERIAL-X', _reverse));
+      await dialog(tester);
       await tester.pump();
-      expect(inPicker(find.text('home_at_limit')), findsOneWidget);
-      expect(tileEnabled(tester), isFalse);
+      expect(hub.connects, ['SERIAL-X']);
+      expect(hub.choices, [_reverse]);
 
-      // Mac controls the tablet: the tablet encodes.
-      await settings.setRemoteDirection(RemoteDirection.macControlsTab);
+      // Remembered: a role with no room is no dead end. Its Connect asks
+      // for the role, the row saying why; one that fits connects as it
+      // was.
+      await settings.rememberDevice(
+        'SERIAL-X',
+        model: 'Tablet X',
+        vdSerial: 7,
+        choice: _extended,
+      );
+      for (final (choice, fits) in [
+        (_extended, false),
+        (_driving, false),
+        (_reverse, true),
+      ]) {
+        settings.setKnownChoice('SERIAL-X', choice);
+        hub.availableDevices.refresh();
+        await tester.pump();
+        expect(_connectBtn('SERIAL-X'), fits ? findsOneWidget : findsNothing,
+            reason: '$choice');
+        expect(_chooseBtn('SERIAL-X'), fits ? findsNothing : findsOneWidget,
+            reason: '$choice');
+        expect(
+          _pressable(tester, fits ? _connectBtn('SERIAL-X') : _chooseBtn('SERIAL-X')),
+          isTrue,
+          reason: '$choice',
+        );
+        expect(
+          find.descendant(
+            of: _row('SERIAL-X'),
+            matching: find.text('home_row_role_no_room'),
+          ),
+          fits ? findsNothing : findsOneWidget,
+          reason: '$choice',
+        );
+        expect(find.text('home_row_encoder_full'), findsNothing);
+      }
+      // The chooser it opens starts on the remembered role, not offered,
+      // and connects it in the one picked; the default for new devices is
+      // left alone.
+      settings.setKnownChoice('SERIAL-X', _driving);
+      hub.availableDevices.refresh();
       await tester.pump();
-      expect(inPicker(find.text('home_at_limit')), findsNothing);
-      expect(tileEnabled(tester), isTrue);
+      final next = settings.nextChoice;
+      await tester.tap(_chooseBtn('SERIAL-X'));
+      await dialog(tester);
+      expect(_pickable(tester, 'SERIAL-X', _driving), isFalse);
+      await tester.tap(_option('SERIAL-X', _reverse));
+      await dialog(tester);
+      await tester.pump();
+      expect(hub.connects, ['SERIAL-X', 'SERIAL-X']);
+      expect(hub.choices, [_reverse, _reverse]);
+      expect(settings.nextChoice, next);
     });
 
-    testWidgets('pressing a tile connects that tablet in the mode chosen '
-        'for the next one', (tester) async {
+    testWidgets('Connect on a remembered device connects it in its '
+        'remembered role, with no question', (tester) async {
+      tester.view.physicalSize = const Size(1000, 2400);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await settings.rememberDevice(
+        extra.serial,
+        model: extra.model,
+        vdSerial: 7,
+        choice: _reverse,
+      );
+      await start(tester, 1, permissions: true, choice: _extended);
+      await attachExtra(tester);
+
+      await tester.tap(_connectBtn('SERIAL-X'));
+      await dialog(tester);
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(hub.connects, ['SERIAL-X']);
+      expect(hub.choices, [_reverse]);
+      expect(settings.nextChoice, _extended, reason: 'nothing was chosen');
+    });
+
+    testWidgets('Connect on a new device opens the chooser, which '
+        'preselects the last role picked; Cancel connects nothing, and a '
+        'pick connects in that role and is kept for the next one', (
+      tester,
+    ) async {
       tester.view.physicalSize = const Size(1000, 2400);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
       await settings.setSessionMode(SessionMode.remoteControl);
       await settings.setRemoteDirection(RemoteDirection.macControlsTab);
-      await start(
-        tester,
-        1,
-        permissions: true,
-        choice: const SessionChoice(SessionMode.extendedScreen),
-      );
+      await start(tester, 1, permissions: true, choice: _extended);
       await attachExtra(tester);
+      expect(_connectBtn('SERIAL-X'), findsNothing);
 
-      await tester.tap(inPicker(find.text('Tablet X')));
+      Color? colour(SessionChoice c) => tester
+          .widget<Material>(
+            find
+                .descendant(of: _option('SERIAL-X', c), matching: find.byType(Material))
+                .first,
+          )
+          .color;
+
+      await tester.tap(_chooseBtn('SERIAL-X'));
+      await dialog(tester);
+      expect(find.text('home_choose_role_title'), findsOneWidget);
+      for (final c in SessionChoice.all) {
+        expect(_option('SERIAL-X', c), findsOneWidget, reason: '$c');
+        expect(_pickable(tester, 'SERIAL-X', c), isTrue, reason: '$c');
+      }
+      expect(colour(_reverse), isNot(colour(_extended)),
+          reason: 'the last role picked is highlighted');
+      expect(colour(_driving), colour(_extended));
+      await tester.tap(find.byKey(const ValueKey('choose/SERIAL-X/cancel')));
+      await dialog(tester);
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(hub.connects, isEmpty);
+
+      await tester.tap(_chooseBtn('SERIAL-X'));
+      await dialog(tester);
+      await tester.tap(_option('SERIAL-X', _driving));
+      await dialog(tester);
       await tester.pump();
-      await tester.pump();
+      expect(find.byType(AlertDialog), findsNothing);
       expect(hub.connects, ['SERIAL-X']);
-      expect(hub.choices, [_reverse]);
+      expect(hub.choices, [_driving]);
+      expect(settings.nextChoice, _driving);
+      // Both halves saved, the direction too (it was Mac → tablet).
+      expect(settings.sessionMode, SessionMode.remoteControl);
+      expect(settings.remoteDirection, RemoteDirection.tabControlsMac);
+
+      // And the other way: the mode itself is what changes.
+      await tester.tap(_chooseBtn('SERIAL-X'));
+      await dialog(tester);
+      await tester.tap(_option('SERIAL-X', _extended));
+      await dialog(tester);
+      await tester.pump();
+      expect(hub.choices, [_driving, _extended]);
+      expect(settings.sessionMode, SessionMode.extendedScreen);
+      expect(settings.nextChoice.sameEffect(_extended), isTrue);
     });
 
-    testWidgets('a press on the tile of a tablet the user stopped lifts the '
-        'stop, and the pause, only as it connects: not when it ends in '
-        'Settings for the permissions, and not while they are asked about', (
-      tester,
-    ) async {
+    testWidgets('the chooser highlights the default role by what it does: '
+        'Extended saved with the Mac → tablet direction is Second display',
+        (tester) async {
+      tester.view.physicalSize = const Size(1000, 2400);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      // What the old Home's two selectors could leave saved.
+      await settings.setSessionMode(SessionMode.extendedScreen);
+      await settings.setRemoteDirection(RemoteDirection.macControlsTab);
+      await start(tester, 1, permissions: true, choice: _extended);
+      await attachExtra(tester);
+
+      Color? colour(SessionChoice c) => tester
+          .widget<Material>(
+            find
+                .descendant(
+                    of: _option('SERIAL-X', c), matching: find.byType(Material))
+                .first,
+          )
+          .color;
+      await tester.tap(_chooseBtn('SERIAL-X'));
+      await dialog(tester);
+      expect(colour(_extended), isNot(colour(_driving)),
+          reason: 'Second display is highlighted');
+      expect(colour(_reverse), colour(_driving));
+    });
+
+    testWidgets('a pick from the chooser that ends in Settings for the '
+        'permissions connects nothing and leaves the default role alone',
+        (tester) async {
       tester.view.physicalSize = const Size(1000, 2400);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
       // Screen Recording and Accessibility are missing.
       await start(tester, 1, routed: _Pushes());
       await attachExtra(tester);
+      final before = settings.nextChoice;
+      expect(before.sameEffect(_driving), isFalse);
+
+      await tester.tap(_chooseBtn('SERIAL-X'));
+      await dialog(tester);
+      await tester.tap(_option('SERIAL-X', _driving));
+      await settle(tester);
+      expect(Get.currentRoute, AppRoutes.settings);
+      expect(hub.connects, isEmpty);
+      expect(settings.nextChoice, before);
+      expect(settings.sessionMode, before.mode);
+      Get.back<void>(closeOverlays: true);
+      await tester.pump(const Duration(seconds: 4));
+      await tester.pump(const Duration(seconds: 1));
+    });
+
+    testWidgets('a pick from the chooser is checked again when the dialog '
+        'closes: a place taken meanwhile, or the device connected by '
+        'itself, refuses it with a message, and saves no role', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(1000, 2400);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await settings.setMaxTablets(2);
+      await start(tester, 1, permissions: true, translated: true);
+      await attachExtra(tester);
+      final before = settings.nextChoice;
+      final en = AppTranslations().keys['en']!;
+
+      // The chooser is open when another tablet takes the last place.
+      await tester.tap(_chooseBtn('SERIAL-X'));
+      await dialog(tester);
+      hub.between.add('SERIAL-Z');
+      await tester.tap(_option('SERIAL-X', _driving));
+      await dialog(tester);
+      await tester.pump();
+      expect(hub.connects, isEmpty);
+      expect(settings.nextChoice, before);
+      expect(find.text(en['home_connect_refused']!), findsOneWidget);
+      expect(
+        find.text(en['home_row_full']!.replaceAll('@cap', '2')),
+        findsWidgets,
+      );
+      await tester.pump(const Duration(seconds: 4));
+      await tester.pump(const Duration(seconds: 1));
+
+      // Room again; this time the device gets a session of its own (the
+      // auto-connect took it) while the chooser is open.
+      hub.between.clear();
+      await tester.pump();
+      await tester.tap(_chooseBtn('SERIAL-X'));
+      await dialog(tester);
+      hub.sessions['SERIAL-X'] = HostSession(
+        key: 'SERIAL-X',
+        link: LinkType.usb,
+        serial: 'SERIAL-X',
+        pipeline: hub.pipeline,
+        adb: adb,
+        socket: SocketService(),
+      )..phase.value = ConnectionPhase.handshaking;
+      await tester.tap(_option('SERIAL-X', _driving));
+      await dialog(tester);
+      await tester.pump();
+      expect(hub.connects, isEmpty);
+      expect(settings.nextChoice, before);
+      expect(find.text(en['home_row_taken']!), findsOneWidget);
+      await tester.pump(const Duration(seconds: 4));
+      await tester.pump(const Duration(seconds: 1));
+    });
+
+    testWidgets('a press on the Connect of a tablet the user stopped lifts '
+        'the stop, and the pause, only as it connects: not when it ends in '
+        'Settings for the permissions, and not while they are asked about', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(1000, 2400);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await settings.rememberDevice(
+        extra.serial,
+        model: extra.model,
+        vdSerial: 7,
+        choice: _extended,
+      );
+      // Screen Recording and Accessibility are missing.
+      await start(tester, 1, routed: _Pushes());
+      await attachExtra(tester);
       hub.stoppedDevices.add('SERIAL-X');
       hub.pauseAutoConnect();
 
-      await tester.tap(inPicker(find.text('Tablet X')));
+      await tester.tap(_connectBtn('SERIAL-X'));
       await settle(tester);
       expect(Get.currentRoute, AppRoutes.settings);
       expect(hub.connects, isEmpty);
@@ -580,7 +910,7 @@ void main() {
             await answer.future;
             return {'screen_recording': true, 'accessibility': true};
           });
-      await tester.tap(inPicker(find.text('Tablet X')));
+      await tester.tap(_connectBtn('SERIAL-X'));
       await tester.pump();
       await tester.pump();
       // An automatic connect that looks now still finds a stopped tablet;
@@ -599,127 +929,88 @@ void main() {
       expect(hub.autoConnectPaused.value, isFalse);
     });
 
-    testWidgets('in remote control a second tablet can be added beside the '
-        'first: no tile says one at a time', (tester) async {
+    testWidgets('a second device can be added beside one that controls the '
+        'Mac or that the Mac controls: no row says one at a time', (
+      tester,
+    ) async {
       tester.view.physicalSize = const Size(1000, 2400);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
-      await settings.setSessionMode(SessionMode.remoteControl);
-      await settings.setRemoteDirection(RemoteDirection.tabControlsMac);
-      await start(tester, 1, translated: true);
+      final a = (await start(tester, 1, translated: true, choice: _driving))
+          .single;
       await attachExtra(tester);
       expect(hub.cap, greaterThan(1));
 
-      expect(tileEnabled(tester), isTrue);
-      expect(find.text('home_remote_single'), findsNothing);
-      final texts = tester
-          .widgetList<Text>(inPicker(find.byType(Text)))
-          .map((t) => t.data)
-          .toList();
-      for (final locale in ['en', 'th']) {
-        final map = AppTranslations().keys[locale]!;
-        expect(map.containsKey('home_remote_single'), isFalse);
-        expect(texts, isNot(contains(map['home_at_limit'])));
+      for (final choice in [_driving, _reverse]) {
+        hub.sessions['SERIAL-A'] = tablet('A', choice: choice);
+        await tester.pump();
+        expect(_pressable(tester, _chooseBtn('SERIAL-X')), isTrue);
+        final texts = tester
+            .widgetList<Text>(_inAdd(find.byType(Text)))
+            .map((t) => t.data ?? '')
+            .toList();
+        for (final locale in ['en', 'th']) {
+          final map = AppTranslations().keys[locale]!;
+          expect(map.containsKey('home_remote_single'), isFalse);
+          final full = map['home_row_full']!.split('@cap').first;
+          expect(texts.where((t) => t.contains(full)), isEmpty);
+        }
       }
+      expect(a.choice, _driving);
     });
 
-    testWidgets('the mode selectors sit in the add panel whatever the '
-        "tablets are doing, never above the cards; they change nothing a "
-        'tablet runs as, the link selector keeps its rule, and the title '
-        "shows the tablet's own mode", (tester) async {
+    testWidgets('Home has no mode, direction or link selector in any phase, '
+        "and the card's highlighted role follows its session alone", (
+      tester,
+    ) async {
       tester.view.physicalSize = const Size(1000, 2400);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
       final sessions = await start(tester, 1, choice: _reverse);
-      // The selectors say something else.
+      // What a new device would get says something else.
       expect(settings.nextChoice.mode, SessionMode.extendedScreen);
-      final title = _inTitle(
-        find.text('session_remote_label · remote_dir_mac_label'),
-      );
-      final chip = _inCards(
-        find.text('session_remote_label · remote_dir_mac_label'),
-      );
 
-      /// Mode and direction are offered once, inside the add panel, below
-      /// the card.
-      void selectorsInPanel({required bool direction}) {
-        expect(_inPicker(find.text('home_next_tablet_mode')), findsOneWidget);
-        for (final text in ['session_extended_desc', 'session_remote_desc']) {
-          expect(find.text(text), findsOneWidget);
-          expect(_inPicker(find.text(text)), findsOneWidget);
+      void check() {
+        _noSelectors();
+        expect(_inTitle(find.text('app_name')), findsOneWidget);
+        if (hub.sessions.isNotEmpty) {
+          expect(_chip(tester, 'SERIAL-A', _reverse).selected, isTrue);
+          expect(_chip(tester, 'SERIAL-A', _extended).selected, isFalse);
         }
-        expect(
-          find.text('remote_dir_title'),
-          direction ? findsOneWidget : findsNothing,
-        );
-        expect(
-          _inPicker(find.text('remote_dir_title')),
-          direction ? findsOneWidget : findsNothing,
-        );
       }
 
-      expect(title, findsOneWidget);
-      expect(chip, findsOneWidget);
-      selectorsInPanel(direction: false);
-      expect(
-        tester.getTopLeft(_next('mode/extendedScreen')).dy,
-        greaterThan(tester.getBottomLeft(_card('SERIAL-A')).dy),
-      );
-      expect(find.text('link_usb_desc'), findsNothing, reason: 'live');
-
-      // Moving them while the tablet is live asks nothing of the hub and
-      // changes nothing the tablet runs as: its title and chip stay.
-      await tester.tap(_next('mode/remoteControl'));
-      await tester.pump();
-      selectorsInPanel(direction: true);
-      await tester.tap(_next('dir/tabControlsMac'));
-      await tester.pump();
-      expect(settings.nextChoice, _driving);
-      expect(sessions[0].effectiveChoice, _reverse);
-      expect(title, findsOneWidget);
-      expect(chip, findsOneWidget);
-      expect(hub.modeChanges, isEmpty);
-      expect(hub.connects, isEmpty);
-      expect(hub.stops, isEmpty);
-      await tester.tap(_next('mode/extendedScreen'));
-      await tester.pump();
-      selectorsInPanel(direction: false);
-
-      // Waiting to retry: the link may be changed too.
+      check();
+      // Waiting to retry.
       sessions[0]
         ..retryPending.value = true
         ..phase.value = ConnectionPhase.error;
       await tester.pump();
-      expect(find.text('link_usb_desc'), findsNothing,
-        reason: 'the Mac has no link selector');
-      selectorsInPanel(direction: false);
-      expect(title, findsOneWidget);
-
-      // Connecting again: still there.
+      check();
+      // Connecting again.
       sessions[0]
         ..retryPending.value = false
         ..phase.value = ConnectionPhase.handshaking;
       await tester.pump();
-      expect(find.text('link_usb_desc'), findsNothing);
-      selectorsInPanel(direction: false);
-
-      // With no tablet the title follows them.
+      check();
+      // What a new device gets changing changes nothing on the card.
+      await settings.setSessionMode(SessionMode.remoteControl);
+      await settings.setRemoteDirection(RemoteDirection.tabControlsMac);
+      await tester.pump();
+      check();
+      // With no tablet.
       hub.sessions.remove('SERIAL-A');
       hub.phase.value = ConnectionPhase.disconnected;
       await tester.pump();
-      selectorsInPanel(direction: false);
-      expect(find.text('link_usb_desc'), findsNothing,
-        reason: 'the Mac has no link selector');
-      expect(title, findsNothing);
-      expect(_inTitle(find.text('session_extended_label')), findsOneWidget);
-      await tester.tap(_next('mode/remoteControl'));
-      await tester.pump();
-      expect(_inTitle(find.text('session_remote_label')), findsOneWidget);
+      check();
+      expect(find.byType(DeviceCard), findsNothing);
+      expect(hub.modeChanges, isEmpty);
+      expect(hub.connects, isEmpty);
+      expect(hub.stops, isEmpty);
     });
 
-    testWidgets('a tile of a tablet the Mac has had before says what it ran '
-        'as last time; pressing it still asks for the mode chosen above '
-        'the tiles', (tester) async {
+    testWidgets("a remembered device's row says it is plugged in and what "
+        'it was last time, a new one that it is new, in the language '
+        'chosen; Connect uses the remembered role', (tester) async {
       tester.view.physicalSize = const Size(1000, 2400);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
@@ -740,79 +1031,84 @@ void main() {
 
       String text(String locale, String key) =>
           AppTranslations().keys[locale]![key]!;
-      String last(String locale) => text(locale, 'home_tile_last_mode')
-          .replaceAll(
-            '@mode',
-            '${text(locale, 'session_remote_label')} · '
-                '${text(locale, 'remote_dir_mac_label')}',
-          );
-      final known = find.byKey(const ValueKey('device/SERIAL-X'));
-      final unknown = find.byKey(const ValueKey('device/SERIAL-Y'));
-      expect(last('en'), 'Last time: Remote Control · Mac → Tablet');
+      String known(String locale) =>
+          '${text(locale, 'home_row_plugged_in')} · '
+          '${text(locale, 'home_row_last_role').replaceAll('@role', text(locale, 'role_mac_controls'))}';
+      String unknown(String locale) =>
+          '${text(locale, 'home_row_plugged_in')} · ${text(locale, 'home_row_new')}';
+      expect(known('en'),
+          'Plugged in · last time: The Mac controls this device');
       expect(
-        find.descendant(of: known, matching: find.text(last('en'))),
+        find.descendant(of: _row('SERIAL-X'), matching: find.text(known('en'))),
         findsOneWidget,
       );
-      // A tablet never connected has nothing to say, nor does a card.
-      expect(find.text(last('en')), findsOneWidget);
       expect(
-        find.descendant(
-          of: unknown,
-          matching: find.textContaining('Last time'),
-        ),
-        findsNothing,
+        find.descendant(of: _row('SERIAL-Y'), matching: find.text(unknown('en'))),
+        findsOneWidget,
       );
+      expect(find.text(known('en')), findsOneWidget, reason: 'no card says it');
 
-      // The press is the user's, with the selector in front of them.
+      // The press is the user's, in the role the device is used to.
       expect(settings.nextChoice, _extended);
-      await tester.tap(known);
+      await tester.tap(_connectBtn('SERIAL-X'));
       await tester.pump();
       await tester.pump();
       expect(hub.connects, ['SERIAL-X']);
-      expect(hub.choices, [_extended]);
-      expect(settings.knownChoice('SERIAL-X'), _reverse, reason: 'not yet');
+      expect(hub.choices, [_reverse]);
+      expect(settings.knownChoice('SERIAL-X'), _reverse);
 
       Get.locale = const Locale('th');
       await tester.pumpWidget(app());
       await tester.pump();
       expect(
-        find.descendant(of: known, matching: find.text(last('th'))),
+        find.descendant(of: _row('SERIAL-X'), matching: find.text(known('th'))),
         findsOneWidget,
       );
-      expect(find.text(last('en')), findsNothing);
+      expect(
+        find.descendant(of: _row('SERIAL-Y'), matching: find.text(unknown('th'))),
+        findsOneWidget,
+      );
+      expect(find.text(known('en')), findsNothing);
     });
   });
 
-  testWidgets("the add panel's header counts places in use, not tablets "
-      'connected: a refused tablet holds one too', (tester) async {
+  testWidgets('the Devices summary counts the devices connected, and says '
+      'when every place is taken: a refused tablet is not connected but '
+      'holds one', (tester) async {
     tester.view.physicalSize = const Size(1000, 2400);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
+    await settings.setMaxTablets(2);
     final sessions = await start(tester, 2, translated: true);
+    expect(hub.cap, 2);
     sessions[1]
       ..refused.value = true
       ..phase.value = ConnectionPhase.error;
     await tester.pump();
 
-    final header = AppTranslations().keys['en']!['home_tablets_count']!
-        .replaceAll('@n', '2')
-        .replaceAll('@cap', '${hub.cap}');
-    expect(header, isNot(contains('connected')));
-    expect(find.textContaining(header), findsOneWidget);
+    final en = AppTranslations().keys['en']!;
+    final one = en['home_devices_connected']!.replaceAll('@n', '1');
+    final full = en['home_devices_at_cap']!.replaceAll('@cap', '2');
+    expect(_said(tester, _summary), '$one · $full');
+
+    // The refused one let go of: a place is free again.
+    hub.sessions.remove('SERIAL-B');
+    await tester.pump();
+    expect(_said(tester, _summary), one);
   });
 
-  testWidgets('while a tablet is between two sessions, its mode being '
-      'changed, Home offers no link selector (the hub would act on no '
-      'switch), counts its place, and does not say that no device is '
-      'attached', (tester) async {
+  testWidgets('while a tablet is between two sessions, its role being '
+      'changed, Home counts its place, does not offer it, and does not say '
+      'that nothing is attached', (tester) async {
     tester.view.physicalSize = const Size(1000, 2400);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
+    await settings.setMaxTablets(2);
     final sessions = await start(tester, 2, translated: true);
+    expect(hub.cap, 2);
     final en = AppTranslations().keys['en']!;
-    String count(int n) => en['home_tablets_count']!
-        .replaceAll('@n', '$n')
-        .replaceAll('@cap', '${hub.cap}');
+    final none = en['home_devices_connected']!.replaceAll('@n', '0');
+    final full = en['home_devices_at_cap']!.replaceAll('@cap', '2');
     final link = find.text(en['link_usb_desc']!);
 
     // A waits to retry, which is idle. B's old session has left the map.
@@ -822,14 +1118,15 @@ void main() {
     hub.sessions.remove('SERIAL-B');
     await tester.pump();
     expect(link, findsNothing, reason: 'the Mac has no link selector');
-    expect(find.textContaining(count(1)), findsOneWidget);
+    expect(_said(tester, _summary), none);
 
-    // The same, but B is on its way back in another mode.
+    // The same, but B is on its way back in another role: its place is
+    // counted, so every place is taken.
     hub.between.add('SERIAL-B');
     await tester.pump();
     expect(link, findsNothing);
-    expect(find.textContaining(count(2)), findsOneWidget);
-    expect(find.byKey(const ValueKey('device/SERIAL-B')), findsNothing);
+    expect(_said(tester, _summary), '$none · $full');
+    expect(_row('SERIAL-B'), findsNothing);
     expect(_card('SERIAL-A'), findsOneWidget);
 
     // A is unplugged and its card let go of meanwhile: no session at all,
@@ -839,16 +1136,21 @@ void main() {
     hub.availableDevices.removeWhere((d) => d.serial == 'SERIAL-A');
     await tester.pump();
     expect(hub.phase.value, ConnectionPhase.disconnected);
-    expect(find.byType(SessionCard), findsNothing);
+    expect(find.byType(DeviceCard), findsNothing);
     expect(link, findsNothing);
-    expect(find.textContaining(count(1)), findsOneWidget);
-    expect(find.text(en['home_all_attached_connected']!), findsOneWidget);
-    expect(find.text(en['device_none_detected']!), findsNothing);
+    expect(_said(tester, _summary), none, reason: "B's place, not connected");
+    expect(find.byKey(const ValueKey('home/none-connected')), findsOneWidget);
+    expect(find.byKey(const ValueKey('home/empty')), findsNothing);
+    expect(
+      _inAdd(find.text(en['home_all_attached_connected']!)),
+      findsOneWidget,
+    );
 
-    // B is back: Home's usual rule again.
+    // B is back.
     hub.between.clear();
     await tester.pump();
     expect(link, findsNothing, reason: 'the Mac has no link selector');
+    expect(_row('SERIAL-B'), findsOneWidget);
   });
 
   testWidgets("the encoder's load follows a capacity the hub learned, with "
@@ -875,7 +1177,7 @@ void main() {
     a.captured.value = const CaptureStart(displayId: 5);
     hub.budget.admit(a.nativeId, config, cap: 4);
     await tester.pump();
-    expect(find.textContaining('encoder 119% (H.265)'), findsOneWidget);
+    expect(_said(tester, _summary), endsWith(' · encoder 119% (H.265)'));
 
     // Ten seconds healthy at its ceiling, its encoder handing back every
     // frame of a changing screen: the hub learns, and Home says so.
@@ -884,7 +1186,7 @@ void main() {
       await tester.pump(const Duration(seconds: 1));
     }
     expect(hub.budget.isLearned(CodecType.h265), isTrue);
-    expect(find.textContaining('encoder 85% (H.265)'), findsOneWidget);
+    expect(_said(tester, _summary), endsWith(' · encoder 85% (H.265)'));
 
     // Nothing left to measure: no window outlives the test.
     hub.budget.release(a.nativeId);
@@ -913,26 +1215,109 @@ void main() {
     expect(hub.connects, isEmpty);
   });
 
-  testWidgets('tapping a card focuses its tablet', (tester) async {
+  testWidgets('tapping a card focuses its tablet, whose card alone has the '
+      'accent border', (tester) async {
     await start(tester, 2);
     expect(hub.focused?.key, 'SERIAL-A');
+    expect(tester.widget<DeviceCard>(_card('SERIAL-A')).focused, isTrue);
+    expect(tester.widget<DeviceCard>(_card('SERIAL-B')).focused, isFalse);
 
     await tester.tap(
-      find.descendant(of: _card('SERIAL-B'), matching: find.text('SERIAL-B')),
+      find.descendant(
+        of: _card('SERIAL-B'),
+        matching: find.text('A rather long tablet model name B'),
+      ),
     );
     await tester.pump();
 
     expect(hub.focused?.key, 'SERIAL-B');
     expect(hub.focusedKey.value, 'SERIAL-B');
     expect(hub.stops, isEmpty);
+    expect(tester.widget<DeviceCard>(_card('SERIAL-A')).focused, isFalse);
+    expect(tester.widget<DeviceCard>(_card('SERIAL-B')).focused, isTrue);
+    // As drawn: the accent border, two wide, on that card alone.
+    Border border(String key) =>
+        tester
+                .widgetList<Container>(
+                  find.descendant(
+                    of: _card(key),
+                    matching: find.byType(Container),
+                  ),
+                )
+                .map((c) => c.decoration)
+                .whereType<BoxDecoration>()
+                .firstWhere(
+                  (d) => d.borderRadius == BorderRadius.circular(18),
+                )
+                .border!
+            as Border;
+    expect(border('SERIAL-B').top.width, 2);
+    expect(
+      border('SERIAL-B').top.color,
+      const Color(0xFF00C8FF).withValues(alpha: 0.6),
+    );
+    expect(border('SERIAL-A').top.width, 1);
+    expect(border('SERIAL-A').top.color, isNot(border('SERIAL-B').top.color));
+
+    // One card alone is never drawn as focused.
+    hub.sessions.remove('SERIAL-A');
+    await tester.pump();
+    expect(tester.widget<DeviceCard>(_card('SERIAL-B')).focused, isFalse);
+  });
+
+  testWidgets('two devices of the same model are told apart by their '
+      'serial, on their cards and on their rows; a model of its own shows '
+      'none', (tester) async {
+    tester.view.physicalSize = const Size(1000, 2400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final sessions = await start(tester, 2);
+    for (final s in sessions) {
+      s.activeDevice.value = _device(s.key, 'SM-X920');
+    }
+    hub.availableDevices.value = [
+      for (final s in sessions) s.activeDevice.value!,
+      _device('SERIAL-X', 'SM-X820'),
+      _device('SERIAL-Y', 'SM-X820'),
+      _device('SERIAL-Z', 'Pixel Tablet'),
+    ];
+    await tester.pump();
+
+    String status(String key) => _said(
+      tester,
+      find.descendant(of: _card(key), matching: find.textContaining('USB-C')),
+    );
+    for (final key in ['SERIAL-A', 'SERIAL-B']) {
+      expect(status(key), startsWith('USB-C · $key · '), reason: key);
+    }
+    for (final serial in ['SERIAL-X', 'SERIAL-Y']) {
+      expect(
+        find.descendant(
+          of: _row(serial),
+          matching: find.textContaining(' · $serial · '),
+        ),
+        findsOneWidget,
+        reason: serial,
+      );
+    }
+    expect(
+      find.descendant(
+        of: _row('SERIAL-Z'),
+        matching: find.textContaining('SERIAL-Z'),
+      ),
+      findsNothing,
+    );
+
+    // B is another model now: neither card needs its serial.
+    sessions[1].activeDevice.value = _device('SERIAL-B', 'SM-X710');
+    await tester.pump();
+    expect(status('SERIAL-A'), isNot(contains('SERIAL-A')));
+    expect(status('SERIAL-B'), isNot(contains('SERIAL-B')));
   });
 
   group('the remote view', () {
     /// The card's Open remote button.
-    Finder openRemote(String key) => find.descendant(
-      of: _card(key),
-      matching: find.text('home_open_remote'),
-    );
+    Finder openRemote(String key) => find.byKey(ValueKey('$key/open-remote'));
 
     /// Back out of the remote view, to Home.
     Future<void> back(WidgetTester tester) async {
@@ -1042,13 +1427,14 @@ void main() {
       expect(Get.currentRoute, AppRoutes.remoteHost);
     });
 
-    testWidgets('an Extended tablet going live beside the selectors set to '
-        'Mac controls tablet opens nothing, and its card has no button', (
-      tester,
-    ) async {
+    testWidgets('an Extended tablet going live while what a new device gets '
+        'is The Mac controls this device opens nothing, and its card has no '
+        'button', (tester) async {
       tester.view.physicalSize = const Size(1000, 2400);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
+      await settings.setSessionMode(SessionMode.remoteControl);
+      await settings.setRemoteDirection(RemoteDirection.macControlsTab);
       final pushes = _Pushes();
       final sessions = await start(
         tester,
@@ -1056,14 +1442,9 @@ void main() {
         choice: const SessionChoice(SessionMode.extendedScreen),
         routed: pushes,
       );
-      // What the next tablet would run as, picked while this one waits to
-      // retry.
       sessions[0]
         ..retryPending.value = true
         ..phase.value = ConnectionPhase.error;
-      await settings.setSessionMode(SessionMode.remoteControl);
-      await settings.setRemoteDirection(RemoteDirection.macControlsTab);
-      expect(settings.isReverseRemote, isTrue);
       await settle(tester);
 
       // The hub shows this session, so its own phase goes live with it.
@@ -1075,72 +1456,26 @@ void main() {
       expect(hub.reverseActive.value, 0);
       expect(pushes.remote, 0);
       expect(Get.currentRoute, AppRoutes.home);
+      expect(openRemote('SERIAL-A'), findsNothing);
       expect(find.text('home_open_remote'), findsNothing);
     });
   });
 
-  group("a card's mode menu", () {
-    /// Opens [key]'s menu.
-    Future<void> open(WidgetTester tester, String key) async {
-      await tester.tap(_modeMenu(key));
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 400));
-    }
-
-    /// Presses [choice] in [key]'s open menu, and lets the menu close and
-    /// Home ask about the permissions.
-    Future<void> choose(
+  group("a card's role chips", () {
+    /// Presses [choice] on [key]'s card, and lets Home ask about the
+    /// permissions.
+    Future<void> press(
       WidgetTester tester,
       String key,
       SessionChoice choice,
     ) async {
-      await tester.tap(_modeItem(key, choice));
+      await tester.tap(_role(key, choice));
       await tester.pump();
-      await tester.pump(const Duration(milliseconds: 400));
       await tester.pump();
     }
 
-    /// Closes an open menu without picking.
-    Future<void> dismiss(WidgetTester tester) async {
-      await tester.tapAt(const Offset(4, 4));
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 400));
-    }
-
-    /// [choice]'s item in [key]'s open menu: the checked one, which says
-    /// nothing more, or one that carries [hint].
-    void expectItem(
-      WidgetTester tester,
-      String key,
-      SessionChoice choice, {
-      String? hint,
-    }) {
-      final found = _modeItem(key, choice);
-      expect(found, findsOneWidget);
-      expect(
-        find.descendant(of: found, matching: find.byIcon(Icons.check)),
-        hint == null ? findsOneWidget : findsNothing,
-        reason: '$choice',
-      );
-      expect(
-        tester
-            .widgetList<Text>(
-              find.descendant(of: found, matching: find.byType(Text)),
-            )
-            .map((text) => text.data),
-        [choice.label, ?hint],
-        reason: '$choice',
-      );
-      expect(
-        tester.widget<PopupMenuItem<SessionChoice>>(found).enabled,
-        hint != null,
-        reason: '$choice',
-      );
-    }
-
-    testWidgets('one tablet waiting to retry: moving the add panel\'s '
-        'selector alone changes nothing it runs as, and its card\'s menu '
-        'asks the hub to change that very session to Mac controls tablet', (
+    testWidgets('a tablet waiting to retry: pressing its The Mac controls '
+        'this device chip asks the hub to change that very session', (
       tester,
     ) async {
       tester.view.physicalSize = const Size(1000, 2400);
@@ -1152,35 +1487,17 @@ void main() {
         ..retryPending.value = true
         ..phase.value = ConnectionPhase.error;
       await tester.pump();
-
-      // What used to change a waiting tablet's mode: the selector.
-      await tester.tap(_next('mode/remoteControl'));
-      await tester.pump();
-      await tester.tap(_next('dir/macControlsTab'));
-      await tester.pump();
-      expect(settings.nextChoice, _reverse);
-      expect(hub.modeChanges, isEmpty);
-      expect(hub.connects, isEmpty);
-      expect(s.choice, _extended);
-      expect(s.spec.mode, SessionMode.extendedScreen);
-      expect(s.spec.isReverseRemote, isFalse);
-      expect(_inCards(find.text('session_extended_label')), findsOneWidget);
-      expect(_inTitle(find.text('session_extended_label')), findsOneWidget);
-      // Nor does its Retry take the selector's mode: it runs the session
-      // there is (the hub's connect keeps an existing session's choice).
       expect(hub.sessions['SERIAL-A'], same(s));
 
-      // What changes it now: its own card's menu.
-      await open(tester, 'SERIAL-A');
-      await choose(tester, 'SERIAL-A', _reverse);
+      await press(tester, 'SERIAL-A', _reverse);
       expect(hub.modeChanges, [('SERIAL-A', _reverse, s)]);
       expect(hub.connects, isEmpty, reason: 'the hub replaces it itself');
       expect(hub.stops, isEmpty);
       expect(hub.disconnects, 0);
     });
 
-    testWidgets('the menu offers every mode: the one the tablet runs as is '
-        'checked and cannot be pressed, the others say what the change '
+    testWidgets('a USB tablet shows all three roles: the one it runs as '
+        'highlighted and not to be pressed, the others with what the change '
         "asks of the tablet's user", (tester) async {
       tester.view.physicalSize = const Size(1000, 2400);
       tester.view.devicePixelRatio = 1;
@@ -1191,97 +1508,108 @@ void main() {
       hub.sessions['SERIAL-B'] = b;
       await tester.pump();
       expect(sessions[0].effectiveChoice.sameEffect(_extended), isTrue);
-      expect(find.byTooltip('session_change_mode'), findsNWidgets(2));
 
-      await open(tester, 'SERIAL-A');
-      expectItem(tester, 'SERIAL-A', _extended);
-      expectItem(
-        tester,
-        'SERIAL-A',
-        _driving,
-        hint: 'session_mode_hint_restart',
-      );
-      expectItem(
-        tester,
-        'SERIAL-A',
-        _reverse,
-        hint: 'session_mode_hint_to_reverse',
-      );
-      // Only this tablet's items are up.
-      expect(_modeItem('SERIAL-B', _extended), findsNothing);
-      // The checked one does nothing.
-      await tester.tap(_modeItem('SERIAL-A', _extended));
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 400));
-      expect(hub.modeChanges, isEmpty);
-      expect(_modeItem('SERIAL-A', _extended), findsOneWidget);
-      await dismiss(tester);
-      expect(_modeItem('SERIAL-A', _extended), findsNothing);
-      expect(hub.modeChanges, isEmpty);
-
-      await open(tester, 'SERIAL-B');
-      expectItem(tester, 'SERIAL-B', _reverse);
-      for (final other in [_extended, _driving]) {
-        expectItem(
-          tester,
-          'SERIAL-B',
-          other,
-          hint: 'session_mode_hint_from_reverse',
+      void expectChip(String key, SessionChoice c, {String? hint}) {
+        final chip = _chip(tester, key, c);
+        expect(chip.selected, hint == null, reason: '$key $c');
+        expect(chip.enabled, hint != null, reason: '$key $c');
+        expect(chip.hint, hint, reason: '$key $c');
+        expect(
+          find.descendant(of: _role(key, c), matching: find.text(c.roleLabel)),
+          findsOneWidget,
         );
       }
-      await choose(tester, 'SERIAL-B', _driving);
+
+      expectChip('SERIAL-A', _extended);
+      expectChip('SERIAL-A', _driving, hint: 'session_mode_hint_restart');
+      expectChip('SERIAL-A', _reverse, hint: 'session_mode_hint_to_reverse');
+      expect(find.byTooltip('session_mode_hint_restart'), findsWidgets);
+      expectChip('SERIAL-B', _reverse);
+      for (final other in [_extended, _driving]) {
+        expectChip('SERIAL-B', other, hint: 'session_mode_hint_from_reverse');
+      }
+
+      // The highlighted one does nothing.
+      await press(tester, 'SERIAL-A', _extended);
+      expect(hub.modeChanges, isEmpty);
+
+      await press(tester, 'SERIAL-B', _driving);
       expect(hub.modeChanges, [('SERIAL-B', _driving, b)]);
       expect(hub.stops, isEmpty, reason: 'the other tablet is not touched');
     });
 
-    testWidgets('opening a menu, or picking from it, focuses nothing', (
-      tester,
-    ) async {
+    testWidgets('an iPhone or iPad on USB, and any device on Wi-Fi, is '
+        'offered no The Mac controls this device chip', (tester) async {
+      tester.view.physicalSize = const Size(1000, 2400);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final sessions = await start(tester, 3, permissions: true);
+      sessions[0].platform = HostSession.helloPlatformIphone;
+      sessions[1].platform = HostSession.helloPlatformIpad;
+      hub.sessions['SERIAL-C'] = tablet('C');
+      await tester.pump();
+      for (final key in ['SERIAL-A', 'SERIAL-B']) {
+        expect(_role(key, _reverse), findsNothing, reason: key);
+        expect(_role(key, _extended), findsOneWidget, reason: key);
+        expect(_role(key, _driving), findsOneWidget, reason: key);
+      }
+      expect(
+        find.descendant(of: _card('SERIAL-A'), matching: find.byIcon(Icons.phone_iphone)),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(of: _card('SERIAL-B'), matching: find.byIcon(Icons.tablet_mac)),
+        findsOneWidget,
+      );
+      expect(_role('SERIAL-C', _reverse), findsOneWidget, reason: 'Android');
+    });
+
+    testWidgets('pressing a chip focuses nothing', (tester) async {
       tester.view.physicalSize = const Size(1000, 2400);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
       final sessions = await start(tester, 2);
       expect(hub.focused?.key, 'SERIAL-A');
 
-      await open(tester, 'SERIAL-B');
-      expect(hub.focused?.key, 'SERIAL-A');
-      await choose(tester, 'SERIAL-B', _reverse);
+      await press(tester, 'SERIAL-B', _reverse);
       expect(hub.modeChanges, [('SERIAL-B', _reverse, sessions[1])]);
       expect(hub.focused?.key, 'SERIAL-A');
       expect(hub.focusedKey.value, 'SERIAL-A');
     });
 
-    testWidgets('a menu opened before its tablet got another session under '
-        'the same key changes nothing', (tester) async {
+    testWidgets('a press that began before its tablet got another session '
+        'under the same key changes nothing', (tester) async {
       tester.view.physicalSize = const Size(1000, 2400);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
       final old = (await start(tester, 1, choice: _extended)).single;
 
-      await open(tester, 'SERIAL-A');
-      expect(_modeItem('SERIAL-A', _reverse), findsOneWidget);
+      var touch = await tester.startGesture(
+        tester.getCenter(_role('SERIAL-A', _reverse)),
+      );
       // Meanwhile the hub replaces the session (a change asked elsewhere,
-      // or a pick): the card now holds the new one, the menu is still up.
+      // or a pick): the card now holds the new one, the finger still down.
       final renewed = tablet('A', choice: _driving);
       hub.sessions['SERIAL-A'] = renewed;
       await tester.pump();
-      expect(
-        _inCards(find.text('session_remote_label · remote_dir_tab_label')),
-        findsOneWidget,
-      );
-      expect(_modeItem('SERIAL-A', _reverse), findsOneWidget);
-
-      await choose(tester, 'SERIAL-A', _reverse);
+      expect(_chip(tester, 'SERIAL-A', _driving).selected, isTrue);
+      expect(_chip(tester, 'SERIAL-A', _reverse).enabled, isTrue);
+      await touch.up();
+      await tester.pump();
+      await tester.pump();
       expect(hub.modeChanges, isEmpty);
       expect(hub.sessions['SERIAL-A'], same(renewed));
       expect(old.choice, _extended);
 
       // And with the tablet's session gone altogether.
-      await open(tester, 'SERIAL-A');
+      touch = await tester.startGesture(
+        tester.getCenter(_role('SERIAL-A', _reverse)),
+      );
       hub.sessions.remove('SERIAL-A');
       await tester.pump();
-      expect(find.byType(SessionCard), findsNothing);
-      await choose(tester, 'SERIAL-A', _reverse);
+      expect(find.byType(DeviceCard), findsNothing);
+      await touch.up();
+      await tester.pump();
       expect(hub.modeChanges, isEmpty);
 
       // The controller itself asks the hub nothing for a session that is
@@ -1290,7 +1618,7 @@ void main() {
       expect(hub.modeChanges, isEmpty);
     });
 
-    testWidgets('a card has its menu while its tablet is live or waits in '
+    testWidgets('chips can be pressed while the tablet is live or waits in '
         'error, not while it connects, nor while every tablet is being '
         'disconnected', (tester) async {
       tester.view.physicalSize = const Size(1000, 2400);
@@ -1298,39 +1626,87 @@ void main() {
       addTearDown(tester.view.reset);
       final sessions = await start(tester, 2);
       final a = sessions[0];
-      expect(_modeMenu('SERIAL-A'), findsOneWidget);
-      expect(_modeMenu('SERIAL-B'), findsOneWidget);
+      bool pressable(String key) => _chip(tester, key, _reverse).enabled;
+      expect(pressable('SERIAL-A'), isTrue);
+      expect(pressable('SERIAL-B'), isTrue);
 
       for (final phase in ConnectionPhase.values) {
         a.phase.value = phase;
         await tester.pump();
         expect(
-          _modeMenu('SERIAL-A'),
-          phase.isActive || phase == ConnectionPhase.error
-              ? findsOneWidget
-              : findsNothing,
+          pressable('SERIAL-A'),
+          phase.isActive || phase == ConnectionPhase.error,
           reason: phase.name,
         );
-        expect(_modeMenu('SERIAL-B'), findsOneWidget, reason: phase.name);
+        expect(
+          _chip(tester, 'SERIAL-A', _reverse).onPressed != null,
+          pressable('SERIAL-A'),
+          reason: phase.name,
+        );
+        // The highlighted chip is never one to press.
+        expect(_chip(tester, 'SERIAL-A', _extended).enabled, isFalse);
+        expect(pressable('SERIAL-B'), isTrue, reason: phase.name);
+        // The card's one action for the phase: Cancel while it connects,
+        // Disconnect while live, Retry beside Cancel in error.
+        final connecting = phase.isConnecting;
+        final error = phase == ConnectionPhase.error;
+        expect(
+          _action('SERIAL-A', 'common_cancel'),
+          connecting || error ? findsOneWidget : findsNothing,
+          reason: phase.name,
+        );
+        expect(
+          _action('SERIAL-A', 'common_disconnect'),
+          phase.isActive ? findsOneWidget : findsNothing,
+          reason: phase.name,
+        );
+        expect(
+          _action('SERIAL-A', 'common_retry'),
+          error ? findsOneWidget : findsNothing,
+          reason: phase.name,
+        );
+        // Plain words while it connects: no step of the protocol.
+        if (connecting) {
+          expect(
+            _said(
+              tester,
+              find.descendant(
+                of: _card('SERIAL-A'),
+                matching: find.textContaining('USB-C · '),
+              ),
+            ),
+            phase == ConnectionPhase.handshaking
+                ? 'USB-C · home_status_waiting_app'
+                : 'USB-C · home_status_connecting',
+            reason: phase.name,
+          );
+        }
       }
+      // Cancel while it connects stops that tablet alone, as the user's.
+      a.phase.value = ConnectionPhase.handshaking;
+      await tester.pump();
+      await tester.tap(_action('SERIAL-A', 'common_cancel'));
+      await tester.pump();
+      expect(hub.stops, [('SERIAL-A', true)]);
+      hub.stops.clear();
       // Refused by the encoder, or waiting out a retry: both `error`.
       a
         ..refused.value = true
         ..phase.value = ConnectionPhase.error;
       await tester.pump();
-      expect(_modeMenu('SERIAL-A'), findsOneWidget);
+      expect(pressable('SERIAL-A'), isTrue);
 
       hub.endingAll.value = true;
       await tester.pump();
-      expect(_modeMenu('SERIAL-A'), findsNothing);
-      expect(_modeMenu('SERIAL-B'), findsNothing);
+      expect(pressable('SERIAL-A'), isFalse);
+      expect(pressable('SERIAL-B'), isFalse);
       hub.endingAll.value = false;
       await tester.pump();
-      expect(_modeMenu('SERIAL-B'), findsOneWidget);
+      expect(pressable('SERIAL-B'), isTrue);
     });
 
-    testWidgets('a press on the menu button overtaken by the tablet starting '
-        'to connect opens nothing', (tester) async {
+    testWidgets('a press on a chip overtaken by the tablet starting to '
+        'connect changes nothing', (tester) async {
       tester.view.physicalSize = const Size(1000, 2400);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
@@ -1341,7 +1717,7 @@ void main() {
       await tester.pump();
 
       final touch = await tester.startGesture(
-        tester.getCenter(_modeMenu('SERIAL-A')),
+        tester.getCenter(_role('SERIAL-A', _reverse)),
       );
       // Its retry fires before the finger comes up.
       a
@@ -1350,14 +1726,13 @@ void main() {
       await tester.pump();
       await touch.up();
       await tester.pump();
-      await tester.pump(const Duration(milliseconds: 400));
+      await tester.pump();
 
-      expect(_modeItem('SERIAL-A', _reverse), findsNothing);
       expect(hub.modeChanges, isEmpty);
       expect(hub.stops, isEmpty, reason: 'nor was it the Cancel');
     });
 
-    testWidgets('a change into a mode the Mac captures or takes input for '
+    testWidgets('a change into a role the Mac captures or takes input for '
         'asks for the permissions first; a tablet the Mac would only view '
         'needs none', (tester) async {
       tester.view.physicalSize = const Size(1000, 2400);
@@ -1372,8 +1747,7 @@ void main() {
       expect(Get.currentRoute, AppRoutes.home);
 
       // Screen Recording and Accessibility are missing.
-      await open(tester, 'SERIAL-A');
-      await choose(tester, 'SERIAL-A', _driving);
+      await tester.tap(_role('SERIAL-A', _driving));
       await settle(tester);
       expect(hub.modeChanges, isEmpty);
       expect(Get.currentRoute, AppRoutes.settings);
@@ -1383,8 +1757,7 @@ void main() {
       await tester.pump(const Duration(seconds: 1));
       expect(Get.currentRoute, AppRoutes.home);
 
-      await open(tester, 'SERIAL-A');
-      await choose(tester, 'SERIAL-A', _reverse);
+      await tester.tap(_role('SERIAL-A', _reverse));
       await settle(tester);
       expect(hub.modeChanges, [('SERIAL-A', _reverse, a)]);
       expect(Get.currentRoute, AppRoutes.home);
@@ -1406,39 +1779,63 @@ void main() {
         final share = map['home_start_share']!;
         final toReverse = map['session_mode_hint_to_reverse']!
             .replaceAll('@share', share);
-        final remote = map['session_remote_label']!;
-        // The add panel's caption, the card's chip with its direction, the
-        // menu's tooltip.
-        expect(find.text(map['home_next_tablet_mode']!), findsOneWidget);
-        expect(
-          _inCards(find.text('$remote · ${map['remote_dir_tab_label']}')),
-          findsOneWidget,
-        );
-        expect(find.byTooltip(map['session_change_mode']!), findsOneWidget);
-
-        await open(tester, 'SERIAL-A');
+        for (final key in ['role_extended', 'role_controls_mac', 'role_mac_controls']) {
+          expect(_inCards(find.text(map[key]!)), findsOneWidget, reason: key);
+        }
+        expect(find.text(map['home_devices']!), findsOneWidget);
+        expect(find.text(map['home_add_device']!), findsOneWidget);
+        expect(find.text(map['home_wifi_accept']!), findsOneWidget);
         // The tablet's own button, by the name it has there.
         expect(toReverse, contains(share));
         expect(toReverse, isNot(contains('@')));
-        expect(find.text(toReverse), findsOneWidget);
+        expect(_chip(tester, 'SERIAL-A', _reverse).hint, toReverse);
         expect(
-          find.text(map['session_mode_hint_restart']!),
-          findsOneWidget,
+          _chip(tester, 'SERIAL-A', _extended).hint,
+          map['session_mode_hint_restart'],
           reason: 'to Extended screen',
         );
-        expect(
-          find.text('$remote · ${map['remote_dir_mac_label']}'),
-          findsOneWidget,
-        );
         expect(tester.takeException(), isNull);
-        await dismiss(tester);
       }
       final en = AppTranslations().keys['en']!;
       final th = AppTranslations().keys['th']!;
       for (final key in [
-        'home_next_tablet_mode',
-        'home_tile_last_mode',
-        'session_change_mode',
+        'role_extended',
+        'role_controls_mac',
+        'role_mac_controls',
+        'role_extended_desc',
+        'role_controls_mac_desc',
+        'role_mac_controls_desc',
+        'home_devices',
+        'home_devices_connected',
+        'home_devices_at_cap',
+        'home_picture_settings',
+        'home_add_device',
+        'home_row_plugged_in',
+        'home_row_last_role',
+        'home_row_new',
+        'home_row_full',
+        'home_row_full_mac',
+        'home_row_role_no_room',
+        'home_row_taken',
+        'home_connect_refused',
+        'home_row_encoder_full',
+        'home_choose_role_title',
+        'home_choose_role_hint',
+        'home_empty',
+        'home_empty_wifi_on',
+        'home_none_connected',
+        'home_wifi_accept',
+        'home_wifi_accept_desc',
+        'home_wifi_mac_at',
+        'home_wifi_not_listening',
+        'home_status_connecting',
+        'home_status_waiting_app',
+        'home_status_not_connected',
+        'home_status_retrying',
+        'home_status_waiting_you',
+        'home_status_shared',
+        'home_wifi_turned_away_mac',
+        'iphone_usb_open',
         'session_mode_hint_restart',
         'session_mode_hint_to_reverse',
         'session_mode_hint_from_reverse',
@@ -1455,7 +1852,60 @@ void main() {
         'Restarts this tablet; then tap Open View on it',
       );
       expect(th['session_mode_hint_from_reverse'], contains('@open'));
-      expect(th['home_tile_last_mode'], contains('@mode'));
+      expect(th['home_row_last_role'], contains('@role'));
+      expect(th['home_row_full'], contains('@cap'));
+      expect(th['home_devices_connected'], contains('@n'));
+      expect(th['home_devices_at_cap'], contains('@cap'));
+      expect(th['home_row_full_mac'], contains('@cap'));
+      expect(th['home_row_role_no_room'], contains('@role'));
+      expect(th['home_wifi_turned_away_mac'],
+          allOf(contains('@n'), contains('@cap')));
+      // Plain words while a tablet connects: no protocol step names, and
+      // English status words begin with a capital, like the rest.
+      expect(en['home_status_waiting_you'], contains('Retry'));
+      for (final key in [
+        'home_status_connecting',
+        'home_status_waiting_app',
+        'home_status_not_connected',
+        'home_status_retrying',
+        'home_status_waiting_you',
+        'home_status_shared',
+      ]) {
+        expect(en[key]![0], en[key]![0].toUpperCase(), reason: key);
+        expect(en[key], isNot(contains('Handshak')), reason: key);
+        expect(th[key], isNot(contains('จับมือ')), reason: key);
+      }
+      expect(th['role_mac_controls_desc'], contains('@share'));
+      expect(th['home_choose_role_title'], contains('@name'));
+      expect(th['home_wifi_mac_at'], contains('@addr'));
+      // What the old Home said, gone from both languages.
+      for (final key in [
+        'home_next_tablet_mode',
+        'home_tile_last_mode',
+        'session_change_mode',
+        'home_add_tablet',
+        'home_tablets_count',
+        'home_devices_count',
+        'home_appbar_tablets',
+        'home_at_limit',
+        'home_wifi_listen',
+        'home_wifi_listen_desc',
+        'home_wifi_listening_at',
+        'session_granted',
+        'session_granted_shared',
+        'session_settings',
+        'iphone_remote_open',
+        'wifi_host_title',
+        'wifi_host_address',
+        'wifi_host_hint',
+        'remote_dir_title',
+        'remote_dir_usb_only',
+        'device_android_client',
+        'device_none_detected',
+      ]) {
+        expect(en.containsKey(key), isFalse, reason: key);
+        expect(th.containsKey(key), isFalse, reason: key);
+      }
     });
   });
 
@@ -1485,8 +1935,247 @@ void main() {
     expect(find.text(en), findsNothing);
   });
 
-  testWidgets('three cards fit an 800 px window', (tester) async {
-    tester.view.physicalSize = const Size(800, 1400);
+  testWidgets('Picture settings opens the device sheet for that device, and '
+      'is not offered for a device that is a new one each time', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1000, 2400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await start(tester, 1);
+    const wifiKey = 'wifi:conn-1';
+    hub.sessions[wifiKey] = HostSession(
+      key: wifiKey,
+      link: LinkType.wifi,
+      beside: true,
+      pipeline: hub.pipeline,
+      adb: adb,
+      socket: SocketService(),
+    )..phase.value = ConnectionPhase.streaming;
+    hub.sessions['synth-1'] = HostSession(
+      key: 'synth-1',
+      link: LinkType.usb,
+      serial: 'synth-1',
+      pipeline: hub.pipeline,
+      adb: adb,
+      socket: SocketService(),
+    )..phase.value = ConnectionPhase.streaming;
+    await tester.pump();
+
+    expect(find.byKey(const ValueKey('$wifiKey/settings')), findsNothing);
+    expect(find.byKey(const ValueKey('synth-1/settings')), findsNothing);
+    final open = find.byKey(const ValueKey('SERIAL-A/settings'));
+    expect(
+      find.descendant(of: open, matching: find.text('home_picture_settings')),
+      findsOneWidget,
+    );
+    await tester.tap(open);
+    await dialog(tester);
+    expect(find.byType(DeviceSettingsSheet), findsOneWidget);
+    expect(
+      tester.widget<DeviceSettingsSheet>(find.byType(DeviceSettingsSheet)).deviceKey,
+      'SERIAL-A',
+    );
+    expect(hub.focused?.key, 'SERIAL-A');
+    expect(hub.connects, isEmpty);
+  });
+
+  testWidgets('with nothing attached and no session, Home says what to do '
+      'and connects nothing', (tester) async {
+    await start(tester, 0, permissions: true);
+
+    expect(find.byKey(const ValueKey('home/empty')), findsOneWidget);
+    expect(find.text('home_empty'), findsOneWidget);
+    expect(find.byKey(const ValueKey('home/none-connected')), findsNothing);
+    expect(find.byType(DeviceCard), findsNothing);
+    expect(find.byType(AddDevicePanel), findsOneWidget);
+    expect(_inAdd(find.text('home_all_attached_connected')), findsNothing);
+    expect(_summary, findsNothing, reason: 'no place in use');
+    expect(hub.connects, isEmpty);
+
+    // Wi-Fi already accepted: the empty state does not ask for it.
+    await settings.setWifiListen(true);
+    await tester.pump();
+    expect(find.text('home_empty'), findsNothing);
+    expect(find.text('home_empty_wifi_on'), findsOneWidget);
+    await settings.setWifiListen(false);
+    await tester.pump();
+    expect(find.text('home_empty'), findsOneWidget);
+
+    // A device plugged in: the empty state goes, the row is there.
+    hub.availableDevices.value = [_device('SERIAL-X', 'Tablet X')];
+    await tester.pump();
+    expect(find.byKey(const ValueKey('home/empty')), findsNothing);
+    expect(find.byKey(const ValueKey('home/none-connected')), findsOneWidget);
+    expect(_row('SERIAL-X'), findsOneWidget);
+    expect(hub.connects, isEmpty);
+  });
+
+  group('iPhones over USB', () {
+    testWidgets('one plugged in gets a card whose Open screen opens its '
+        'page with its id; none listed, no card', (tester) async {
+      tester.view.physicalSize = const Size(1000, 2400);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final phones = Get.put<IosScreenChannel>(_Phones()) as _Phones;
+      await start(tester, 0, permissions: true, routed: _Pushes());
+      final home = Get.find<HomeController>();
+      expect(phones.listings, 1, reason: 'listed as Home opens');
+      expect(find.byKey(const ValueKey('iphone-usb/cam-1')), findsNothing);
+      expect(find.byKey(const ValueKey('home/empty')), findsOneWidget);
+
+      phones.list = const [
+        IosScreenDevice('cam-2', 'iPad Pro'),
+        IosScreenDevice('cam-1', 'iPhone 17 Pro'),
+      ];
+      await home.refreshIosDevices();
+      await tester.pump();
+      final card = find.byKey(const ValueKey('iphone-usb/cam-1'));
+      expect(card, findsOneWidget);
+      expect(
+        find.descendant(of: card, matching: find.text('iPhone 17 Pro')),
+        findsOneWidget,
+      );
+      // One icon for both: the name is the user's, and says nothing sure
+      // about the kind (an iPad renamed "Studio" is still an iPad).
+      for (final id in ['cam-1', 'cam-2']) {
+        expect(
+          find.descendant(
+            of: find.byKey(ValueKey('iphone-usb/$id')),
+            matching: find.byIcon(Icons.phonelink),
+          ),
+          findsOneWidget,
+          reason: id,
+        );
+      }
+      // Sorted by name, above the add panel; no place under the cap.
+      expect(
+        tester.getTopLeft(find.byKey(const ValueKey('iphone-usb/cam-2'))).dy,
+        lessThan(tester.getTopLeft(card).dy),
+      );
+      expect(
+        tester.getBottomLeft(card).dy,
+        lessThan(tester.getTopLeft(find.byType(AddDevicePanel)).dy),
+      );
+      expect(find.byKey(const ValueKey('home/empty')), findsNothing);
+      expect(_inAdd(find.text('home_all_attached_connected')), findsOneWidget);
+      expect(hub.heldPlaces, isEmpty);
+
+      await tester.tap(find.byKey(const ValueKey('iphone-usb/cam-1/open')));
+      await settle(tester);
+      expect(Get.currentRoute, AppRoutes.iphoneRemote);
+      expect(Get.arguments, {'id': 'cam-1'});
+      Get.back<void>();
+      await settle(tester);
+      expect(Get.currentRoute, AppRoutes.home);
+
+      // Unplugged: its card goes.
+      phones.list = const [];
+      await home.refreshIosDevices();
+      await tester.pump();
+      expect(find.byKey(const ValueKey('iphone-usb/cam-1')), findsNothing);
+      expect(find.byKey(const ValueKey('home/empty')), findsOneWidget);
+    });
+
+    testWidgets("the card's status says whether touch works only once it "
+        'was tried', (tester) async {
+      final phones = Get.put<IosScreenChannel>(_Phones()) as _Phones;
+      phones.list = const [IosScreenDevice('cam-1', 'iPhone')];
+      final touch = Get.put(IosTouchService());
+      await start(tester, 0);
+      final status = find.descendant(
+        of: find.byKey(const ValueKey('iphone-usb/cam-1')),
+        matching: find.textContaining('USB-C · role_mac_controls'),
+      );
+      String line() => tester.widget<Text>(status).data!;
+
+      expect(line(), 'USB-C · role_mac_controls');
+      touch.state.value = IosTouchState.ready;
+      await tester.pump();
+      expect(line(), 'USB-C · role_mac_controls · iphone_remote_touch_ready');
+      for (final off in [IosTouchState.noRunner, IosTouchState.noDevice]) {
+        touch.state.value = off;
+        await tester.pump();
+        expect(line(), 'USB-C · role_mac_controls · iphone_remote_touch_off');
+      }
+      touch.state.value = IosTouchState.idle;
+      await tester.pump();
+      expect(line(), 'USB-C · role_mac_controls');
+
+      // A second one plugged in: the touch service is bound to one of
+      // them, which the capture devices do not name, so neither card says
+      // touch works.
+      touch.state.value = IosTouchState.ready;
+      phones.list = const [
+        IosScreenDevice('cam-1', 'iPhone'),
+        IosScreenDevice('cam-2', 'iPad'),
+      ];
+      await Get.find<HomeController>().refreshIosDevices();
+      await tester.pump();
+      for (final id in ['cam-1', 'cam-2']) {
+        expect(
+          find.descendant(
+            of: find.byKey(ValueKey('iphone-usb/$id')),
+            matching: find.text('USB-C · role_mac_controls'),
+          ),
+          findsOneWidget,
+          reason: id,
+        );
+      }
+      expect(find.textContaining('iphone_remote_touch'), findsNothing);
+    });
+
+    testWidgets('the list is polled only while Home is the route shown and '
+        "the app is in front, and stops when Home's controller closes", (
+      tester,
+    ) async {
+      final phones = Get.put<IosScreenChannel>(_Phones()) as _Phones;
+      await start(
+        tester,
+        0,
+        routed: _Pushes(),
+        iosPoll: const Duration(seconds: 1),
+      );
+      final home = Get.find<HomeController>();
+      final first = phones.listings;
+      expect(first, greaterThanOrEqualTo(1));
+      await tester.pump(const Duration(seconds: 1));
+      expect(phones.listings, first + 1);
+
+      // Under another page: no listing.
+      Get.toNamed<void>(AppRoutes.settings);
+      await settle(tester);
+      var before = phones.listings;
+      await tester.pump(const Duration(seconds: 3));
+      expect(phones.listings, before);
+      Get.back<void>();
+      await settle(tester);
+      before = phones.listings;
+      await tester.pump(const Duration(seconds: 1));
+      expect(phones.listings, before + 1);
+
+      // In the background: none either; back in front lists at once.
+      home.didChangeAppLifecycleState(AppLifecycleState.hidden);
+      before = phones.listings;
+      await tester.pump(const Duration(seconds: 3));
+      expect(phones.listings, before);
+      home.didChangeAppLifecycleState(AppLifecycleState.resumed);
+      await tester.pump();
+      expect(phones.listings, before + 1);
+
+      // Home's controller closes: its timer goes with it (a test fails
+      // with a timer still pending).
+      await Get.delete<HomeController>(force: true);
+      await tester.pumpWidget(const SizedBox());
+      before = phones.listings;
+      await tester.pump(const Duration(seconds: 3));
+      expect(phones.listings, before);
+    });
+  });
+
+  testWidgets('three cards fit an 800×600 window, and the Wi-Fi row is at '
+      'the end of the list', (tester) async {
+    tester.view.physicalSize = const Size(800, 600);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
     final sessions = await start(tester, 3, translated: true);
@@ -1500,19 +2189,31 @@ void main() {
       ..notice.value = 'error_extend_wrong_display';
     sessions[2]
       ..errorKey.value = 'error_usb_unverified_client'
+      ..refused.value = true
       ..phase.value = ConnectionPhase.error;
     await tester.pump();
 
-    expect(find.byType(SessionCard), findsNWidgets(3));
+    final list = find.byType(Scrollable).first;
+    for (final key in ['SERIAL-A', 'SERIAL-B', 'SERIAL-C']) {
+      await tester.scrollUntilVisible(_card(key), 200, scrollable: list);
+      expect(tester.takeException(), isNull, reason: key);
+    }
+    await tester.scrollUntilVisible(
+      _wifiRow,
+      200,
+      scrollable: list,
+    );
+    await tester.pump();
+    expect(_wifiRow, findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
-  // Narrower than that the card's top row used to run over its edge once
-  // the chip named the direction too and a menu button followed it.
+  // The card's top row (name, status, action) and its chips at a narrow
+  // window.
   for (final language in ['en', 'th']) {
-    testWidgets("a card's top row fits a 560 px window with the longest "
-        'mode on its chip, which is cut short there and whole in a wide '
-        'window ($language)', (tester) async {
+    testWidgets('at 560 px a card keeps room for its name, its status ends '
+        'short instead of running over, and its role chips wrap onto more '
+        'lines than in a wide window ($language)', (tester) async {
       tester.view.physicalSize = const Size(560, 1800);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
@@ -1525,25 +2226,33 @@ void main() {
       );
       Get.locale = Locale(language);
       await tester.pumpWidget(app());
+      sessions[0]
+        ..latencyMs.value = 8
+        ..refreshRateHz.value = 120
+        ..streamBitrate.value = 42000000
+        ..granted.value = const GrantedCapture(
+          width: 2960,
+          height: 1848,
+          fps: 120,
+          shared: true,
+        );
       sessions[1]
         ..errorKey.value = 'error_usb_unverified_client'
+        ..retryPending.value = true
         ..phase.value = ConnectionPhase.error;
       await tester.pump();
 
-      final words = AppTranslations().keys[language]!;
-      final longest =
-          '${words['session_remote_label']} · ${words['remote_dir_mac_label']}';
-      bool cut(String key) => tester
-          .renderObject<RenderParagraph>(
-            find.descendant(of: _card(key), matching: find.text(longest)),
-          )
-          .didExceedMaxLines;
-      expect(find.byType(SessionCard), findsNWidgets(2));
+      /// How many lines [key]'s chips take.
+      int lines(String key) => {
+        for (final c in SessionChoice.all)
+          tester.getTopLeft(_role(key, c)).dy,
+      }.length;
+
+      expect(find.byType(DeviceCard), findsNWidgets(2));
       expect(tester.takeException(), isNull);
+      final narrow = {for (final k in ['SERIAL-A', 'SERIAL-B']) k: lines(k)};
       for (final key in ['SERIAL-A', 'SERIAL-B']) {
-        expect(cut(key), isTrue, reason: key);
-        expect(_modeMenu(key), findsOneWidget, reason: key);
-        // The tablet's name keeps some room beside the chips.
+        // The tablet's name keeps some room beside its action.
         expect(
           tester
               .getSize(
@@ -1557,25 +2266,64 @@ void main() {
           reason: key,
         );
       }
+      // The live one's status line is long: cut short, not overflowing.
+      final status = find.descendant(
+        of: _card('SERIAL-A'),
+        matching: find.textContaining('2960×1848'),
+      );
+      expect(tester.widget<Text>(status).overflow, TextOverflow.ellipsis);
+      expect(tester.widget<Text>(status).maxLines, 2);
+      // All of it, in order: link, encoded size, rate, round trip, the
+      // Wi-Fi-style bitrate, and that the encoder is shared.
+      final words = AppTranslations().keys[language]!;
+      expect(
+        _said(tester, status),
+        'USB-C · 2960×1848 · 120 fps · 8 ms · 42 Mbps · '
+        '${words['home_status_shared']}',
+      );
+      expect(
+        _said(
+          tester,
+          find.descendant(
+            of: _card('SERIAL-B'),
+            matching: find.textContaining('USB-C'),
+          ),
+        ),
+        'USB-C · ${words['home_status_retrying']}',
+      );
+      // Picture settings beside Open remote keeps its whole label: no share
+      // of the row goes to blank space.
+      for (final (button, text) in [
+        ('settings', words['home_picture_settings']!),
+        ('open-remote', words['home_open_remote']!),
+      ]) {
+        final label = tester.renderObject<RenderParagraph>(
+          find.descendant(
+            of: find.descendant(
+              of: find.byKey(ValueKey('SERIAL-A/$button')),
+              matching: find.text(text),
+            ),
+            matching: find.byType(RichText),
+          ),
+        );
+        expect(label.didExceedMaxLines, isFalse, reason: button);
+      }
 
-      // With room for it the chip says it all, as before.
       tester.view.physicalSize = const Size(1000, 1800);
       await tester.pump();
       expect(tester.takeException(), isNull);
-      expect(cut('SERIAL-A'), isFalse);
-      expect(cut('SERIAL-B'), isFalse);
+      for (final key in ['SERIAL-A', 'SERIAL-B']) {
+        expect(narrow[key], greaterThan(lines(key)), reason: key);
+      }
     });
   }
 
-  testWidgets('three cards with the longest mode on their chips, the add '
-      "panel's selectors and an open menu fit an 800 px window, in Thai", (
-    tester,
-  ) async {
-    tester.view.physicalSize = const Size(800, 1800);
+  testWidgets('three cards in Thai, The Mac controls this device on each, a '
+      'remembered row with its last role, rows held back by the cap, and the '
+      'role chooser fit 800×600 and 560×1000', (tester) async {
+    tester.view.physicalSize = const Size(800, 600);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
-    await settings.setSessionMode(SessionMode.remoteControl);
-    await settings.setRemoteDirection(RemoteDirection.macControlsTab);
     await settings.rememberDevice(
       'SERIAL-X',
       model: 'Tablet X',
@@ -1589,62 +2337,141 @@ void main() {
     hub.availableDevices.value = [
       ...hub.availableDevices,
       _device('SERIAL-X', 'Tablet X'),
+      _device('SERIAL-Y', 'Tablet Y'),
     ];
     sessions[2]
       ..errorKey.value = 'error_usb_unverified_client'
       ..phase.value = ConnectionPhase.error;
+    Get.find<HomeController>().localAddresses.value = [
+      '192.168.1.5',
+      '10.0.0.7',
+    ];
+    await settings.setWifiListen(true);
+    hub.wifiTurnedAway.value = 2;
     await tester.pump();
 
     final th = AppTranslations().keys['th']!;
-    final longest =
-        '${th['session_remote_label']} · ${th['remote_dir_mac_label']}';
-    expect(find.byType(SessionCard), findsNWidgets(3));
-    expect(_inCards(find.text(longest)), findsNWidgets(3));
-    expect(find.text(th['home_next_tablet_mode']!), findsOneWidget);
-    expect(_inPicker(find.text(th['remote_dir_title']!)), findsOneWidget);
+    // Three tablets past the conservative estimate's two places: the Mac
+    // sets the cap, not Maximum tablets (4), so the reason does not send
+    // the user to Settings, where nothing could raise it.
+    expect(hub.cap, 2);
+    expect(settings.maxTablets, 4);
+    final full = th['home_row_full_mac']!.replaceAll('@cap', '2');
+    expect(full, isNot(contains(th['settings_title'] ?? 'การตั้งค่า')));
+    final last =
+        '${th['home_row_plugged_in']} · '
+        '${th['home_row_last_role']!.replaceAll('@role', th['role_mac_controls']!)}';
+    final list = find.byType(Scrollable).first;
+    for (final s in sessions) {
+      await tester.scrollUntilVisible(_card(s.key), 200, scrollable: list);
+      expect(_chip(tester, s.key, _reverse).selected, isTrue);
+      expect(tester.takeException(), isNull, reason: s.key);
+    }
+    expect(tester.takeException(), isNull);
+    await tester.scrollUntilVisible(_wifiRow, 200, scrollable: list);
+    await tester.pump();
     expect(
-      _inPicker(
-        find.text(th['home_tile_last_mode']!.replaceAll('@mode', longest)),
+      find.descendant(
+        of: _wifiRow,
+        matching: find.textContaining(
+          th['home_wifi_turned_away_mac']!
+              .replaceAll('@n', '2')
+              .replaceAll('@cap', '2'),
+        ),
       ),
       findsOneWidget,
     );
+    expect(
+      find.descendant(of: _row('SERIAL-X'), matching: find.text(last)),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: _row('SERIAL-X'), matching: find.text(full)),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: _row('SERIAL-Y'), matching: find.text(full)),
+      findsOneWidget,
+    );
+    expect(_pressable(tester, _chooseBtn('SERIAL-Y')), isFalse);
     expect(tester.takeException(), isNull);
 
-    await tester.tap(_modeMenu('SERIAL-C'));
+    // A place frees up: the chooser of the new one, at both sizes.
+    hub.budget.estimate = EncoderEstimate.forChip('Apple M3 Pro');
+    await settings.setMaxTablets(4);
+    expect(hub.cap, 4);
+    hub.availableDevices.refresh();
     await tester.pump();
-    await tester.pump(const Duration(milliseconds: 400));
-    expect(_modeItem('SERIAL-C', _extended), findsOneWidget);
+    expect(_pressable(tester, _chooseBtn('SERIAL-Y')), isTrue);
+    await tester.tap(_chooseBtn('SERIAL-Y'));
+    await dialog(tester);
+    expect(_option('SERIAL-Y', _reverse), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    tester.view.physicalSize = const Size(560, 1000);
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+    await tester.tap(find.byKey(const ValueKey('choose/SERIAL-Y/cancel')));
+    await dialog(tester);
+    expect(hub.connects, isEmpty);
+    await tester.scrollUntilVisible(_card('SERIAL-A'), -200, scrollable: list);
+    await tester.pump();
     expect(tester.takeException(), isNull);
   });
 
-  group('Listen on Wi-Fi', () {
-    testWidgets("the add panel's switch turns listening on and off, and says "
-        'where the Mac listens and how many devices it turned away',
-        (tester) async {
+  group('Accept devices over Wi-Fi', () {
+    testWidgets("the Add a device panel's last row turns listening on and "
+        'off, and says where the Mac is, whether it accepts yet, and how '
+        'many devices it turned away', (tester) async {
       tester.view.physicalSize = const Size(1000, 2400);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
       await start(tester, 1, permissions: true);
+      hub.availableDevices.value = [
+        ...hub.availableDevices,
+        _device('SERIAL-X', 'Tablet X'),
+      ];
+      final home = Get.find<HomeController>();
+      home.localAddresses.value = [];
+      await tester.pump();
       final toggle = find.descendant(
-          of: _next('wifi-listen'), matching: find.byType(Switch));
+        of: _wifiRow,
+        matching: find.byType(Switch),
+      );
+      Finder says(String text) =>
+          find.descendant(of: _wifiRow, matching: find.textContaining(text));
       expect(tester.widget<Switch>(toggle).value, isFalse);
-      expect(find.text('home_wifi_listen_desc'), findsOneWidget);
+      expect(says('home_wifi_accept_desc · wifi_host_no_network'), findsOneWidget);
+      expect(says('home_wifi_not_listening'), findsNothing);
+      // Below every row of the panel.
+      expect(
+        tester.getTopLeft(_wifiRow).dy,
+        greaterThan(tester.getBottomLeft(_row('SERIAL-X')).dy),
+      );
 
       await tester.tap(toggle);
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 300));
       expect(settings.wifiListen, isTrue);
       expect(tester.widget<Switch>(toggle).value, isTrue);
+      expect(says('home_wifi_not_listening'), findsOneWidget);
 
-      Get.find<HomeController>().localAddresses.value = ['192.168.1.5'];
+      home.localAddresses.value = ['192.168.1.5'];
       hub.listening.value = true;
       hub.wifiTurnedAway.value = 2;
       await tester.pump();
-      expect(find.textContaining('home_wifi_listening_at'), findsOneWidget);
-      expect(find.textContaining('home_wifi_turned_away'), findsOneWidget);
+      expect(says('home_wifi_accept_desc · home_wifi_mac_at'), findsOneWidget);
+      expect(says('home_wifi_not_listening'), findsNothing);
+      expect(says('home_wifi_turned_away'), findsOneWidget);
+
+      await tester.tap(toggle);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(settings.wifiListen, isFalse);
+      expect(says('home_wifi_turned_away'), findsNothing);
     });
 
-    testWidgets("a Wi-Fi device's card stops it like a tablet's", (tester) async {
+    testWidgets("a Wi-Fi device's card stops it like a tablet's, and offers "
+        'no The Mac controls this device chip', (tester) async {
       tester.view.physicalSize = const Size(1000, 2400);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
@@ -1667,7 +2494,18 @@ void main() {
       await tester.pump();
 
       expect(_inCards(find.text('iPhone')), findsOneWidget);
-      expect(_inCards(find.text('192.168.1.20')), findsOneWidget);
+      final status = find.descendant(
+        of: _card(key),
+        matching: find.textContaining('192.168.1.20'),
+      );
+      expect(status, findsOneWidget);
+      expect(tester.widget<Text>(status).data, startsWith('Wi-Fi · 192.168.1.20'));
+      expect(_role(key, _extended), findsOneWidget);
+      expect(_role(key, _driving), findsOneWidget);
+      expect(_role(key, _reverse), findsNothing);
+      expect(_chip(tester, key, _extended).selected, isTrue);
+      expect(_chip(tester, key, _driving).enabled, isTrue);
+
       await tester.tap(_action(key, 'common_disconnect'));
       await tester.pump();
       expect(hub.stops, [(key, true)]);

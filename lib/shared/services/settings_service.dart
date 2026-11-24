@@ -76,7 +76,8 @@ class SettingsService extends GetxService {
   final codecRx = CodecType.h264.obs;
   // Reactive UI language code ('en' / 'th'); drives the language picker.
   final localeCode = 'en'.obs;
-  // Active session mode (chosen via the selector on Home). Reactive so UI reflects it
+  // The role a new device gets by default (the last one picked in Home's
+  // role chooser), with [remoteDirectionRx]. Reactive so UI reflects it
   // live; the host forces Mirror capture while in remote-control mode.
   final sessionModeRx = SessionMode.extendedScreen.obs;
   // Which side drives a remote-control session. Only meaningful when
@@ -245,10 +246,12 @@ class SettingsService extends GetxService {
     await _prefs.setString(_keyRemoteDirection, dir.name);
   }
 
-  /// Host: the mode the next session made is asked to be, as Home's selectors
-  /// stand (the saved session mode and remote direction; the direction is
-  /// kept for Extended screen too). A session's link still has its say
-  /// ([SessionChoice.effective]).
+  /// Host: the role a new device gets when nothing else says: the last one
+  /// picked in Home's role chooser (the saved session mode and remote
+  /// direction; the direction is kept for Extended screen too). Also the
+  /// auto-connect's fallback for a tablet the Mac has not had before, and
+  /// the Wi-Fi listener's after [wifiListenChoice]. A session's link still
+  /// has its say ([SessionChoice.effective]).
   SessionChoice get nextChoice => SessionChoice(sessionMode, remoteDirection);
 
   /// The direction a remote-control session actually runs in. Mac-controls-
@@ -729,8 +732,8 @@ class SettingsService extends GetxService {
   }
 
   /// Host: the mode the device that joins over Wi-Fi beside the USB tablets
-  /// was last asked to run in (its card's mode menu); null until then, when
-  /// it takes the selectors' ([nextChoice]). Kept apart from
+  /// was last asked to run in (its card's role chips); null until then,
+  /// when it takes [nextChoice]. Kept apart from
   /// [knownChoice], which is for tablets known by their adb serial.
   SessionChoice? get wifiListenChoice => SessionChoice.fromNames(
     _prefs.getString(_keyWifiListenMode),

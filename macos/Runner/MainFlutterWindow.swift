@@ -18,6 +18,9 @@ class MainFlutterWindow: NSWindow {
     // Reverse-remote decoder needs a registrar for the texture registry.
     RemoteVideoPlugin.register(
       with: flutterViewController.registrar(forPlugin: "RemoteVideoPlugin"))
+    // An iPhone's or iPad's screen over USB, into a texture.
+    IosScreenPlugin.register(
+      with: flutterViewController.registrar(forPlugin: "IosScreenPlugin"))
 
     // Start Dart now, with every plugin registered, instead of when the
     // window first appears (FlutterViewController launches the engine in

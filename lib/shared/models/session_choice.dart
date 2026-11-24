@@ -1,3 +1,4 @@
+import 'package:get/get.dart';
 import 'package:extendedscreen/shared/models/link_type.dart';
 import 'package:extendedscreen/shared/models/session_mode.dart';
 
@@ -49,6 +50,21 @@ class SessionChoice {
   String get label => mode == SessionMode.remoteControl
       ? '${mode.label} · ${direction.label}'
       : mode.label;
+
+  /// The choice as a role, in plain words, as Home's cards and its role
+  /// chooser offer it: what the device is for. Resolved at read time.
+  String get roleLabel => isReverse
+      ? 'role_mac_controls'.tr
+      : mode == SessionMode.remoteControl
+          ? 'role_controls_mac'.tr
+          : 'role_extended'.tr;
+
+  /// One line on what [roleLabel] means for the device and its user.
+  String get roleDescription => isReverse
+      ? 'role_mac_controls_desc'.trParams({'share': 'home_start_share'.tr})
+      : mode == SessionMode.remoteControl
+          ? 'role_controls_mac_desc'.tr
+          : 'role_extended_desc'.tr;
 
   /// A choice from the enum names it is stored under. An unknown mode is no
   /// choice; an unknown or missing direction is the default one.

@@ -230,11 +230,13 @@ abstract class BaseConnectionManager extends GetxService
   /// when null the last-used device (or the first detected) is chosen.
   Future<void> connect({String? serial});
 
-  /// [connect], with the mode the session it makes is to run as. The host's
-  /// hub does all its connecting here ([connect] is its user's path, with
-  /// the mode Home's selectors show); anything with one link and no mode of
-  /// its own to give (the client, a host session) just connects.
-  @protected
+  /// [connect], with the role the session it makes is to run as. The
+  /// host's hub does all its connecting here: Home's Add a device panel
+  /// connects a device with its role (its remembered one,
+  /// [SettingsService.knownChoice], or the one picked in the role chooser),
+  /// and `connect` is `connectWith(serial, choice: nextChoice)`. Anything
+  /// with one link and no role of its own to give (the client, a host
+  /// session) just connects.
   Future<void> connectWith(String? serial, {SessionChoice? choice}) =>
       connect(serial: serial);
 

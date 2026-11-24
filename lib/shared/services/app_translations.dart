@@ -91,15 +91,8 @@ class AppTranslations extends Translations {
     'link_usb_desc': 'Through the cable. Lowest delay.',
     'link_wifi_label': 'Wi-Fi',
     'link_wifi_desc': 'No cable, same network. Pair over USB once.',
-    'wifi_host_title': 'Wi-Fi link',
-    'wifi_host_address': 'This Mac: @address  •  port @port',
     'wifi_host_no_network':
         'This Mac has no network address. Join a Wi-Fi network first.',
-    'wifi_host_hint':
-        'Press Connect above if this Mac is not waiting yet, then choose '
-            'Wi-Fi on the tablet. A tablet can connect only after it has been '
-            'connected to this Mac over USB once, which pairs them. A 5 GHz '
-            'or 6 GHz network works best.',
     'wifi_client_title': 'Mac over Wi-Fi',
     'wifi_client_paired': 'Paired with @name',
     'wifi_client_not_paired':
@@ -117,7 +110,6 @@ class AppTranslations extends Translations {
     'wifi_client_address_label': 'Mac address (optional)',
     'wifi_client_address_hint':
         'Found automatically. Fill in only if it is not, e.g. 192.168.1.20',
-    'remote_dir_usb_only': 'USB only',
 
     // ── Session modes ───────────────────────────────────────────────────
     'session_extended_label': 'Extended Screen',
@@ -125,7 +117,6 @@ class AppTranslations extends Translations {
     'session_remote_label': 'Remote Control',
     'session_remote_desc':
         'Control your Mac\'s desktop from the tablet, like a remote session.',
-    'remote_dir_title': 'Direction',
     'remote_dir_tab_label': 'Tablet → Mac',
     'remote_dir_tab_desc': 'Control the Mac from the tablet.',
     'remote_dir_mac_label': 'Mac → Tablet',
@@ -153,8 +144,27 @@ class AppTranslations extends Translations {
     'home_sharing': 'Sharing your screen',
     'home_sharing_hint':
         'The Mac can now see and control this tablet. Disconnect to stop.',
-    'home_add_tablet': 'Add a tablet',
-    'session_settings': 'Settings for this device',
+    'iphone_remote_title': 'iPhone over USB',
+    'iphone_remote_no_device': 'Plug an iPhone or iPad in over USB and unlock it.',
+    'iphone_remote_waiting':
+        "Waiting for the iPhone's screen. Unlock it: it sends a picture when something on it changes.",
+    'iphone_remote_permission':
+        'macOS offers the iPhone screen as a camera. Allow Camera for Extended Screen in System Settings → Privacy & Security → Camera, then try again.',
+    'iphone_remote_failed': "The iPhone's screen could not be shown.",
+    'iphone_remote_runner_missing':
+        'Touches need the TouchRunner on the iPhone: open ios/TouchRunner/TouchRunner.xcodeproj in Xcode and run its test (testServe) on the iPhone.',
+    'iphone_remote_home': 'Home Screen',
+    'iphone_remote_home_failed':
+        'The iPhone did not go to the Home Screen: start TouchRunner again from ios/TouchRunner in Xcode.',
+    'iphone_remote_touch_ready': 'Touch on',
+    'iphone_remote_touch_off': 'Touch off',
+    'iphone_probe_menu': 'Latency probe',
+    'iphone_probe_run_tap': '@n taps at the last click',
+    'iphone_probe_run_swipe': '@n swipes up and down',
+    'iphone_probe_stats': 'n=@n p50 @p50 ms p90 @p90 ms',
+    'iphone_probe_felt': 'Click → change',
+    'iphone_probe_last': 'last',
+    'iphone_probe_running': 'running @done/@n',
     'device_settings_title': 'Settings for @name',
     'device_settings_restarts':
         'For this device only. A change restarts this device, not the others.',
@@ -168,27 +178,55 @@ class AppTranslations extends Translations {
     'device_settings_max_fps': 'Highest frame rate',
     'device_settings_no_limit': 'No limit of its own',
     'device_settings_reset': 'Use the app-wide settings',
-    'home_wifi_listen': 'Listen on Wi-Fi',
-    'home_wifi_listen_desc':
-        'Paired iPhones and tablets can join over Wi-Fi beside the USB tablets',
-    'home_wifi_listening_at': 'Listening on Wi-Fi at @addr',
     'home_wifi_turned_away':
         '@n device(s) turned away: every place is taken (Settings → Tablets)',
+    'home_wifi_turned_away_mac':
+        '@n device(s) turned away: this Mac can drive @cap at once',
     'session_wifi_beside': 'Wi-Fi device',
-    'home_tablets_count': '@n of @cap tablet slots in use',
     'home_encoder_load': 'encoder @load% (@codec)',
-    'home_appbar_tablets': '@n tablets',
-    'home_at_limit': 'No room for another tablet right now',
     'home_disconnecting': 'Disconnecting…',
-    'home_all_attached_connected': 'Every attached tablet is connected',
-    'session_granted': 'Encoding @size at up to @fps fps',
-    'session_granted_shared':
-        'Encoding @size at up to @fps fps, sharing this Mac\'s encoder',
+    'home_devices': 'Devices',
+    'home_devices_connected': '@n connected',
+    'home_devices_at_cap': 'full: @cap at once',
+    'home_empty': 'Plug a tablet or iPhone in with a USB-C cable, or turn on Wi-Fi below.',
+    'home_empty_wifi_on':
+        'Plug a tablet or iPhone in with a USB-C cable, or open the app on a paired device.',
+    'home_none_connected': 'Nothing is connected yet. Connect a device below.',
+    'home_all_attached_connected': 'Every plugged-in device is connected',
+    'role_extended': 'Second display for the Mac',
+    'role_controls_mac': 'Control the Mac',
+    'role_mac_controls': 'The Mac controls this device',
+    'role_extended_desc': "The Mac's desktop extends onto it",
+    'role_controls_mac_desc': "It shows the Mac's screen; touch it to work the Mac",
+    'role_mac_controls_desc': 'The Mac shows its screen and works it; tap @share on it',
+    'home_picture_settings': 'Picture settings',
+    'home_add_device': 'Add a device',
+    'home_row_plugged_in': 'Plugged in',
+    'home_row_emulator': 'Emulator',
+    'home_row_last_role': 'last time: @role',
+    'home_row_new': 'new: you choose what it does',
+    'home_row_full': 'All @cap places are in use (Settings → Tablets)',
+    'home_row_full_mac': 'This Mac can drive @cap at once',
+    'home_row_role_no_room':
+        "No room on the Mac's encoder for “@role” now: Connect lets you pick another role",
+    'home_row_taken': 'It is already in Devices above',
+    'home_connect_refused': 'Not connected',
+    'home_row_encoder_full': "The Mac's encoder has no room for this now",
+    'home_choose_role_title': 'What should @name do?',
+    'home_choose_role_hint': 'You can change it later on its card.',
+    'home_wifi_accept': 'Accept devices over Wi-Fi',
+    'home_wifi_accept_desc': 'Open the app on a paired device',
+    'home_wifi_mac_at': 'Mac at @addr',
+    'home_wifi_not_listening': 'Not accepting yet',
+    'home_status_connecting': 'Connecting…',
+    'home_status_waiting_app': 'Waiting for the app on the device…',
+    'home_status_not_connected': 'Not connected',
+    'home_status_retrying': 'Trying again soon',
+    'home_status_waiting_you': 'Press Retry to try again',
+    'home_status_shared': 'Shared encoder',
+    'iphone_usb_open': 'Open screen',
     'session_unplugged':
         'Unplugged. Plug it in again; the Mac keeps trying.',
-    'home_next_tablet_mode': 'Mode for the next tablet you add',
-    'home_tile_last_mode': 'Last time: @mode',
-    'session_change_mode': 'Change mode',
     'session_mode_hint_restart': 'Restarts this tablet only',
     'session_mode_hint_to_reverse':
         'Restarts this tablet; then tap @share on it',
@@ -220,9 +258,7 @@ class AppTranslations extends Translations {
     'step_ready_detail': 'Stream is live — tap Open View',
 
     // ── Device picker / info ────────────────────────────────────────────
-    'device_android_client': 'Android client',
     'device_refresh_tooltip': 'Refresh devices',
-    'device_none_detected': 'No device detected — plug in via USB-C',
     'device_default_name': 'Android tablet',
 
     // ── Latency chip ────────────────────────────────────────────────────
@@ -480,14 +516,8 @@ class AppTranslations extends Translations {
     'link_usb_desc': 'ผ่านสาย ดีเลย์ต่ำที่สุด',
     'link_wifi_label': 'Wi-Fi',
     'link_wifi_desc': 'ไร้สาย เครือข่ายเดียวกัน จับคู่ผ่าน USB หนึ่งครั้ง',
-    'wifi_host_title': 'การเชื่อมต่อ Wi-Fi',
-    'wifi_host_address': 'Mac เครื่องนี้: @address  •  พอร์ต @port',
     'wifi_host_no_network':
         'Mac เครื่องนี้ยังไม่มีที่อยู่เครือข่าย ให้เชื่อมต่อ Wi-Fi ก่อน',
-    'wifi_host_hint':
-        'กด "เชื่อมต่อ" ด้านบนหาก Mac ยังไม่ได้รออยู่ แล้วเลือก Wi-Fi บนแท็บเล็ต '
-            'แท็บเล็ตจะเชื่อมต่อได้หลังจากเคยเชื่อมต่อกับ Mac เครื่องนี้ผ่าน USB '
-            'หนึ่งครั้ง ซึ่งเป็นการจับคู่ แนะนำเครือข่าย 5 GHz หรือ 6 GHz',
     'wifi_client_title': 'Mac ผ่าน Wi-Fi',
     'wifi_client_paired': 'จับคู่กับ @name แล้ว',
     'wifi_client_not_paired':
@@ -505,14 +535,12 @@ class AppTranslations extends Translations {
     'wifi_client_address_label': 'ที่อยู่ของ Mac (ไม่บังคับ)',
     'wifi_client_address_hint':
         'ค้นหาให้อัตโนมัติ กรอกเฉพาะเมื่อหาไม่พบ เช่น 192.168.1.20',
-    'remote_dir_usb_only': 'เฉพาะ USB',
 
     // ── Session modes ───────────────────────────────────────────────────
     'session_extended_label': 'จอเสริม',
     'session_extended_desc': 'ใช้แท็บเล็ตเป็นจอที่สองของ Mac',
     'session_remote_label': 'รีโมตคอนโทรล',
     'session_remote_desc': 'ควบคุมหน้าจอ Mac จากแท็บเล็ต เหมือนการรีโมต',
-    'remote_dir_title': 'ทิศทาง',
     'remote_dir_tab_label': 'แท็บเล็ต → Mac',
     'remote_dir_tab_desc': 'คุม Mac จากแท็บเล็ต',
     'remote_dir_mac_label': 'Mac → แท็บเล็ต',
@@ -538,8 +566,27 @@ class AppTranslations extends Translations {
     'home_sharing': 'กำลังแชร์หน้าจอ',
     'home_sharing_hint':
         'ตอนนี้ Mac เห็นและควบคุมแท็บเล็ตนี้ได้แล้ว ตัดการเชื่อมต่อเพื่อหยุด',
-    'home_add_tablet': 'เพิ่มแท็บเล็ต',
-    'session_settings': 'ตั้งค่าเครื่องนี้',
+    'iphone_remote_title': 'iPhone ผ่าน USB',
+    'iphone_remote_no_device': 'เสียบ iPhone หรือ iPad ผ่าน USB แล้วปลดล็อกเครื่อง',
+    'iphone_remote_waiting':
+        'กำลังรอภาพจอ iPhone ปลดล็อกเครื่องไว้ ภาพจะมาเมื่อมีอะไรบนจอเปลี่ยน',
+    'iphone_remote_permission':
+        'macOS มองจอ iPhone เป็นกล้อง อนุญาตกล้องให้ Extended Screen ใน การตั้งค่าระบบ → ความเป็นส่วนตัวและความปลอดภัย → กล้อง แล้วลองใหม่',
+    'iphone_remote_failed': 'แสดงภาพจอ iPhone ไม่ได้',
+    'iphone_remote_runner_missing':
+        'การแตะต้องใช้ TouchRunner บน iPhone: เปิด ios/TouchRunner/TouchRunner.xcodeproj ใน Xcode แล้วรันเทสต์ (testServe) บน iPhone',
+    'iphone_remote_home': 'หน้าโฮม',
+    'iphone_remote_home_failed':
+        'iPhone ไม่กลับหน้าโฮม: เปิด TouchRunner ใหม่จาก ios/TouchRunner ใน Xcode',
+    'iphone_remote_touch_ready': 'แตะได้',
+    'iphone_remote_touch_off': 'แตะไม่ได้',
+    'iphone_probe_menu': 'วัดความหน่วง',
+    'iphone_probe_run_tap': 'แตะ @n ครั้งที่จุดที่คลิกล่าสุด',
+    'iphone_probe_run_swipe': 'ปัดขึ้นลง @n ครั้ง',
+    'iphone_probe_stats': 'n=@n p50 @p50 ms p90 @p90 ms',
+    'iphone_probe_felt': 'คลิก → ภาพเปลี่ยน',
+    'iphone_probe_last': 'ล่าสุด',
+    'iphone_probe_running': 'กำลังวัด @done/@n',
     'device_settings_title': 'ตั้งค่าของ @name',
     'device_settings_restarts':
         'ใช้กับเครื่องนี้เท่านั้น เปลี่ยนแล้วจะรีสตาร์ตเฉพาะเครื่องนี้',
@@ -553,26 +600,54 @@ class AppTranslations extends Translations {
     'device_settings_max_fps': 'อัตราเฟรมสูงสุด',
     'device_settings_no_limit': 'ไม่จำกัดเฉพาะเครื่อง',
     'device_settings_reset': 'ใช้การตั้งค่าของทั้งแอป',
-    'home_wifi_listen': 'รับการเชื่อมต่อผ่าน Wi-Fi',
-    'home_wifi_listen_desc':
-        'iPhone และแท็บเล็ตที่จับคู่ไว้เข้าร่วมผ่าน Wi-Fi ได้ พร้อมกับแท็บเล็ตที่ต่อ USB',
-    'home_wifi_listening_at': 'กำลังรอการเชื่อมต่อผ่าน Wi-Fi ที่ @addr',
     'home_wifi_turned_away':
         'ปฏิเสธไป @n เครื่อง เพราะช่องเต็ม (การตั้งค่า → แท็บเล็ต)',
+    'home_wifi_turned_away_mac':
+        'ปฏิเสธไป @n เครื่อง เพราะ Mac เครื่องนี้ใช้ได้ครั้งละ @cap เครื่อง',
     'session_wifi_beside': 'อุปกรณ์ Wi-Fi',
-    'home_tablets_count': 'ใช้ช่องแท็บเล็ตไปแล้ว @n จาก @cap ช่อง',
     'home_encoder_load': 'ตัวเข้ารหัส @load% (@codec)',
-    'home_appbar_tablets': '@n เครื่อง',
-    'home_at_limit': 'ตอนนี้เพิ่มแท็บเล็ตอีกเครื่องไม่ได้',
     'home_disconnecting': 'กำลังตัดการเชื่อมต่อ…',
-    'home_all_attached_connected': 'แท็บเล็ตที่เสียบอยู่เชื่อมต่อครบทุกเครื่องแล้ว',
-    'session_granted': 'เข้ารหัสที่ @size สูงสุด @fps fps',
-    'session_granted_shared':
-        'เข้ารหัสที่ @size สูงสุด @fps fps ใช้ตัวเข้ารหัสของ Mac ร่วมกัน',
+    'home_devices': 'อุปกรณ์',
+    'home_devices_connected': 'เชื่อมต่อ @n เครื่อง',
+    'home_devices_at_cap': 'เต็มแล้ว (ครั้งละ @cap เครื่อง)',
+    'home_empty': 'เสียบแท็บเล็ตหรือ iPhone ด้วยสาย USB-C หรือเปิดรับอุปกรณ์ผ่าน Wi-Fi ด้านล่าง',
+    'home_empty_wifi_on':
+        'เสียบแท็บเล็ตหรือ iPhone ด้วยสาย USB-C หรือเปิดแอปบนอุปกรณ์ที่จับคู่ไว้',
+    'home_none_connected': 'ยังไม่มีอุปกรณ์ที่เชื่อมต่อ เชื่อมต่อได้จากด้านล่าง',
+    'home_all_attached_connected': 'อุปกรณ์ที่เสียบอยู่เชื่อมต่อครบแล้ว',
+    'role_extended': 'เป็นจอที่สองของ Mac',
+    'role_controls_mac': 'ใช้คุม Mac',
+    'role_mac_controls': 'Mac คุมเครื่องนี้',
+    'role_extended_desc': 'เดสก์ท็อปของ Mac ขยายมาที่เครื่องนี้',
+    'role_controls_mac_desc': 'แสดงจอของ Mac แตะเพื่อสั่งงาน Mac',
+    'role_mac_controls_desc': 'Mac แสดงจอของเครื่องนี้และสั่งงานได้ กด @share บนเครื่อง',
+    'home_picture_settings': 'ตั้งค่าภาพ',
+    'home_add_device': 'เพิ่มอุปกรณ์',
+    'home_row_plugged_in': 'เสียบสายอยู่',
+    'home_row_emulator': 'อีมูเลเตอร์',
+    'home_row_last_role': 'ครั้งก่อน: @role',
+    'home_row_new': 'เครื่องใหม่ เลือกได้ว่าจะใช้ทำอะไร',
+    'home_row_full': 'ใช้ครบ @cap ช่องแล้ว (การตั้งค่า → แท็บเล็ต)',
+    'home_row_full_mac': 'Mac เครื่องนี้ใช้ได้ครั้งละ @cap เครื่อง',
+    'home_row_role_no_room':
+        'ตัวเข้ารหัสของ Mac ไม่มีที่ว่างสำหรับ “@role” ตอนนี้ กดเชื่อมต่อเพื่อเลือกการใช้งานอื่น',
+    'home_row_taken': 'เครื่องนี้อยู่ในรายการอุปกรณ์ด้านบนแล้ว',
+    'home_connect_refused': 'ไม่ได้เชื่อมต่อ',
+    'home_row_encoder_full': 'ตัวเข้ารหัสของ Mac ไม่มีที่ว่างสำหรับเครื่องนี้ตอนนี้',
+    'home_choose_role_title': 'จะใช้ @name ทำอะไร',
+    'home_choose_role_hint': 'เปลี่ยนภายหลังได้ที่การ์ดของเครื่อง',
+    'home_wifi_accept': 'รับอุปกรณ์ผ่าน Wi-Fi',
+    'home_wifi_accept_desc': 'เปิดแอปบนอุปกรณ์ที่จับคู่ไว้',
+    'home_wifi_mac_at': 'Mac อยู่ที่ @addr',
+    'home_wifi_not_listening': 'ยังไม่พร้อมรับ',
+    'home_status_connecting': 'กำลังเชื่อมต่อ…',
+    'home_status_waiting_app': 'รอแอปบนอุปกรณ์…',
+    'home_status_not_connected': 'ไม่ได้เชื่อมต่อ',
+    'home_status_retrying': 'จะลองใหม่เร็ว ๆ นี้',
+    'home_status_waiting_you': 'รอให้คุณกดลองอีกครั้ง',
+    'home_status_shared': 'ใช้ตัวเข้ารหัสร่วม',
+    'iphone_usb_open': 'เปิดหน้าจอ',
     'session_unplugged': 'ถอดสายอยู่ เสียบใหม่ได้เลย Mac จะลองเชื่อมต่อต่อไป',
-    'home_next_tablet_mode': 'โหมดสำหรับแท็บเล็ตเครื่องถัดไปที่เพิ่ม',
-    'home_tile_last_mode': 'ครั้งก่อน: @mode',
-    'session_change_mode': 'เปลี่ยนโหมด',
     'session_mode_hint_restart': 'เริ่มแท็บเล็ตเครื่องนี้ใหม่เท่านั้น',
     'session_mode_hint_to_reverse':
         'เริ่มแท็บเล็ตเครื่องนี้ใหม่ แล้วกด @share บนแท็บเล็ต',
@@ -604,9 +679,7 @@ class AppTranslations extends Translations {
     'step_ready_detail': 'สตรีมพร้อมแล้ว — แตะ "เปิดหน้าจอ"',
 
     // ── Device picker / info ────────────────────────────────────────────
-    'device_android_client': 'อุปกรณ์ Android',
     'device_refresh_tooltip': 'รีเฟรชอุปกรณ์',
-    'device_none_detected': 'ไม่พบอุปกรณ์ — เสียบผ่าน USB-C',
     'device_default_name': 'แท็บเล็ต Android',
 
     // ── Latency chip ────────────────────────────────────────────────────

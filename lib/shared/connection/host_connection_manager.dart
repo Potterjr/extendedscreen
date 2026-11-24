@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
-import 'package:flutter/foundation.dart' show protected, visibleForTesting;
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/widgets.dart' show AppLifecycleState;
 import 'package:get/get.dart';
 import 'package:extendedscreen/shared/connection/adb_service.dart';
@@ -511,10 +511,10 @@ class HostConnectionManager extends BaseConnectionManager {
 
   /// Some USB tablet is between two sessions, its mode being changed
   /// ([changeMode]): it is in no session for a moment, and comes back.
-  /// Observable. Home offers no link selector meanwhile: a link switched
-  /// then would be saved and never acted on ([_onLinkTypeChanged] does
-  /// nothing during a choice), and the tablet would come back over USB
-  /// with the app saying Wi-Fi.
+  /// Observable. A link switched meanwhile would be saved and never acted
+  /// on ([_onLinkTypeChanged] does nothing during a choice); Home also
+  /// keeps the tablet out of its Add a device list and does not say that
+  /// nothing is attached.
   bool get replacing => _reserved.isNotEmpty;
 
   /// Every place taken under [cap]: [heldUsbPlaces], and every device on
@@ -1049,11 +1049,12 @@ class HostConnectionManager extends BaseConnectionManager {
   /// once that has ended. A pick without a serial takes only devices with
   /// no session. The session picked is focused.
   ///
-  /// This is the user's connect (a tile of the Add panel, the Connect
-  /// button, the Loopback preview's Start): a session it makes runs in the
-  /// mode Home's selectors show at this call
-  /// ([SettingsService.nextChoice]). Every other connect that picks a
-  /// tablet goes to [connectWith] with a mode of its own, or none.
+  /// A session it makes runs as [SettingsService.nextChoice] (the role a
+  /// new device gets when nothing else says: the last one picked in Home's
+  /// role chooser). The Loopback preview's Start comes here; Home's Add a
+  /// device panel goes to [connectWith] with the device's own role, and
+  /// every other connect that picks a tablet with a role of its own, or
+  /// none.
   /// [changeMode] does not: it starts its new session itself ([_replace]).
   @override
   Future<void> connect({String? serial}) =>
@@ -1062,13 +1063,12 @@ class HostConnectionManager extends BaseConnectionManager {
   /// [connect], for whoever says the mode: a session made here runs as
   /// [choice]; without one, in the mode its tablet is remembered in
   /// ([SettingsService.knownChoice]: the auto-connect policy's connects,
-  /// and the hub's own after a link change), else as the selectors stood
-  /// when this was called (read before anything is awaited, so a slow adb
+  /// and the hub's own after a link change), else as
+  /// [SettingsService.nextChoice] stood when this was called (read before anything is awaited, so a slow adb
   /// listing does not pick up a later change). A session that exists
   /// already (a retry run early, a card's Retry, the same tablet with [cap]
   /// 1) keeps the mode it was made for, whatever is passed.
   @override
-  @protected
   Future<void> connectWith(String? serial, {SessionChoice? choice}) async {
     final fallback = settings.nextChoice;
     if (_endingAll > 0 || _choosing.contains(_linkChange)) return;
@@ -1206,8 +1206,9 @@ class HostConnectionManager extends BaseConnectionManager {
   ///
   /// A session that exists keeps the mode it was made for. A new one is
   /// made as [choice], else as the tablet is remembered
-  /// ([SettingsService.knownChoice]), else as [fallback] (the selectors as
-  /// they stood when the connect was asked for), and keeps that for its
+  /// ([SettingsService.knownChoice]), else as [fallback]
+  /// ([SettingsService.nextChoice] as it stood when the connect was asked
+  /// for), and keeps that for its
   /// life, over Wi-Fi too.
   Future<HostSession?> _sessionFor(String key, LinkType link, int attempt,
       {required bool single,
@@ -1453,8 +1454,8 @@ class HostConnectionManager extends BaseConnectionManager {
   ///
   /// When [old] was the only session, the hub shows a connecting phase
   /// while it ends, never `disconnected`: with one tablet at a time that is
-  /// what holds off a pick, and with more it keeps Home from offering the
-  /// link selector, and the policy from taking the hub for idle, in a
+  /// what holds off a pick, and with more it keeps the policy from taking
+  /// the hub for idle, in a
   /// moment when a tablet is on its way back.
   Future<void> _replace(HostSession old, SessionChoice choice) async {
     final key = old.key;
@@ -1708,7 +1709,7 @@ class HostConnectionManager extends BaseConnectionManager {
   /// real tablet is attached (stand-in tablets never), and only those in
   /// [only] when given (the poll's tablets just plugged in). Whichever rule
   /// takes a tablet, it comes back in the mode it is remembered in
-  /// ([_start]), not in the one the selectors show:
+  /// ([_start]), not in [SettingsService.nextChoice]:
   /// - with no session, the hub `disconnected` and exactly one candidate,
   ///   that one (the first-run rule: one tablet connects whether or not it
   ///   was seen before; two wait for the user's pick). Deliberately not
@@ -1810,7 +1811,7 @@ class HostConnectionManager extends BaseConnectionManager {
   /// policy, without waiting for it: a connect returns only once its
   /// session is live, or never while a tablet does not answer. In the mode
   /// the tablet is remembered in, whichever rule picked it; one with none
-  /// remembered (and the Wi-Fi session) takes what the selectors say.
+  /// remembered (and the Wi-Fi session) takes [SettingsService.nextChoice].
   void _start(String key) {
     _starting.add(key);
     unawaited(
@@ -1821,7 +1822,8 @@ class HostConnectionManager extends BaseConnectionManager {
     );
   }
 
-  /// Home offers the link selector while nothing is connecting or live.
+  /// The link is saved while nothing is connecting or live (Home no
+  /// longer offers the Mac a link selector).
   /// Sessions on the other link (idle, or in `error`) end; if one of them
   /// was waiting to retry, that retry runs on the new link. One the
   /// encoder refused waits for the user, so it brings nothing back.

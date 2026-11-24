@@ -22,6 +22,8 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Extended Screen shows the screen of an iPhone or iPad plugged in over USB, which macOS offers as a camera.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Extended Screen uses the local network to stream to your tablet over Wi-Fi.</string>
 	<key>NSHumanReadableCopyright</key>

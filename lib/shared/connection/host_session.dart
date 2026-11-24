@@ -161,7 +161,7 @@ class HostSession extends BaseConnectionManager {
   /// things and each teardown undoes what its own attempt built.
   ///
   /// The hub gives every session it makes one. A session built without one
-  /// (tests) takes what Home's selectors say as it is made
+  /// (tests) takes [SettingsService.nextChoice] as it is made
   /// ([SettingsService.nextChoice]), and keeps that.
   final SessionChoice choice;
 

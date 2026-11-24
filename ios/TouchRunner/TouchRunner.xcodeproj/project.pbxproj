@@ -1,0 +1,69 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+		C1000000000000000000000A /* FastTouch.m in Sources */ = {isa = PBXBuildFile; fileRef = C1000000000000000000000B /* FastTouch.m */; };
+		C1000000000000000000000B /* FastTouch.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = FastTouch.m; sourceTree = "<group>"; };
+		C1000000000000000000000C /* FastTouch.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = FastTouch.h; sourceTree = "<group>"; };
+		C1000000000000000000000D /* TouchRunner-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "TouchRunner-Bridging-Header.h"; sourceTree = "<group>"; };
+		B1000000000000000000000A /* TouchHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000000000000000000000B /* TouchHost.swift */; };
+		B1000000000000000000000B /* TouchHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TouchHost.swift; sourceTree = "<group>"; };
+		B1000000000000000000000C /* TouchHost.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TouchHost.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B1000000000000000000000E /* TouchHost */ = {isa = PBXGroup; children = (B1000000000000000000000B /* TouchHost.swift */, ); path = TouchHost; sourceTree = "<group>"; };
+		B10000000000000000000010 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (B1000000000000000000000A /* TouchHost.swift in Sources */, ); runOnlyForDeploymentPostprocessing = 0; };
+		B10000000000000000000012 /* TouchHost */ = {isa = PBXNativeTarget; buildConfigurationList = B10000000000000000000013 /* Build configuration list for PBXNativeTarget "TouchHost" */; buildPhases = (B10000000000000000000010 /* Sources */, ); buildRules = ( ); dependencies = ( ); name = TouchHost; productName = TouchHost; productReference = B1000000000000000000000C /* TouchHost.app */; productType = "com.apple.product-type.application"; };
+		B10000000000000000000013 /* Build configuration list for PBXNativeTarget "TouchHost" */ = {isa = XCConfigurationList; buildConfigurations = (B10000000000000000000014 /* Debug */, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };
+		B10000000000000000000014 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {
+			CODE_SIGN_STYLE = Automatic;
+			DEVELOPMENT_TEAM = T4P27BU383;
+			GENERATE_INFOPLIST_FILE = YES;
+			INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+			IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+			PRODUCT_BUNDLE_IDENTIFIER = com.porto.extendedscreen.ios.touchhost;
+			PRODUCT_NAME = "$(TARGET_NAME)";
+			SDKROOT = iphoneos;
+			SWIFT_VERSION = 5.0;
+			TARGETED_DEVICE_FAMILY = "1,2";
+		}; name = Debug; };
+		B10000000000000000000020 /* PBXTargetDependency */ = {isa = PBXTargetDependency; target = B10000000000000000000012 /* TouchHost */; targetProxy = B10000000000000000000021 /* PBXContainerItemProxy */; };
+		B10000000000000000000021 /* PBXContainerItemProxy */ = {isa = PBXContainerItemProxy; containerPortal = A10000000000000000000015 /* Project object */; proxyType = 1; remoteGlobalIDString = B10000000000000000000012; remoteInfo = TouchHost; };
+		A1000000000000000000000A /* TouchRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000000B /* TouchRunner.swift */; };
+		A1000000000000000000000B /* TouchRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TouchRunner.swift; sourceTree = "<group>"; };
+		A1000000000000000000000C /* TouchRunner.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = TouchRunner.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A1000000000000000000000D /* Root */ = {isa = PBXGroup; children = (A1000000000000000000000E /* TouchRunner */, B1000000000000000000000E /* TouchHost */, A1000000000000000000000F /* Products */, ); sourceTree = "<group>"; };
+		A1000000000000000000000E /* TouchRunner */ = {isa = PBXGroup; children = (A1000000000000000000000B /* TouchRunner.swift */, C1000000000000000000000B /* FastTouch.m */, C1000000000000000000000C /* FastTouch.h */, C1000000000000000000000D /* TouchRunner-Bridging-Header.h */, ); path = TouchRunner; sourceTree = "<group>"; };
+		A1000000000000000000000F /* Products */ = {isa = PBXGroup; children = (A1000000000000000000000C /* TouchRunner.xctest */, B1000000000000000000000C /* TouchHost.app */, ); name = Products; sourceTree = "<group>"; };
+		A10000000000000000000010 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A1000000000000000000000A /* TouchRunner.swift in Sources */, C1000000000000000000000A /* FastTouch.m in Sources */, ); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000011 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = ( ); runOnlyForDeploymentPostprocessing = 0; };
+		A10000000000000000000012 /* TouchRunner */ = {isa = PBXNativeTarget; buildConfigurationList = A10000000000000000000013 /* Build configuration list for PBXNativeTarget "TouchRunner" */; buildPhases = (A10000000000000000000010 /* Sources */, A10000000000000000000011 /* Frameworks */, ); buildRules = ( ); dependencies = (B10000000000000000000020 /* PBXTargetDependency */, ); name = TouchRunner; productName = TouchRunner; productReference = A1000000000000000000000C /* TouchRunner.xctest */; productType = "com.apple.product-type.bundle.ui-testing"; };
+		A10000000000000000000013 /* Build configuration list for PBXNativeTarget "TouchRunner" */ = {isa = XCConfigurationList; buildConfigurations = (A10000000000000000000014 /* Debug */, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };
+		A10000000000000000000014 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {
+			CODE_SIGN_STYLE = Automatic;
+			DEVELOPMENT_TEAM = T4P27BU383;
+			GENERATE_INFOPLIST_FILE = YES;
+			IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+			PRODUCT_BUNDLE_IDENTIFIER = com.porto.extendedscreen.ios.touchrunner;
+			PRODUCT_NAME = "$(TARGET_NAME)";
+			SDKROOT = iphoneos;
+			SWIFT_VERSION = 5.0;
+			TARGETED_DEVICE_FAMILY = "1,2";
+			TEST_TARGET_NAME = TouchHost;
+			SWIFT_OBJC_BRIDGING_HEADER = "TouchRunner/TouchRunner-Bridging-Header.h";
+			CLANG_ENABLE_OBJC_ARC = YES;
+		}; name = Debug; };
+		A10000000000000000000015 /* Project object */ = {isa = PBXProject; attributes = {LastUpgradeCheck = 1500; }; buildConfigurationList = A10000000000000000000016 /* Build configuration list for PBXProject "TouchRunner" */; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base, ); mainGroup = A1000000000000000000000D /* Root */; productRefGroup = A1000000000000000000000F /* Products */; projectDirPath = ""; projectRoot = ""; targets = (A10000000000000000000012 /* TouchRunner */, B10000000000000000000012 /* TouchHost */, ); };
+		A10000000000000000000016 /* Build configuration list for PBXProject "TouchRunner" */ = {isa = XCConfigurationList; buildConfigurations = (A10000000000000000000017 /* Debug */, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };
+		A10000000000000000000017 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {
+			ALWAYS_SEARCH_USER_PATHS = NO;
+			CLANG_ENABLE_MODULES = YES;
+			ENABLE_TESTABILITY = YES;
+			ONLY_ACTIVE_ARCH = YES;
+			SDKROOT = iphoneos;
+			SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+		}; name = Debug; };
+	};
+	rootObject = A10000000000000000000015 /* Project object */;
+}

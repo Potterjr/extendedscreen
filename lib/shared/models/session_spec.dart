@@ -22,7 +22,7 @@ class SessionSpec {
   /// choice ([SettingsService.nextChoice]) and the display mode, through
   /// [SessionSpec.from].
   ///
-  /// A reading of Home's selectors, nothing more: no session is built from
+  /// A reading of the role a new device gets by default, nothing more: no session is built from
   /// it (a session's spec comes from its own choice, through
   /// [SessionSpec.from]), so a rule about what a session may run as belongs
   /// in [SessionChoice.effective], never here.

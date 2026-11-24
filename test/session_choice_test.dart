@@ -159,6 +159,43 @@ void main() {
           isNot(keys['th']!['session_remote_label']));
     });
 
+    test('roleLabel and roleDescription name the three roles in plain '
+        'words, the Mac driving only for remote control with the Mac '
+        'driving', () {
+      final keys = AppTranslations().keys;
+      Get.addTranslations(keys);
+      addTearDown(() {
+        Get.clearTranslations();
+        Get.locale = null;
+      });
+      for (final code in ['en', 'th']) {
+        Get.locale = Locale(code);
+        final t = keys[code]!;
+        for (final c in [
+          const SessionChoice(extended),
+          const SessionChoice(extended, macDrives),
+        ]) {
+          expect(c.roleLabel, t['role_extended']);
+          expect(c.roleDescription, t['role_extended_desc']);
+        }
+        expect(const SessionChoice(remote, tabDrives).roleLabel,
+            t['role_controls_mac']);
+        expect(const SessionChoice(remote, tabDrives).roleDescription,
+            t['role_controls_mac_desc']);
+        expect(const SessionChoice(remote, macDrives).roleLabel,
+            t['role_mac_controls']);
+        expect(
+            const SessionChoice(remote, macDrives).roleDescription,
+            t['role_mac_controls_desc']!
+                .replaceAll('@share', t['home_start_share']!));
+        expect(const SessionChoice(remote, macDrives).roleDescription,
+            isNot(contains('@')));
+      }
+      expect(keys['en']!['role_mac_controls'],
+          'The Mac controls this device');
+      expect(keys['th']!['role_mac_controls'], isNot(keys['en']!['role_mac_controls']));
+    });
+
     test('fromNames reads enum names and survives unknown ones', () {
       expect(SessionChoice.fromNames('extendedScreen', 'tabControlsMac'),
           const SessionChoice(extended, tabDrives));

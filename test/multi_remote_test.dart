@@ -2038,14 +2038,22 @@ void main() {
       expect(hub.reverseActive.value, 0);
     });
 
-    test('a tile pressed while an automatic connect is still asking adb for '
-        'the devices connects a stopped tablet as the Add panel says, not '
-        'as it is remembered: the stop is lifted only with the pick itself, '
-        'after the permissions were asked about', () async {
+    // Two paths to B's Connect: the role chooser's (a role picked for it,
+    // here Extended, not the one it is remembered in), and the remembered
+    // row's (no role: it connects as it is remembered, Mac → tablet), the
+    // one a remembered device's row takes when that role fits.
+    for (final picked in [extended, null]) {
+    test('a Connect pressed while an automatic connect is still asking adb '
+        'for the devices connects a stopped tablet once, '
+        '${picked == null ? "in its remembered role (the row's path)" : "in the role picked, not as it is remembered (the chooser's path)"}'
+        ': the stop is lifted only with the pick itself, after the '
+        'permissions were asked about, and the policy does not start it '
+        'too', () async {
+      final role = picked ?? reverse;
       await pick(tabletA, extended);
       await pick(tabletB, reverse);
       expect(settings.knownChoice('B'), reverse);
-      // Stopped on its card; the Add panel's selectors say Extended.
+      // Stopped on its card; what a new device gets is Extended.
       await hub.disconnectSession('B', userStopped: true);
       expect(hub.stoppedDevices, {'B'});
       await choose(extended);
@@ -2076,10 +2084,12 @@ void main() {
       home.didChangeAppLifecycleState(AppLifecycleState.resumed);
       await _until(() => adb.listingsWaiting >= 1);
 
-      // B's tile is pressed; the press's own permission check is out.
+      // B's Connect is pressed; the press's own permission check is out.
       answer = Completer<void>();
-      final pressed = home.onSelectDevice(const DeviceModel(
-          serial: 'B', model: 'Tablet B', status: DeviceStatus.connected));
+      final pressed = home.onConnectDevice(
+          const DeviceModel(
+              serial: 'B', model: 'Tablet B', status: DeviceStatus.connected),
+          choice: picked);
       await _until(() => checks == 3);
 
       // adb answers the policy first: B is still the tablet the user
@@ -2091,24 +2101,33 @@ void main() {
           reason: 'not connected as it is remembered, under the pick');
       expect(hub.stoppedDevices, {'B'});
 
-      // The permissions are there: the pick goes ahead, as the selectors
-      // say.
+      // The permissions are there: the pick goes ahead, in its role.
       answer.complete();
       await pressed;
       final b = hub.sessions['B']!;
-      expect(b.choice, extended);
+      expect(b.choice, role);
       expect(b.phase.value, ConnectionPhase.streaming);
-      // (Its display joins A's, so its capture is started twice: no count
-      // of starts here.)
-      await _until(() =>
-          tabletB.mode == SessionMode.extendedScreen && tabletB.rate != null);
-      expect(tabletB.sharing, isFalse);
+      if (picked != null) {
+        // (Its display joins A's, so its capture is started twice: no
+        // count of starts here.)
+        await _until(() =>
+            tabletB.mode == SessionMode.extendedScreen &&
+            tabletB.rate != null);
+        expect(tabletB.sharing, isFalse);
+        expect(sent(tabletB, 0xF8), 1,
+            reason: 'asked for its screen by the first pick alone');
+      } else {
+        // Asked for its screen again, by this pick alone.
+        await _until(() => sent(tabletB, 0xF8) == 2);
+        expect(tabletB.mode, SessionMode.remoteControl);
+      }
       expect(hub.stoppedDevices, isEmpty);
-      expect(sent(tabletB, 0xF8), 1,
-          reason: 'asked for its screen by the first pick alone');
       expect(adb.keysDelivered['B'], 2, reason: 'one session made for it');
-      expect(settings.knownChoice('B'), extended);
+      expect(settings.knownChoice('B'), role);
+      // A remembered device's pick is not what a new one gets.
+      expect(settings.nextChoice.sameEffect(extended), isTrue);
     });
+    }
 
     test("changing one tablet's mode ends its session and makes it a new "
         'one in that mode: the tablet is told to stop sharing, its decoder '
