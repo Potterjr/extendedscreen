@@ -374,7 +374,8 @@ class _HostBody extends StatelessWidget {
                     settings.captureConfigFor(
                         settings.clientPanelFor(d.serial) ??
                             settings.lastClientPanel,
-                        next),
+                        next,
+                        profile: settings.deviceProfile(d.serial)),
                     cap: cap)))
           d.serial: ending ? 'home_disconnecting'.tr : 'home_at_limit'.tr,
     };

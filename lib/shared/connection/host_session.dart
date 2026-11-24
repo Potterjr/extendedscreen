@@ -257,7 +257,7 @@ class HostSession extends BaseConnectionManager {
   /// What an attempt begun now runs as: this session's [choice] on its link
   /// with the display mode set now.
   SessionSpec _specNow() =>
-      SessionSpec.from(choice, link, displayMode: settings.displayMode);
+      SessionSpec.from(choice, link, displayMode: settings.displayModeFor(key));
 
   /// Whether this attempt's HELLO named a device that is not Android (an
   /// iPhone or iPad), which can only drive the Mac whatever its [choice].
@@ -942,7 +942,10 @@ class HostSession extends BaseConnectionManager {
 
     // Remote-control sessions always mirror the real desktop; extended-screen
     // honours the user's Extend/Mirror choice (both in [spec]).
-    var config = settings.captureConfigFor(panel, spec);
+    // This device's own profile where it has one (preset, codec, text
+    // size, frame-rate cap), else the app-wide settings.
+    var config = settings.captureConfigFor(panel, spec,
+        profile: settings.deviceProfile(key));
 
     await _capture.requestPermission();
     await _input.requestAccessibility();
@@ -1556,7 +1559,7 @@ class HostSession extends BaseConnectionManager {
     final p = panel;
     final texId = await _remote.initialize(
       session: nativeId,
-      codec: settings.codec,
+      codec: settings.codecFor(key),
       width: p.width,
       height: p.height,
     );
@@ -1569,9 +1572,15 @@ class HostSession extends BaseConnectionManager {
     // Here the *tablet's* encoder does the work, and Max's native @ 120 Hz is
     // beyond it (its HEVC encoder manages well under 120 fps at 4K), so Max
     // falls back to Quality's native @ 60 Hz / 20 Mbps in this direction.
-    final isMax = settings.encodePreset == EncodePreset.max;
-    final fps = isMax ? 60 : settings.refreshRateFor(p);
-    final bitrate = isMax ? 20000000 : settings.captureBitrateFor(p);
+    // From this device's own settings where it has them (its preset, a
+    // Custom preset's own values, its frame-rate cap), as for a capture.
+    final profile = settings.deviceProfile(key);
+    final own = settings.captureConfigFor(p, spec, profile: profile);
+    final isMax = settings.presetFor(key) == EncodePreset.max;
+    final fps = isMax
+        ? math.min(60, profile.maxFps ?? 60)
+        : own.refreshRate;
+    final bitrate = isMax ? 20000000 : own.bitrate;
     refreshRateHz.value = fps;
 
     // Instruct the client to begin capturing + encoding.
@@ -1581,7 +1590,7 @@ class HostSession extends BaseConnectionManager {
       timestampUs: DateTime.now().microsecondsSinceEpoch,
       payload: Uint8List.fromList([
         0xF8,
-        settings.codec == CodecType.h265 ? 1 : 0,
+        settings.codecFor(key) == CodecType.h265 ? 1 : 0,
         fps.clamp(0, 255),
         (bitrate ~/ 1000000).clamp(1, 255),
       ]),

@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'package:get/get.dart';
 import 'package:extendedscreen/shared/models/client_panel.dart';
 import 'package:extendedscreen/shared/services/settings_service.dart';
@@ -126,17 +127,34 @@ extension EncodePresetX on EncodePreset {
     CustomPreset custom = const CustomPreset(),
     required DisplayMode mode,
     required CodecType codec,
+    double divisor = 2,
+    int? fpsCap,
   }) {
     final isCustom = this == EncodePreset.custom;
-    final logicalWidth = panel.width ~/ 2;
+    // Divisor 2 is computed exactly as it always was (odd panels included);
+    // any other only through the division.
+    final logicalWidth =
+        divisor == 2 ? panel.width ~/ 2 : (panel.width / divisor).floor();
+    final logicalHeight =
+        divisor == 2 ? panel.height ~/ 2 : (panel.height / divisor).floor();
+    final rate = isCustom ? custom.refreshRate : refreshRateFor(panel);
+    final capped = fpsCap == null ? rate : math.min(rate, fpsCap);
+    var bitrate = isCustom ? custom.bitrateMbps * 1000000 : bitrateFor(panel);
+    // Max's bitrate follows the pixels and the rate it streams: fewer of
+    // either, less of it (never under the 8 Mbps it has always had at least).
+    if (this == EncodePreset.max && (divisor != 2 || capped != rate)) {
+      final pixels = (logicalWidth * 2) * (logicalHeight * 2);
+      final share = pixels / (panel.width * panel.height) * capped / rate;
+      bitrate = (bitrate * share).round().clamp(8000000, bitrate);
+    }
     return DisplayConfigModel(
       width: logicalWidth,
-      height: panel.height ~/ 2,
+      height: logicalHeight,
       scaleFactor: isCustom
           ? (custom.width / logicalWidth).clamp(0.5, 2.0).toDouble()
           : scaleFactor,
-      refreshRate: isCustom ? custom.refreshRate : refreshRateFor(panel),
-      bitrate: isCustom ? custom.bitrateMbps * 1000000 : bitrateFor(panel),
+      refreshRate: capped,
+      bitrate: bitrate,
       mode: mode,
       codec: codec,
       adaptiveFps: this == EncodePreset.max,

@@ -154,6 +154,20 @@ class AppTranslations extends Translations {
     'home_sharing_hint':
         'The Mac can now see and control this tablet. Disconnect to stop.',
     'home_add_tablet': 'Add a tablet',
+    'session_settings': 'Settings for this device',
+    'device_settings_title': 'Settings for @name',
+    'device_settings_restarts':
+        'For this device only. A change restarts this device, not the others.',
+    'device_settings_default': 'As in Settings (@value)',
+    'device_settings_preset': 'Quality preset',
+    'device_settings_display_mode': 'Display mode',
+    'device_settings_text_size': 'Text size',
+    'device_settings_text_sharp': 'Sharp (÷2)',
+    'device_settings_text_larger': 'Larger (÷2.5)',
+    'device_settings_text_largest': 'Largest (÷3)',
+    'device_settings_max_fps': 'Highest frame rate',
+    'device_settings_no_limit': 'No limit of its own',
+    'device_settings_reset': 'Use the app-wide settings',
     'home_wifi_listen': 'Listen on Wi-Fi',
     'home_wifi_listen_desc':
         'Paired iPhones and tablets can join over Wi-Fi beside the USB tablets',
@@ -525,6 +539,20 @@ class AppTranslations extends Translations {
     'home_sharing_hint':
         'ตอนนี้ Mac เห็นและควบคุมแท็บเล็ตนี้ได้แล้ว ตัดการเชื่อมต่อเพื่อหยุด',
     'home_add_tablet': 'เพิ่มแท็บเล็ต',
+    'session_settings': 'ตั้งค่าเครื่องนี้',
+    'device_settings_title': 'ตั้งค่าของ @name',
+    'device_settings_restarts':
+        'ใช้กับเครื่องนี้เท่านั้น เปลี่ยนแล้วจะรีสตาร์ตเฉพาะเครื่องนี้',
+    'device_settings_default': 'ตามการตั้งค่า (@value)',
+    'device_settings_preset': 'ค่าคุณภาพ',
+    'device_settings_display_mode': 'โหมดจอ',
+    'device_settings_text_size': 'ขนาดตัวหนังสือ',
+    'device_settings_text_sharp': 'คมชัด (÷2)',
+    'device_settings_text_larger': 'ใหญ่ขึ้น (÷2.5)',
+    'device_settings_text_largest': 'ใหญ่ที่สุด (÷3)',
+    'device_settings_max_fps': 'อัตราเฟรมสูงสุด',
+    'device_settings_no_limit': 'ไม่จำกัดเฉพาะเครื่อง',
+    'device_settings_reset': 'ใช้การตั้งค่าของทั้งแอป',
     'home_wifi_listen': 'รับการเชื่อมต่อผ่าน Wi-Fi',
     'home_wifi_listen_desc':
         'iPhone และแท็บเล็ตที่จับคู่ไว้เข้าร่วมผ่าน Wi-Fi ได้ พร้อมกับแท็บเล็ตที่ต่อ USB',

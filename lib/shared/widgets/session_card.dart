@@ -9,6 +9,7 @@ import 'package:extendedscreen/shared/models/session_choice.dart';
 import 'package:extendedscreen/shared/models/session_mode.dart';
 import 'package:extendedscreen/shared/services/settings_service.dart';
 import 'package:extendedscreen/shared/widgets/connection_card.dart';
+import 'package:extendedscreen/shared/widgets/device_settings_sheet.dart';
 import 'package:extendedscreen/shared/widgets/connection_steps.dart';
 import 'package:extendedscreen/shared/widgets/latency_chip.dart';
 
@@ -80,7 +81,11 @@ class SessionCard extends StatelessWidget {
       final latency = s.latencyMs.value;
       final hz = s.refreshRateHz.value;
       final bitrate = s.streamBitrate.value;
-      final codec = settings.codecRx.value == CodecType.h265
+      // This device's codec: its own, else the app-wide one (both read
+      // here so the label follows either changing).
+      settings.codecRx.value;
+      settings.deviceProfiles.value;
+      final codec = settings.codecFor(s.key) == CodecType.h265
           ? 'H.265'
           : 'H.264';
       return Material(
@@ -177,6 +182,25 @@ class SessionCard extends StatelessWidget {
                               const SizedBox(width: 2),
                               _ModeMenu(session: s, onMode: onMode),
                             ],
+                            // This device's own settings (preset, codec,
+                            // text size, frame-rate cap), for a device that
+                            // is the same one next time.
+                            if (SettingsService.hasOwnProfile(s.key))
+                              IconButton(
+                                key: ValueKey('${s.key}/settings'),
+                                tooltip: 'session_settings'.tr,
+                                visualDensity: VisualDensity.compact,
+                                padding: const EdgeInsets.all(4),
+                                constraints: const BoxConstraints(),
+                                icon: Icon(
+                                  Icons.tune,
+                                  size: 18,
+                                  color: Colors.white.withValues(alpha: 0.6),
+                                ),
+                                onPressed: () => DeviceSettingsSheet.show(
+                                    context, s.key,
+                                    name: model ?? s.key),
+                              ),
                           ],
                         ),
                       ),

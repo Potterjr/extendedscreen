@@ -1602,6 +1602,11 @@ class HostConnectionManager extends BaseConnectionManager {
   Future<void> reconnectSession(String key) {
     final session = sessions[key];
     if (session == null) return Future<void>.value();
+    // One the encoder refused waits for the user, and this is the user's
+    // (its own settings changed, perhaps to fit): it is tried again.
+    if (session.refused.value && !isStopping && _endingAll == 0) {
+      return session.connect();
+    }
     return _reconnectWhere((s) => identical(s, session));
   }
 

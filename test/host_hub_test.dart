@@ -19,6 +19,7 @@ import 'package:extendedscreen/shared/connection/pipeline_queue.dart';
 import 'package:extendedscreen/shared/connection/socket_service.dart';
 import 'package:extendedscreen/shared/models/client_panel.dart';
 import 'package:extendedscreen/shared/models/device_model.dart';
+import 'package:extendedscreen/shared/models/device_profile.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
 import 'package:extendedscreen/shared/models/link_type.dart';
 import 'package:extendedscreen/shared/models/session_choice.dart';
@@ -254,6 +255,45 @@ void main() {
       expect(hub.focused!.platform, isNull);
       await hub.disconnect();
       expect(settings.lastClientPanel, plain);
+    });
+
+    test("a tablet's own profile reaches its capture alone: text size, "
+        'frame-rate cap and codec, the other tablet on the app-wide values',
+        () async {
+      await settings.setDeviceProfile('BIG',
+          const DeviceProfile(divisor: 3, maxFps: 60, codec: CodecType.h264));
+      final big = FakeTablet('BIG', panel: ultra);
+      final small = FakeTablet('SMALL', panel: plain);
+      addTearDown(big.hangUp);
+      addTearDown(small.hangUp);
+      final hub = hubWith(SynthAdb([big, small]));
+
+      await hub.connect(serial: 'BIG');
+      final own = capture.starts.last;
+      expect((own.width, own.height, own.refreshRate, own.codec),
+          (986, 616, 60, CodecType.h264));
+      await _until(() => big.codec == CodecType.h264);
+
+      await hub.connect(serial: 'SMALL');
+      final other = capture.starts.last;
+      expect((other.width, other.height), (1280, 800));
+      expect(other.codec, settings.codec);
+    });
+
+    test("a tablet the Mac controls is asked for its screen at its own "
+        'preset and frame-rate cap', () async {
+      Get.put<RemoteVideoChannel>(RecordingRemoteVideo());
+      await settings.setSessionMode(SessionMode.remoteControl);
+      await settings.setRemoteDirection(RemoteDirection.macControlsTab);
+      await settings.setDeviceProfile('CTL',
+          const DeviceProfile(preset: EncodePreset.performance, maxFps: 60));
+      final tab = FakeTablet('CTL', panel: ultra);
+      addTearDown(tab.hangUp);
+      final hub = hubWith(SynthAdb([tab]));
+      await hub.connect(serial: 'CTL');
+      await _until(() => tab.captureFps != null);
+      expect(tab.captureFps, 60,
+          reason: 'Performance runs 120, the cap holds it to 60');
     });
 
     test('an iPhone or iPad picked for the Mac to control it drives the Mac '

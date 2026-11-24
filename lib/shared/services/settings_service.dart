@@ -8,6 +8,7 @@ import 'package:get/get.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:extendedscreen/shared/models/client_panel.dart';
 import 'package:extendedscreen/shared/models/device_model.dart';
+import 'package:extendedscreen/shared/models/device_profile.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
 import 'package:extendedscreen/shared/models/known_device.dart';
 import 'package:extendedscreen/shared/models/link_type.dart';
@@ -424,8 +425,9 @@ class SettingsService extends GetxService {
 
   /// What a session capturing for a tablet with [panel] encodes under the
   /// current preset and codec, in [spec]'s display mode.
-  DisplayConfigModel captureConfigFor(ClientPanel panel, SessionSpec spec) =>
-      encodePreset.configFor(
+  DisplayConfigModel captureConfigFor(ClientPanel panel, SessionSpec spec,
+          {DeviceProfile profile = const DeviceProfile()}) =>
+      (profile.preset ?? encodePreset).configFor(
         panel,
         custom: CustomPreset(
           width: customWidth,
@@ -433,8 +435,64 @@ class SettingsService extends GetxService {
           refreshRate: customRefreshRate,
         ),
         mode: spec.displayMode,
-        codec: codec,
+        codec: profile.codec ?? codec,
+        divisor: profile.divisor ?? 2,
+        fpsCap: profile.maxFps,
       );
+
+  // ─── Per-device profiles ─────────────────────────────────────────────────
+
+  static const _keyDeviceProfilePrefix = 'device_profile.';
+
+  /// What device [key] runs with where it differs from the app-wide
+  /// settings (empty when nothing was set for it, or for a key that is no
+  /// device of its own: a synthetic tablet, an anonymous Wi-Fi one).
+  DeviceProfile deviceProfile(String key) {
+    if (!hasOwnProfile(key)) return const DeviceProfile();
+    final raw = _prefs.getString('$_keyDeviceProfilePrefix$key');
+    if (raw == null) return const DeviceProfile();
+    try {
+      final json = jsonDecode(raw);
+      if (json is Map<String, dynamic>) return DeviceProfile.fromJson(json);
+    } catch (_) {
+      // Anything unreadable is no profile: it must never stop a capture or
+      // Home from drawing.
+    }
+    return const DeviceProfile();
+  }
+
+  /// Saves device [key]'s profile (an empty one removes it). The cache is
+  /// updated inside the call, so [deviceProfile] reads it at once.
+  Future<void> setDeviceProfile(String key, DeviceProfile profile) async {
+    if (!hasOwnProfile(key)) return;
+    final write = profile.isEmpty
+        ? _prefs.remove('$_keyDeviceProfilePrefix$key')
+        : _prefs.setString(
+            '$_keyDeviceProfilePrefix$key', jsonEncode(profile.toJson()));
+    deviceProfiles.value++;
+    await write;
+  }
+
+  /// Bumped by every [setDeviceProfile], for the UI to follow.
+  final deviceProfiles = 0.obs;
+
+  /// Whether [key] can keep a profile: a real device that is the same one
+  /// next time (not a synthetic tablet, not a Wi-Fi device without an
+  /// install id, which is a new key on every connection).
+  static bool hasOwnProfile(String key) =>
+      !isSyntheticKey(key) && !key.startsWith('wifi:conn');
+
+  /// The codec device [key] runs: its own, else the app-wide one.
+  CodecType codecFor(String key) => deviceProfile(key).codec ?? codec;
+
+  /// The preset device [key] runs: its own, else the app-wide one.
+  EncodePreset presetFor(String key) =>
+      deviceProfile(key).preset ?? encodePreset;
+
+  /// The display mode device [key] runs (Extend or Mirror; remote control
+  /// mirrors whatever this says): its own, else the app-wide one.
+  DisplayMode displayModeFor(String key) =>
+      deviceProfile(key).displayMode ?? displayMode;
 
   // ─── Effective capture values (resolve custom vs fixed preset) ────────────
   // Custom's width/height are the *physical* encode resolution — that's how the
