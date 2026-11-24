@@ -86,6 +86,10 @@ class _NativeDecoder {
   /// Codec of the running decoder ('h264' / 'h265'), null when released.
   String? running;
 
+  /// What `initialize` answers: the iOS plugin's texture id, null on
+  /// Android.
+  int? textureId;
+
   /// Codec requested by every `initialize`, in order.
   final initialized = <String>[];
   int disposes = 0;
@@ -97,6 +101,8 @@ class _NativeDecoder {
         final codec = (call.arguments as Map)['codec'] as String;
         initialized.add(codec);
         running ??= codec;
+        await gates[call.method]?.future;
+        return textureId;
       case 'dispose':
         disposes++;
         running = null;
@@ -341,5 +347,93 @@ void main() {
         [2960 >> 8, 2960 & 0xFF, 1752 >> 8, 1752 & 0xFF]);
 
     await closeAll(tester);
+  });
+
+  testWidgets('iOS: the display shows the texture each decoder build answers',
+      (tester) async {
+    native.textureId = 7;
+    await connectAndOpenDisplay(tester);
+    final display = Get.find<DisplayController>();
+    expect(native.initialized, ['h265']);
+    expect(display.textureId.value, 7);
+
+    // A codec change rebuilds the decoder, and with it the texture.
+    native.textureId = 8;
+    announceCodec(CodecType.h264);
+    await settle(tester);
+    expect(native.initialized, ['h265', 'h264']);
+    expect(display.textureId.value, 8);
+
+    sendFrame();
+    await settle(tester);
+    expect(nalsFed, 1);
+
+    await closeAll(tester);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
+
+  group('iOS HELLO', () {
+    void phoneView(WidgetTester tester) {
+      addTearDown(tester.view.reset);
+      addTearDown(tester.view.display.reset);
+      // iPhone 18 Pro Max in landscape; its display is reported portrait.
+      tester.view.physicalSize = const Size(2868, 1320);
+      tester.view.devicePixelRatio = 3;
+      tester.view.display.size = const Size(1320, 2868);
+      tester.view.display.devicePixelRatio = 3;
+      tester.view.padding =
+          const FakeViewPadding(left: 186, right: 186, bottom: 63);
+    }
+
+    testWidgets('an iPhone reports 0x03 and the display less its side insets',
+        (tester) async {
+      phoneView(tester);
+      final phone = ClientConnectionManager(ios: true);
+
+      await phone.connect();
+
+      final hello = socket.sent.firstWhere(
+          (p) => p.type == PacketType.control && p.payload[0] == 0x01);
+      expect(hello.payload, [0x01, 0x03, 2496 >> 8, 2496 & 0xFF,
+          1320 >> 8, 1320 & 0xFF, 120]);
+      expect(phone.helloSize.value, const Size(2496, 1320));
+
+      await phone.disconnect();
+      await closeAll(tester);
+    });
+
+    testWidgets('an iPad reports 0x04 and its window less the safe area',
+        (tester) async {
+      addTearDown(tester.view.reset);
+      addTearDown(tester.view.display.reset);
+      tester.view.physicalSize = const Size(2752, 2064);
+      tester.view.devicePixelRatio = 2;
+      tester.view.display.size = const Size(2064, 2752);
+      tester.view.display.devicePixelRatio = 2;
+      tester.view.padding = const FakeViewPadding(bottom: 40);
+      final pad = ClientConnectionManager(ios: true);
+
+      await pad.connect();
+
+      final hello = socket.sent.firstWhere(
+          (p) => p.type == PacketType.control && p.payload[0] == 0x01);
+      expect(hello.payload, [0x01, 0x04, 2752 >> 8, 2752 & 0xFF,
+          2024 >> 8, 2024 & 0xFF, 120]);
+
+      await pad.disconnect();
+      await closeAll(tester);
+    });
+
+    testWidgets('Android ignores the insets, as before', (tester) async {
+      phoneView(tester);
+
+      await cm.connect();
+
+      final hello = socket.sent.firstWhere(
+          (p) => p.type == PacketType.control && p.payload[0] == 0x01);
+      expect(hello.payload.sublist(1, 6),
+          [0x02, 2868 >> 8, 2868 & 0xFF, 1320 >> 8, 1320 & 0xFF]);
+
+      await closeAll(tester);
+    });
   });
 }

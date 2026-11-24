@@ -17,6 +17,8 @@ import 'package:extendedscreen/shared/connection/client_connection_manager.dart'
 import 'package:extendedscreen/modules/extended_screen/client/video_decoder_channel.dart';
 import 'package:extendedscreen/modules/remote_screen/client/android_capture_channel.dart';
 import 'package:extendedscreen/shared/platform/battery_channel.dart';
+import 'package:extendedscreen/shared/platform/ios_app.dart';
+import 'package:extendedscreen/shared/platform/ios_device_service.dart';
 import 'package:extendedscreen/shared/platform/wifi_pairing_channel.dart';
 
 class InitialBinding extends Bindings {
@@ -34,7 +36,9 @@ class InitialBinding extends Bindings {
     // Wi-Fi link — both roles: the host owns an identity and answers probes,
     // the client stores the hosts it was paired with and sends the probes.
     Get.put(WifiPairingService(), permanent: true);
-    Get.put(WifiDiscoveryService(), permanent: true);
+    // iOS asks only the addresses it knows: broadcasting needs a multicast
+    // entitlement there.
+    Get.put(WifiDiscoveryService(broadcast: !runsOnIos), permanent: true);
 
     // Role-specific wiring. The chosen manager is bound to BaseConnectionManager
     // so all shared UI depends on a single interface.
@@ -55,15 +59,22 @@ class InitialBinding extends Bindings {
       } else {
         Get.put(AdbService(), permanent: true);
       }
+      // devicectl, the iPhone's stand-in for adb (Wi-Fi pairing through the
+      // app's container). Inert until called; in the P0 spike only the
+      // debug-only iPhones list in Settings calls it.
+      Get.put(IosDeviceService(), permanent: true);
       Get.put<BaseConnectionManager>(HostConnectionManager(), permanent: true);
-    } else if (defaultTargetPlatform == TargetPlatform.android) {
-      // CLIENT (Android): video decoder, plus the reverse-remote screen
-      // capturer, then the client connection manager.
+    } else if (defaultTargetPlatform == TargetPlatform.android || runsOnIos) {
+      // CLIENT (Android, or the iOS client over Wi-Fi): video decoder, plus
+      // on Android the reverse-remote screen capturer, then the client
+      // connection manager. iOS cannot capture its screen for the Mac.
       Get.put(VideoDecoderChannel(), permanent: true);
-      Get.put(AndroidCaptureChannel(), permanent: true);
+      if (!runsOnIos) Get.put(AndroidCaptureChannel(), permanent: true);
       Get.put(BatteryChannel(), permanent: true);
       // What adb delivers from the Mac: the key of each USB session (kept
-      // by UsbSessionService) and its Wi-Fi pairing.
+      // by UsbSessionService) and its Wi-Fi pairing. On iOS the USB link
+      // never runs, so the service stays inert (registered so no Get.find
+      // throws), and the pairing comes from the devicectl inbox instead.
       Get.put(UsbSessionService(), permanent: true);
       Get.put(WifiPairingChannel(), permanent: true);
       Get.put<BaseConnectionManager>(ClientConnectionManager(), permanent: true);

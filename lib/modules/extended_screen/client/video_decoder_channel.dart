@@ -3,7 +3,9 @@ import 'package:get/get.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
 import 'package:extendedscreen/shared/services/logger_service.dart';
 
-/// Android only — bridges to MediaCodec decoder via Kotlin plugin.
+/// Client only: the native decoder. Android: MediaCodec onto the
+/// SurfaceView (`VideoDecoderPlugin.kt`). iOS: VideoToolbox into a Flutter
+/// texture (`ios/Runner/VideoDecoderPlugin.swift`), same channel contract.
 class VideoDecoderChannel extends GetxService {
   static const _channel = MethodChannel('extended_screen/video_decoder');
   // Binary channel bypasses StandardMessageCodec JSON overhead — raw bytes only.
@@ -42,14 +44,18 @@ class VideoDecoderChannel extends GetxService {
   /// codec are stored anyway (the rate also sets the panel mode and the input
   /// queue's cap; the codec drives keyframe detection), so always [dispose]
   /// first when switching codec.
-  Future<void> initialize(DisplayConfigModel config) async {
-    await _channel.invokeMethod('initialize', {
+  ///
+  /// Answers the texture to show (iOS); null on Android, which draws onto
+  /// its own SurfaceView.
+  Future<int?> initialize(DisplayConfigModel config) async {
+    final textureId = await _channel.invokeMethod<int>('initialize', {
       'width': config.width * 2,   // physical pixels (HiDPI 2x)
       'height': config.height * 2,
       'codec': config.codec == CodecType.h265 ? 'h265' : 'h264',
       'fps': config.refreshRate,
     });
     _log.i('VideoDecoder initialized ${config.width * 2}x${config.height * 2} @${config.refreshRate}fps');
+    return textureId;
   }
 
   /// Follow a host stream-rate change (0xFB) with the panel's display mode,

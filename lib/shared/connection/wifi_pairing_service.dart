@@ -6,6 +6,9 @@ import 'dart:typed_data';
 import 'package:get/get.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:extendedscreen/shared/connection/wifi_discovery_service.dart';
+import 'package:extendedscreen/shared/platform/host_name.dart';
+
 /// What makes the Mac recognisable and trustworthy over Wi-Fi: a self-signed
 /// TLS certificate (the tablet pins it) and a random token (the tablet proves
 /// it was paired by sending it inside the TLS session).
@@ -147,6 +150,11 @@ class WifiPairingService extends GetxService {
   Future<void>? _loaded;
 
   /// Client: the Macs this tablet can reach over Wi-Fi. Reactive for Home.
+  ///
+  /// TODO(P2, iOS): the token and certificate of each go to the Keychain
+  /// (`flutter_secure_storage`, first_unlock_this_device) on iOS, behind a
+  /// secret-store seam; the P0 spike keeps them in SharedPreferences like
+  /// Android.
   final pairedHosts = <PairedHost>[].obs;
 
   @override
@@ -245,6 +253,27 @@ class WifiPairingService extends GetxService {
     return done;
   }
 
+  /// Host: the pairing this Mac hands a client right now, through adb
+  /// (`HostSession`, after each USB session goes live) or through devicectl
+  /// (`IosDeviceService.deliverPairing`): its identity, the Computer Name
+  /// the client will show ([macDisplayName]), and where the Mac is at this
+  /// moment ([WifiDiscoveryService.lanAddresses]), so the client can ask it
+  /// directly later (a broadcast does not cross into another subnet).
+  ///
+  /// The bytes hold the token: hand them only to a channel that reaches
+  /// the client app alone (adb's DUMP-guarded broadcast, the app's own
+  /// container), never to the link, and never in a process's arguments.
+  Future<Uint8List> offerPayload({
+    Future<List<InternetAddress>> Function()? lanAddresses,
+    Future<String> Function()? displayName,
+  }) async {
+    final identity = await ensureIdentity();
+    final addresses =
+        await (lanAddresses ?? WifiDiscoveryService.lanAddresses)();
+    final name = await (displayName ?? macDisplayName)();
+    return buildPairingPayload(identity, name, addresses: addresses);
+  }
+
   /// Pairing payload: [pairingCommand], version, host id, token, name
   /// (length-prefixed UTF-8), certificate (uint16 BE length, DER), then the
   /// Mac's IPv4 [addresses] (count byte, 4 bytes each; at most
@@ -329,9 +358,9 @@ class WifiPairingService extends GetxService {
 
   /// Stores the Mac from a pairing payload, refreshing an earlier pairing
   /// with the same Mac (its name and addresses) but keeping the address it
-  /// was last seen at. Call it only with a payload that adb delivered
-  /// (`WifiPairingChannel`): whoever can call this decides which Macs the
-  /// tablet trusts.
+  /// was last seen at. Call it only with a payload that adb or the devicectl
+  /// inbox delivered (`WifiPairingChannel`), never with bytes from a packet:
+  /// whoever can call this decides which Macs the tablet trusts.
   ///
   /// A payload that names a Mac already paired but carries a different
   /// certificate or token is refused. A Mac's id, certificate and token are

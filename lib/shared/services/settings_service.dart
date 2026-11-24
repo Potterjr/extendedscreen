@@ -14,6 +14,7 @@ import 'package:extendedscreen/shared/models/link_type.dart';
 import 'package:extendedscreen/shared/models/session_choice.dart';
 import 'package:extendedscreen/shared/models/session_mode.dart';
 import 'package:extendedscreen/shared/models/session_spec.dart';
+import 'package:extendedscreen/shared/platform/ios_app.dart';
 import 'package:extendedscreen/shared/services/app_translations.dart';
 import 'package:extendedscreen/shared/services/logger_service.dart';
 
@@ -119,7 +120,10 @@ class SettingsService extends GetxService {
         _prefs.getInt(_keyPanelMaxHz) ?? clientMaxRefreshHz.value;
     sessionModeRx.value = _resolveSessionMode();
     remoteDirectionRx.value = _resolveRemoteDirection();
-    linkTypeRx.value = _prefs.getString(_keyLinkType) == LinkType.wifi.name
+    // The iOS client has no adb, so no USB link: Wi-Fi always, whatever was
+    // saved, and every reader (the Rx included) sees it.
+    linkTypeRx.value =
+        runsOnIos || _prefs.getString(_keyLinkType) == LinkType.wifi.name
         ? LinkType.wifi
         : LinkType.usb;
     maxTabletsRx.value = (_prefs.getInt(_keyMaxTablets) ?? defaultMaxTablets)
@@ -161,7 +165,9 @@ class SettingsService extends GetxService {
 
   LinkType get linkType => linkTypeRx.value;
 
+  /// Does nothing on iOS, where the link is always Wi-Fi.
   Future<void> setLinkType(LinkType type) async {
+    if (runsOnIos) return;
     linkTypeRx.value = type;
     await _prefs.setString(_keyLinkType, type.name);
   }
@@ -257,10 +263,15 @@ class SettingsService extends GetxService {
       ClientPanel.decode(_prefs.getString('$_keyClientPanelPrefix$key'));
 
   /// Host: record [panel] as the one session [key]'s tablet reported (its
-  /// HELLO), and as the last one reported. Nothing for a synthetic tablet.
-  Future<void> setClientPanelFor(String key, ClientPanel panel) async {
+  /// HELLO), and, when [global], as the last one reported
+  /// ([lastClientPanel], the guess for a tablet that has reported none).
+  /// Only an Android HELLO is [global]: an iPhone's (or an iPad's) area
+  /// would be a poor guess for a new tablet. Nothing for a synthetic tablet.
+  Future<void> setClientPanelFor(String key, ClientPanel panel,
+      {bool global = true}) async {
     if (isSyntheticKey(key)) return;
     await _prefs.setString('$_keyClientPanelPrefix$key', panel.encode());
+    if (!global) return;
     await setClientPanel(panel.width, panel.height);
     await setClientMaxRefresh(panel.maxHz);
   }

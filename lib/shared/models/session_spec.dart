@@ -38,11 +38,11 @@ class SessionSpec {
   ///
   /// The link is all that is known when an attempt begins. A device that
   /// turns out not to be Android (an iPhone or iPad, known from its HELLO)
-  /// can only drive the Mac too; that clamp will be applied after the HELLO,
-  /// with `effective(android: false)`, once such a device can connect.
+  /// can only drive the Mac too: the session takes its spec again after the
+  /// HELLO with [android] false.
   factory SessionSpec.from(SessionChoice choice, LinkType link,
-      {required DisplayMode displayMode}) {
-    final effective = choice.effective(link: link);
+      {required DisplayMode displayMode, bool android = true}) {
+    final effective = choice.effective(link: link, android: android);
     return SessionSpec(
       link: link,
       mode: effective.mode,

@@ -5,6 +5,7 @@ import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
+import 'package:extendedscreen/shared/connection/client_connection_manager.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
 import 'package:extendedscreen/shared/models/packet_model.dart';
 import 'package:extendedscreen/shared/models/touch_event_model.dart';
@@ -12,6 +13,7 @@ import 'package:extendedscreen/modules/extended_screen/client/display/controller
 import 'package:extendedscreen/modules/extended_screen/client/video_decoder_channel.dart';
 import 'package:extendedscreen/shared/services/settings_service.dart';
 import 'package:extendedscreen/shared/services/logger_service.dart';
+import 'package:extendedscreen/shared/platform/ios_app.dart';
 
 class DisplayController extends GetxController with WidgetsBindingObserver {
   final _cm = Get.find<BaseConnectionManager>();
@@ -46,12 +48,34 @@ class DisplayController extends GetxController with WidgetsBindingObserver {
 
   bool get isAndroid => defaultTargetPlatform == TargetPlatform.android;
 
+  /// A native decoder exists here: Android (SurfaceView) or iOS (texture).
+  bool get hasClientDecoder =>
+      defaultTargetPlatform == TargetPlatform.android ||
+      defaultTargetPlatform == TargetPlatform.iOS;
+
+  /// iOS: the decoder draws into a Flutter texture rather than a platform
+  /// view.
+  bool get usesTexture => defaultTargetPlatform == TargetPlatform.iOS;
+
+  /// iOS: the texture the decoder draws into, from its `initialize`; null
+  /// while there is none (before the first build, during a rebuild).
+  final textureId = RxnInt();
+
+  /// The shape of the picture the Mac sends: the size this client reported
+  /// in its HELLO (the host keeps the panel's aspect ratio). Null when not
+  /// known yet.
+  Size? get streamSize =>
+      _cm is ClientConnectionManager ? _cm.helloSize.value : null;
+
   @override
   void onReady() {
     super.onReady();
     WidgetsBinding.instance.addObserver(this);
     _keepScreenOn();
-    if (isAndroid) {
+    // iOS: defer the system's edge gestures while the Mac's screen is shown
+    // (its Dock sits on the bottom edge). A no-op elsewhere.
+    IosSystemChannel.setImmersive(true);
+    if (hasClientDecoder) {
       _initDecoderAndSubscribe();
       // On a fresh connect this view opens before the host announces its
       // codec (0xFC), so the first build uses the codec persisted last time;
@@ -117,7 +141,8 @@ class DisplayController extends GetxController with WidgetsBindingObserver {
     // Release any previous codec/surface before creating a new one so the old
     // SurfaceView is abandoned cleanly instead of flooding logcat. This is
     // also what lets a rebuild switch codec: the native decoder keeps its
-    // first configuration until it is disposed.
+    // first configuration until it is disposed. Its texture goes with it.
+    textureId.value = null;
     await decoder.dispose();
     // Checked before initialize: after onClose's dispose, an initialize would
     // start a decoder that keeps running after the view is gone.
@@ -125,8 +150,9 @@ class DisplayController extends GetxController with WidgetsBindingObserver {
 
     decoder.onRequestIdr = _cm.requestIdr;
 
-    await decoder.initialize(config);
+    final texture = await decoder.initialize(config);
     if (superseded()) return;
+    textureId.value = texture;
     // The codec worker starts a newer build when the setting changes, but
     // re-check here too so a change it missed can't leave this decoder on the
     // wrong codec.
@@ -160,7 +186,7 @@ class DisplayController extends GetxController with WidgetsBindingObserver {
     _fpsTimer = Timer.periodic(const Duration(seconds: 1), (_) async {
       currentFps.value = _fpsCounter;
       _fpsCounter = 0;
-      if (isAndroid) {
+      if (hasClientDecoder) {
         droppedPerSec.value =
             await Get.find<VideoDecoderChannel>().fetchDropCount();
       }
@@ -234,7 +260,9 @@ class DisplayController extends GetxController with WidgetsBindingObserver {
     _codecWorker?.dispose();
     _packetSub?.cancel();
     _fpsTimer?.cancel();
-    if (isAndroid) {
+    IosSystemChannel.setImmersive(false);
+    textureId.value = null;
+    if (hasClientDecoder) {
       Get.find<VideoDecoderChannel>().dispose();
     }
     super.onClose();

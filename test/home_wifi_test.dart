@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -501,6 +502,34 @@ void main() {
       expect(find.byType(TextField), findsNothing);
 
       await Get.delete<BatteryChannel>(force: true);
+    });
+
+    testWidgets('on iOS there is no link to choose: always Wi-Fi, with the '
+        'iPhone\'s pairing guidance', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      try {
+        // Saved USB, as a build from before could have left it.
+        await settings.setLinkType(LinkType.usb);
+        await settings.init();
+        await startClient(tester);
+
+        expect(settings.linkType, LinkType.wifi);
+        expect(find.text('link_usb_label'), findsNothing);
+        expect(find.text('link_wifi_label'), findsNothing);
+        expect(find.text('wifi_client_title'), findsOneWidget);
+        expect(find.text('wifi_client_not_paired_ios'), findsOneWidget);
+        expect(find.text('wifi_client_not_paired'), findsNothing);
+
+        await tester.runAsync(
+            () => pairing.storePairing(_pairingPacket('Studio')));
+        await tester.pump();
+        expect(find.text('wifi_client_paired'), findsOneWidget);
+        expect(find.text('wifi_client_not_paired_ios'), findsNothing);
+
+        await Get.delete<BatteryChannel>(force: true);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
     });
 
     testWidgets('a paired tablet names its Mac and can be given an address',

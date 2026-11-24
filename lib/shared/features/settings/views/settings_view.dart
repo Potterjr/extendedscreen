@@ -1,5 +1,7 @@
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
+import 'package:extendedscreen/shared/features/settings/views/ios_devices_debug_card.dart';
 import 'package:extendedscreen/shared/features/settings/controllers/settings_controller.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
 import 'package:extendedscreen/shared/services/app_translations.dart';
@@ -156,6 +158,12 @@ class SettingsView extends GetView<SettingsController> {
                     icon: Icons.restart_alt,
                     onTap: () => _confirmWifiReset(context),
                   )),
+              // P0 spike: pair an iPhone through devicectl. Debug builds
+              // only (a const, so no other build contains the card).
+              if (kDebugMode) ...[
+                const Divider(height: 1, color: Colors.white12),
+                const IosDevicesDebugCard(),
+              ],
             ]),
           ] else ...[
             _SectionHeader('settings_section_display'.tr),

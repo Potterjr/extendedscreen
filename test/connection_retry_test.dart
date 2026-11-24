@@ -31,6 +31,7 @@ class _QuietLogger extends LoggerService {
 /// adb-reverse listener exists on 127.0.0.1:7001.
 class _RefusingSocket extends SocketService {
   int dials = 0;
+  int closes = 0;
   final _packets = StreamController<Packet>.broadcast();
 
   @override
@@ -43,14 +44,19 @@ class _RefusingSocket extends SocketService {
   }
 
   @override
-  Future<void> disconnect() async {}
+  Future<void> disconnect() async => closes++;
 }
 
 /// A client whose link fails for good, with no retry (as a host session
 /// the encoder has no room for does).
 class _Client extends ClientConnectionManager {
+  _Client({super.ios});
+
   // ignore: invalid_use_of_protected_member
   Future<void> failForGood() => handleLinkFailure(retry: false);
+
+  /// Plays a session that reached `streaming` (no Mac needed).
+  void goLive() => setPhase(ConnectionPhase.streaming);
 }
 
 /// Only [ClientConnectionManager.onTeardown] (via disconnect) touches it.
@@ -148,5 +154,109 @@ void main() {
 
     await cm.disconnect();
     expect(cm.retryPending.value, isFalse);
+  });
+
+  group('iOS lifecycle', () {
+    testWidgets('going to the background ends a live link at once with no '
+        'retry, and coming back redials at once', (tester) async {
+      final cm = _Client(ios: true);
+      cm.goLive();
+
+      cm.didChangeAppLifecycleState(AppLifecycleState.inactive);
+      cm.didChangeAppLifecycleState(AppLifecycleState.hidden);
+      await tester.pump();
+      expect(cm.phase.value, ConnectionPhase.error);
+      expect(cm.retryPending.value, isFalse);
+      expect(socket.closes, 1, reason: 'the Mac hears it now, not in 6 s');
+      cm.didChangeAppLifecycleState(AppLifecycleState.paused);
+      await tester.pump(const Duration(seconds: 30));
+      expect(socket.dials, 0, reason: 'nothing dials from the background');
+      expect(socket.closes, 1);
+
+      cm.didChangeAppLifecycleState(AppLifecycleState.hidden);
+      cm.didChangeAppLifecycleState(AppLifecycleState.inactive);
+      cm.didChangeAppLifecycleState(AppLifecycleState.resumed);
+      await tester.pump();
+      expect(socket.dials, 1);
+      expect(cm.retryPending.value, isTrue,
+          reason: 'back in front, the usual retries');
+
+      await cm.disconnect();
+    });
+
+    testWidgets('a retry armed before going away is dropped', (tester) async {
+      final cm = _Client(ios: true);
+      await cm.connect();
+      expect(socket.dials, 1);
+      expect(cm.retryPending.value, isTrue);
+
+      cm.didChangeAppLifecycleState(AppLifecycleState.paused);
+      await tester.pump();
+      expect(cm.retryPending.value, isFalse);
+      await tester.pump(const Duration(seconds: 10));
+      expect(socket.dials, 1);
+
+      cm.didChangeAppLifecycleState(AppLifecycleState.resumed);
+      await tester.pump();
+      expect(socket.dials, 2);
+
+      await cm.disconnect();
+    });
+
+    testWidgets('resumed redials whatever the phase reads after a suspension',
+        (tester) async {
+      final cm = _Client(ios: true);
+      cm.goLive();
+      // The pause was heard, but the link still reads live (the handler's
+      // teardown never ran before iOS suspended the app).
+      cm.didChangeAppLifecycleState(AppLifecycleState.hidden);
+      cm.goLive();
+      cm.didChangeAppLifecycleState(AppLifecycleState.resumed);
+      await tester.pump();
+      expect(socket.dials, 1);
+
+      await cm.disconnect();
+    });
+
+    testWidgets('Control Centre (inactive and back) leaves a live link alone',
+        (tester) async {
+      final cm = _Client(ios: true);
+      cm.goLive();
+      cm.didChangeAppLifecycleState(AppLifecycleState.inactive);
+      cm.didChangeAppLifecycleState(AppLifecycleState.resumed);
+      await tester.pump(const Duration(seconds: 1));
+      expect(cm.phase.value, ConnectionPhase.streaming);
+      expect(socket.closes, 0);
+      expect(socket.dials, 0);
+
+      await cm.disconnect();
+    });
+
+    testWidgets('a link the user stopped stays stopped', (tester) async {
+      final cm = _Client(ios: true);
+      await cm.disconnect();
+      final closes = socket.closes;
+      cm.didChangeAppLifecycleState(AppLifecycleState.paused);
+      cm.didChangeAppLifecycleState(AppLifecycleState.resumed);
+      await tester.pump(const Duration(seconds: 10));
+      expect(cm.phase.value, ConnectionPhase.disconnected);
+      expect(socket.dials, 0);
+      expect(socket.closes, closes);
+    });
+
+    testWidgets('Android keeps streaming in the background', (tester) async {
+      final cm = _Client(ios: false);
+      cm.goLive();
+      cm.didChangeAppLifecycleState(AppLifecycleState.hidden);
+      cm.didChangeAppLifecycleState(AppLifecycleState.paused);
+      await tester.pump(const Duration(seconds: 10));
+      cm.didChangeAppLifecycleState(AppLifecycleState.resumed);
+      await tester.pump();
+      expect(cm.phase.value, ConnectionPhase.streaming);
+      expect(socket.closes, 0);
+      expect(socket.dials, 0);
+
+      await cm.disconnect();
+    });
   });
 }

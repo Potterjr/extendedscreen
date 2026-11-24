@@ -1,0 +1,187 @@
+{
+  "info": {
+    "arguments": [
+      "devicectl",
+      "list",
+      "devices",
+      "--json-output",
+      "list.json"
+    ],
+    "commandType": "devicectl.list.devices",
+    "environment": {},
+    "jsonVersion": 5,
+    "outcome": "success",
+    "version": "642.16"
+  },
+  "result": {
+    "devices": [
+      {
+        "capabilities": [],
+        "connectionProperties": {
+          "authenticationType": "manualPairing",
+          "isMobileDeviceOnly": false,
+          "pairingState": "paired",
+          "potentialHostnames": [],
+          "transportType": "wired",
+          "tunnelState": "disconnected"
+        },
+        "deviceProperties": {
+          "bootState": "booted",
+          "name": "Owner's iPhone",
+          "osVersionNumber": "27.0.1",
+          "osBuildUpdate": "24A446",
+          "developerModeStatus": "enabled"
+        },
+        "hardwareProperties": {
+          "deviceType": "iPhone",
+          "marketingName": "iPhone 18 Pro Max",
+          "platform": "iOS",
+          "productType": "iPhone19,7",
+          "reality": "physical",
+          "udid": "00008160-000AAAAAAAAAAAAA"
+        },
+        "identifier": "11111111-AAAA-4AAA-8AAA-111111111111",
+        "visibilityClass": "default"
+      },
+      {
+        "capabilities": [],
+        "connectionProperties": {
+          "authenticationType": "manualPairing",
+          "isMobileDeviceOnly": false,
+          "pairingState": "paired",
+          "potentialHostnames": [],
+          "transportType": "sameMachine",
+          "tunnelState": "disconnected"
+        },
+        "deviceProperties": {
+          "bootState": "booted",
+          "name": "iPhone 17 Pro",
+          "osVersionNumber": "27.0.1",
+          "osBuildUpdate": "24A446"
+        },
+        "hardwareProperties": {
+          "deviceType": "iPhone",
+          "marketingName": "iPhone 17 Pro",
+          "platform": "iOS",
+          "productType": "iPhone18,1",
+          "reality": "simulated",
+          "udid": "22222222-BBBB-4BBB-8BBB-222222222222"
+        },
+        "identifier": "22222222-BBBB-4BBB-8BBB-222222222222",
+        "visibilityClass": "default"
+      },
+      {
+        "capabilities": [],
+        "connectionProperties": {
+          "authenticationType": "manualPairing",
+          "isMobileDeviceOnly": false,
+          "pairingState": "paired",
+          "potentialHostnames": [],
+          "transportType": "localNetwork",
+          "tunnelState": "disconnected"
+        },
+        "deviceProperties": {
+          "bootState": "booted",
+          "name": "Spare iPhone",
+          "osVersionNumber": "27.0.1",
+          "osBuildUpdate": "24A446",
+          "developerModeStatus": "enabled"
+        },
+        "hardwareProperties": {
+          "deviceType": "iPhone",
+          "marketingName": "iPhone 17",
+          "platform": "iOS",
+          "productType": "iPhone18,3",
+          "reality": "physical",
+          "udid": "00008150-000CCCCCCCCCCCCC"
+        },
+        "identifier": "33333333-CCCC-4CCC-8CCC-333333333333",
+        "visibilityClass": "default"
+      },
+      {
+        "capabilities": [],
+        "connectionProperties": {
+          "authenticationType": "manualPairing",
+          "isMobileDeviceOnly": false,
+          "pairingState": "unpaired",
+          "potentialHostnames": [],
+          "transportType": "wired",
+          "tunnelState": "disconnected"
+        },
+        "deviceProperties": {
+          "bootState": "booted",
+          "name": "New iPhone",
+          "osVersionNumber": "27.0.1",
+          "osBuildUpdate": "24A446",
+          "developerModeStatus": "enabled"
+        },
+        "hardwareProperties": {
+          "deviceType": "iPhone",
+          "marketingName": "iPhone 17",
+          "platform": "iOS",
+          "productType": "iPhone18,3",
+          "reality": "physical",
+          "udid": "00008150-000DDDDDDDDDDDDD"
+        },
+        "identifier": "44444444-DDDD-4DDD-8DDD-444444444444",
+        "visibilityClass": "default"
+      },
+      {
+        "capabilities": [],
+        "connectionProperties": {
+          "authenticationType": "manualPairing",
+          "isMobileDeviceOnly": false,
+          "pairingState": "paired",
+          "potentialHostnames": [],
+          "transportType": "wired",
+          "tunnelState": "disconnected"
+        },
+        "deviceProperties": {
+          "bootState": "booted",
+          "name": "Locked-down iPhone",
+          "osVersionNumber": "27.0.1",
+          "osBuildUpdate": "24A446",
+          "developerModeStatus": "disabled"
+        },
+        "hardwareProperties": {
+          "deviceType": "iPhone",
+          "marketingName": "iPhone 17",
+          "platform": "iOS",
+          "productType": "iPhone18,3",
+          "reality": "physical",
+          "udid": "00008150-000EEEEEEEEEEEEE"
+        },
+        "identifier": "55555555-EEEE-4EEE-8EEE-555555555555",
+        "visibilityClass": "default"
+      },
+      {
+        "capabilities": [],
+        "connectionProperties": {
+          "authenticationType": "manualPairing",
+          "isMobileDeviceOnly": false,
+          "pairingState": "paired",
+          "potentialHostnames": [],
+          "transportType": "wired",
+          "tunnelState": "disconnected"
+        },
+        "deviceProperties": {
+          "bootState": "booted",
+          "name": "Watch",
+          "osVersionNumber": "27.0.1",
+          "osBuildUpdate": "24A446",
+          "developerModeStatus": "enabled"
+        },
+        "hardwareProperties": {
+          "deviceType": "appleWatch",
+          "marketingName": "Apple Watch Ultra 3",
+          "platform": "watchOS",
+          "productType": "Watch7,12",
+          "reality": "physical",
+          "udid": "00008310-000FFFFFFFFFFFFF"
+        },
+        "identifier": "66666666-FFFF-4FFF-8FFF-666666666666",
+        "visibilityClass": "default"
+      }
+    ]
+  }
+}

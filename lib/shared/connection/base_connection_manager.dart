@@ -414,6 +414,16 @@ abstract class BaseConnectionManager extends GetxService
     });
   }
 
+  /// Drops a retry [handleLinkFailure] armed and has not fired, leaving
+  /// the link failed (`error`, nothing redials by itself until the next
+  /// [connect] or [restartLink]). For the iOS client going to the
+  /// background, where a dial would be denied or frozen mid-way.
+  @protected
+  void cancelPendingRetry() {
+    _reconnectTimer?.cancel();
+    retryPending.value = false;
+  }
+
   /// Role hook run by [handleLinkFailure] before the retry. Unlike
   /// [disconnect] it must leave [activeDevice] set so the retry targets it.
   @protected
@@ -501,6 +511,7 @@ abstract class BaseConnectionManager extends GetxService
         if (originTs == _lastPingTs && originTs > 0) {
           final rttUs = DateTime.now().microsecondsSinceEpoch - originTs;
           latencyMs.value = (rttUs / 1000).round();
+          onRoundTrip(rttUs);
         }
       } else {
         // Incoming ping from peer — echo it back immediately.
@@ -519,6 +530,12 @@ abstract class BaseConnectionManager extends GetxService
   /// client's hello; the client: the Mac's answer to its USB hello).
   @protected
   bool admitPacket(Packet packet) => peerTrusted;
+
+  /// Every heartbeat round trip measured on this link, in µs (what
+  /// [latencyMs] shows rounded). No-op; the client's P0 measurements
+  /// (`ES_MEASURE`) record them.
+  @protected
+  void onRoundTrip(int rttUs) {}
 
   /// Role-specific packet handling (host injects input / records the client's
   /// HELLO panel info; client reacts to the host's control packets, e.g.
