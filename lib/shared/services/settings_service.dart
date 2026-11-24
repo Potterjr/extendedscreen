@@ -35,6 +35,9 @@ class SettingsService extends GetxService {
   static const _keyKnownDevices = 'known_devices';
   // The configured cap on tablets at once (host).
   static const _keyMaxTablets = 'max_tablets';
+  static const _keyWifiListen = 'wifi_listen';
+  static const _keyWifiListenMode = 'wifi_listen_mode';
+  static const _keyWifiListenDirection = 'wifi_listen_direction';
   // Native panel of the connected client (physical px, landscape), learned
   // from its HELLO and persisted so presets stay correct across launches.
   static const _keyPanelW = 'client_panel_w';
@@ -84,6 +87,11 @@ class SettingsService extends GetxService {
   // encoder allows (EncodeBudget). 1 to 8.
   final maxTabletsRx = defaultMaxTablets.obs;
 
+  // Host: while the link is USB, the Mac also listens on Wi-Fi for one
+  // paired device (an iPhone, say) beside the USB tablets. Saved with no
+  // reconnect; the hub starts or ends that one session itself.
+  final wifiListenRx = false.obs;
+
   static const defaultMaxTablets = 4;
   static const maxTabletsLimit = 8;
 
@@ -128,6 +136,7 @@ class SettingsService extends GetxService {
         : LinkType.usb;
     maxTabletsRx.value = (_prefs.getInt(_keyMaxTablets) ?? defaultMaxTablets)
         .clamp(1, maxTabletsLimit);
+    wifiListenRx.value = _prefs.getBool(_keyWifiListen) ?? false;
     await _migrateToPerTablet();
   }
 
@@ -609,6 +618,46 @@ class SettingsService extends GetxService {
     final v = n.clamp(1, maxTabletsLimit);
     maxTabletsRx.value = v;
     await _prefs.setInt(_keyMaxTablets, v);
+  }
+
+  /// Host: whether the Mac listens on Wi-Fi beside the USB tablets
+  /// ([wifiListenRx]).
+  bool get wifiListen => wifiListenRx.value;
+
+  Future<void> setWifiListen(bool v) async {
+    wifiListenRx.value = v;
+    await _prefs.setBool(_keyWifiListen, v);
+  }
+
+  /// Host: the mode the device that joins over Wi-Fi beside the USB tablets
+  /// was last asked to run in (its card's mode menu); null until then, when
+  /// it takes the selectors' ([nextChoice]). Kept apart from
+  /// [knownChoice], which is for tablets known by their adb serial.
+  SessionChoice? get wifiListenChoice => SessionChoice.fromNames(
+    _prefs.getString(_keyWifiListenMode),
+    _prefs.getString(_keyWifiListenDirection),
+  );
+
+  /// Saves [wifiListenChoice]. Not async, like [setKnownChoice]: the cache
+  /// is updated inside the call, so a session made right after reads it.
+  void setWifiListenChoice(SessionChoice choice) {
+    // Both calls before any await: each puts its value in the cache at once.
+    final writes = [
+      _prefs.setString(_keyWifiListenMode, choice.mode.name),
+      _prefs.setString(_keyWifiListenDirection, choice.direction.name),
+    ];
+    unawaited(
+      Future.wait(writes).then<void>(
+        (_) {},
+        onError: (Object e) {
+          if (Get.isRegistered<LoggerService>()) {
+            Get.find<LoggerService>().w(
+              'Settings: the Wi-Fi device\'s mode not saved: $e',
+            );
+          }
+        },
+      ),
+    );
   }
 
   Future<void> setShowPerformanceOverlay(bool v) {

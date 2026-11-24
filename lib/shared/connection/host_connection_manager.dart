@@ -71,6 +71,16 @@ class HostConnectionManager extends BaseConnectionManager {
       }
     };
     ever<LinkType>(settings.linkTypeRx, _onLinkTypeChanged);
+    // Listen on Wi-Fi beside USB follows its toggle and the cap it needs.
+    _besideWorkers = [
+      ever<bool>(settings.wifiListenRx, (on) {
+        // Turned on: listening is what the user asked for, so a stop of the
+        // Wi-Fi session made before no longer holds.
+        if (on) stoppedDevices.remove(wifiKey);
+        _besideRuleChanged();
+      }),
+      ever<int>(settings.maxTabletsRx, (_) => _besideRuleChanged()),
+    ];
     _sessionsWorker = ever<Map<String, HostSession>>(
         sessions, (_) => _sessionsChanged());
     displays.onRebuildNeeded = _displaySetNeedsRebuild;
@@ -445,6 +455,8 @@ class HostConnectionManager extends BaseConnectionManager {
     stoppedDevices
         .remove(key ?? (settings.linkType == LinkType.wifi ? wifiKey : null));
     autoConnectPaused.value = false;
+    // The pause is over: the listener beside the tablets comes back too.
+    unawaited(_listenBeside());
   }
 
   // Keys an automatic connect has started and whose connect() has not
@@ -482,9 +494,10 @@ class HostConnectionManager extends BaseConnectionManager {
   /// Some session is live.
   bool get anyActive => sessions.values.any((s) => s.phase.value.isActive);
 
-  /// Some session is on its way to being live.
+  /// Some session is on its way to being live (the beside session only
+  /// once a device is on it: until then it only listens).
   bool get anyConnecting =>
-      sessions.values.any((s) => s.phase.value.isConnecting);
+      sessions.values.any((s) => s.phase.value.isConnecting && !isListening(s));
 
   /// Sessions over USB, whatever their phase.
   int get usbSessionCount =>
@@ -507,17 +520,129 @@ class HostConnectionManager extends BaseConnectionManager {
   /// with the app saying Wi-Fi.
   bool get replacing => _reserved.isNotEmpty;
 
+  /// Every place taken under [cap]: [heldUsbPlaces], and the session
+  /// beside them on Wi-Fi while a device is on it ([besideHolds]). What
+  /// Home counts, what a new USB tablet is checked against, and what the
+  /// policy leaves room by.
+  Set<String> get heldPlaces => {...heldUsbPlaces, if (besideHolds) wifiKey};
+
   /// A pick of a USB tablet with no session would add one beside the
   /// others, rather than replace the one there is (cap 1) or be refused.
   bool get canAdd =>
       !endingAll.value &&
       settings.linkType == LinkType.usb &&
-      heldUsbPlaces.length < cap;
+      heldPlaces.length < cap;
 
-  /// Makes the session [key] the one the hub's observables show.
+  // ─── Wi-Fi beside USB ─────────────────────────────────────────────────────
+
+  /// The Mac listens on Wi-Fi beside its USB tablets: the toggle is on
+  /// ([SettingsService.wifiListen]), the link is USB, and [cap] leaves room
+  /// for a second device. Then one Wi-Fi session ([wifiKey], made with
+  /// [HostSession.beside]) waits for a paired device (an iPhone) while the
+  /// USB tablets run on, each device in its own mode.
+  bool get wifiBeside => settings.wifiListen && canListenBeside;
+
+  /// Listening on Wi-Fi beside the USB tablets is possible now (the link
+  /// is USB and [cap] leaves two places), toggle or not.
+  bool get canListenBeside => settings.linkType == LinkType.usb && cap >= 2;
+
+  /// The Wi-Fi session beside the USB tablets, if there is one.
+  HostSession? get besideSession {
+    final s = sessions[wifiKey];
+    return s != null && s.beside ? s : null;
+  }
+
+  /// The beside session has a device on it (its peer proved itself): only
+  /// then does it count as a tablet under [cap].
+  bool get besideHolds => besideSession?.trusted.value ?? false;
+
+  /// [session] is the beside session with no device on it: it only
+  /// listens, whatever its phase says (a stranger that finished TLS keeps
+  /// it `configuring` for up to 3 s), so it is never focused, takes no
+  /// place, and reads as neither connecting nor live to the rules that
+  /// look at the others.
+  static bool isListening(HostSession session) =>
+      session.beside && !session.trusted.value;
+
+  late final List<Worker> _besideWorkers;
+
+  // One per beside session: its trust, to show it while a device is on it.
+  final _trustWorkers = <HostSession, Worker>{};
+
+  // Beside sessions made so far, so a start can tell whether it made one.
+  int _besideMade = 0;
+
+  /// A device got onto the beside session, or left it. With nothing else
+  /// shown, the hub shows it from the moment its device has proved itself;
+  /// once it only listens again it is shown no longer (the hub would read
+  /// as connecting for nobody), and another session, or `disconnected`,
+  /// takes its place.
+  void _besideTrustChanged(HostSession session, bool trusted) {
+    if (sessions[session.key] != session) return;
+    if (trusted) {
+      if (_focused == null) _focus(session);
+      return;
+    }
+    if (identical(_focused, session)) {
+      _unfocus();
+      _refocus(null);
+    }
+    // Its device gone while the rule no longer wants a listener (Maximum
+    // tablets lowered meanwhile): it ends rather than listening again.
+    if (!wifiBeside) unawaited(disconnectSession(session.key));
+  }
+
+  /// The toggle or Maximum tablets changed: a beside session that the rule
+  /// no longer allows ends (the toggle off, or [cap] under 2), and one the
+  /// rule wants is started.
+  void _besideRuleChanged() {
+    final beside = besideSession;
+    if (!wifiBeside) {
+      // Turned off: it ends. Maximum tablets lowered under 2: only a
+      // listener ends; a device on it runs on, as a lowered cap stops no
+      // tablet, and the session ends once that device has gone
+      // ([_besideTrustChanged]).
+      if (beside != null &&
+          (!settings.wifiListen ||
+              settings.linkType != LinkType.usb ||
+              isListening(beside))) {
+        unawaited(disconnectSession(beside.key));
+      }
+      return;
+    }
+    unawaited(_listenBeside());
+  }
+
+  /// Starts the beside session when [wifiBeside] wants one and there is
+  /// none, nor one starting, and the user has not stopped it. With the same
+  /// permission check as every automatic connect.
+  Future<void> _listenBeside() async {
+    if (!wifiBeside || !_besideWanted()) return;
+    if (!await _hostGranted()) return;
+    if (!wifiBeside || !_besideWanted()) return;
+    _start(wifiKey);
+  }
+
+  // Not held off by [autoConnectPaused]: the switch is what says whether
+  // the Mac listens, and a Cancel of the facade's search for a tablet
+  // (which pauses) must not leave it reading on with nothing listening.
+  bool _besideWanted() =>
+      _endingAll == 0 &&
+      !sessions.containsKey(wifiKey) &&
+      !_endingKeys.containsKey(wifiKey) &&
+      !_starting.contains(wifiKey) &&
+      !_choosing.contains(wifiKey) &&
+      !_choosing.contains(_linkChange) &&
+      !stoppedDevices.contains(wifiKey);
+
+  /// Makes the session [key] the one the hub's observables show. Not a
+  /// beside session that only listens ([isListening]): the hub would read
+  /// as connecting for a device that is not there.
   void focus(String key) {
     final session = sessions[key];
-    if (session != null && session != _focused) _focus(session);
+    if (session != null && session != _focused && !isListening(session)) {
+      _focus(session);
+    }
   }
 
   static bool _busy(HostSession? s) =>
@@ -845,6 +970,12 @@ class HostConnectionManager extends BaseConnectionManager {
   Future<void> connectWith(String? serial, {SessionChoice? choice}) async {
     final fallback = settings.nextChoice;
     if (_endingAll > 0 || _choosing.contains(_linkChange)) return;
+    // The Wi-Fi session over USB is the one beside the tablets, only while
+    // that is on; it runs in the mode it was last given, if any.
+    if (serial == wifiKey && settings.linkType == LinkType.usb) {
+      if (!wifiBeside) return;
+      choice = settings.wifiListenChoice ?? choice;
+    }
     final single = cap == 1 && sessions.length <= 1;
     if (single) {
       // The session's own phase too, not only the one shown: a session
@@ -878,7 +1009,10 @@ class HostConnectionManager extends BaseConnectionManager {
     // straight there (never through a new session's `disconnected`), before
     // anything else can run.
     final connecting = session.connect();
-    if (session != _focused) _focus(session);
+    // The beside session is shown only once a device is on it (a tap on its
+    // card, or [_refocus]); listening, it would make the hub read as
+    // connecting for nobody.
+    if (session != _focused && !session.beside) _focus(session);
     await connecting;
   }
 
@@ -893,11 +1027,15 @@ class HostConnectionManager extends BaseConnectionManager {
       required SessionChoice? choice,
       required SessionChoice fallback}) async {
     final attempt = currentAttempt;
-    final link = settings.linkType;
+    var link = settings.linkType;
     final focused = _focused;
     final String key;
     if (link == LinkType.wifi) {
       key = wifiKey;
+    } else if (serial == wifiKey) {
+      // [connectWith] let it through only with [wifiBeside].
+      key = wifiKey;
+      link = LinkType.wifi;
     } else if (serial != null) {
       key = serial;
     } else if (focused != null &&
@@ -925,7 +1063,11 @@ class HostConnectionManager extends BaseConnectionManager {
               candidates.firstOrNull?.serial;
       if (picked == null) {
         // Every attached tablet has its session: nothing to add.
-        if (!single && sessions.isNotEmpty) return null;
+        // (A beside session that only listens is no tablet: it leaves the
+        // hub to say that no device is attached, and to look again.)
+        if (!single && sessions.values.any((s) => !isListening(s))) {
+          return null;
+        }
         // Nothing to fix a session to yet: say so, and look again, taking
         // whichever tablet is plugged in first (the last-used one if it is
         // among them).
@@ -1009,10 +1151,19 @@ class HostConnectionManager extends BaseConnectionManager {
     // is lowered under their number; only new ones are refused. A tablet
     // whose session is being replaced is no new one: its place is held
     // ([_reserved]), and counts against every other pick.
-    final held = heldUsbPlaces..remove(key);
-    if (!single && !_reserved.contains(key) && held.length >= cap) {
-      log.w('Host: $key not connected: ${held.length} of $cap tablets '
-          'already');
+    final beside = link == LinkType.wifi && settings.linkType == LinkType.usb;
+    // Turned off (or the cap lowered) while this was being chosen, or while
+    // its last session ended.
+    if (beside && !wifiBeside) return null;
+    final held = heldPlaces..remove(key);
+    // The beside session is made whatever the count: listening, it holds
+    // no place; the device that dials in is admitted to the encoder like a
+    // new tablet, against [cap] ([HostSession.beside]).
+    if (!single && !beside && !_reserved.contains(key) && held.length >= cap) {
+      log.w(
+        'Host: $key not connected: ${held.length} of $cap tablets '
+        'already',
+      );
       return null;
     }
     final usb = link == LinkType.usb;
@@ -1029,27 +1180,47 @@ class HostConnectionManager extends BaseConnectionManager {
       budget: budget,
       // The hub's check above is the cap. The budget's own must not
       // refuse a session that holds a place here (see [cap]).
-      cap: () => math.max(cap, heldUsbPlaces.length),
-      // Over Wi-Fi the one display every build has made; over USB the
-      // tablet's own, never one a live display already has.
-      vdSerial: usb
-          ? settings.vdSerialFor(key, taken: {
-              for (final s in sessions.values)
-                if (s.link == LinkType.usb) s.vdSerial,
-            })
+      // The beside session's place is a new tablet's every time: [cap]
+      // as it is, so the encoder refuses it when the tablets fill it.
+      // With every place taken by the USB tablets (one still dialling in
+      // holds its place here, though not yet in the budget), the device is
+      // turned away: a cap of 0 refuses it.
+      cap: beside
+          ? () => heldUsbPlaces.length >= cap ? 0 : cap
+          : () => math.max(cap, heldPlaces.length),
+      beside: beside,
+      // Over the Wi-Fi link the one display every build has made; over USB
+      // the tablet's own, and beside the USB tablets the Wi-Fi device's
+      // own (serial 1 may be a tablet's), never one a live display has.
+      vdSerial: usb || beside
+          ? settings.vdSerialFor(
+              key,
+              taken: {for (final s in sessions.values) s.vdSerial},
+            )
           : 1,
-      vdName: settings.vdNameFor(key,
-          model: availableDevices
-              .firstWhereOrNull((d) => d.serial == key)
-              ?.model),
+      vdName: settings.vdNameFor(
+        key,
+        model: beside
+            ? LinkType.wifi.chipLabel
+            : availableDevices.firstWhereOrNull((d) => d.serial == key)?.model,
+      ),
       socket: injected ? _injectedSocket : SocketService(),
       port: linkPort,
     );
     if (injected) _injectedHolder = session;
     if (link == LinkType.usb) _tunnels.claim(key, session);
     sessions[key] = session;
-    _encoderWorkers[session] = everAll(
-        [session.granted, session.captured], (_) => _encoderStateChanged());
+    _encoderWorkers[session] = everAll([
+      session.granted,
+      session.captured,
+    ], (_) => _encoderStateChanged());
+    if (beside) {
+      _besideMade++;
+      _trustWorkers[session] = ever<bool>(
+        session.trusted,
+        (t) => _besideTrustChanged(session, t),
+      );
+    }
     _routeNativeCallbacks();
     return session;
   }
@@ -1094,6 +1265,7 @@ class HostConnectionManager extends BaseConnectionManager {
     try {
       session.retire();
       _encoderWorkers.remove(session)?.dispose();
+      _trustWorkers.remove(session)?.dispose();
       _encoderStateChanged();
       await session.disconnect();
       session.dispose();
@@ -1108,6 +1280,9 @@ class HostConnectionManager extends BaseConnectionManager {
         _endingKeys.remove(session.key);
       }
       ended.complete();
+      // The toggle may have been turned off and on again while it ended:
+      // the listener it asked for could not start then.
+      if (session.beside) unawaited(_listenBeside());
     }
   }
 
@@ -1117,12 +1292,12 @@ class HostConnectionManager extends BaseConnectionManager {
   void _refocus(ConnectionPhase? showing) {
     for (final key in _recent.reversed) {
       final next = sessions[key];
-      if (next != null) {
+      if (next != null && !isListening(next)) {
         _focus(next);
         return;
       }
     }
-    final left = sessions.values.lastOrNull;
+    final left = sessions.values.where((s) => !isListening(s)).lastOrNull;
     if (left != null) {
       _focus(left);
       return;
@@ -1162,7 +1337,9 @@ class HostConnectionManager extends BaseConnectionManager {
         // this very session.
         (cap == 1 && sessions.length <= 1 && _choosing.isNotEmpty) ||
         _endingAll > 0 ||
-        old.phase.value.isConnecting ||
+        // The beside session may change while it only listens: there is
+        // no attempt of a device's to let finish.
+        (old.phase.value.isConnecting && !isListening(old)) ||
         old.choice
             .effective(link: old.link)
             .sameEffect(choice.effective(link: old.link))) {
@@ -1195,12 +1372,21 @@ class HostConnectionManager extends BaseConnectionManager {
     final usb = link == LinkType.usb;
     final wasFocused = identical(_focused, old);
     final attempt = currentAttempt;
-    final showing =
-        usb ? ConnectionPhase.detectingDevice : ConnectionPhase.handshaking;
+    // A beside session listens again for a moment: the hub shows nothing
+    // for it, so with nothing else it reads `disconnected`.
+    final showing = usb
+        ? ConnectionPhase.detectingDevice
+        : old.beside
+            ? null
+            : ConnectionPhase.handshaking;
     _choosing.add(key);
     if (usb) _reserved.add(key);
     final ending = _endSession(old, showing: showing);
-    settings.setKnownChoice(key, choice);
+    if (old.beside) {
+      settings.setWifiListenChoice(choice);
+    } else {
+      settings.setKnownChoice(key, choice);
+    }
     HostSession? session;
     try {
       await ending;
@@ -1228,7 +1414,12 @@ class HostConnectionManager extends BaseConnectionManager {
     // As in [connectWith]: connecting before it is shown, so the hub's
     // phase never passes through a new session's `disconnected`.
     final connecting = session.connect();
-    if (wasFocused || _focused == null) {
+    if (session.beside && wasFocused) {
+      // Listening again for a moment: shown once its device is back.
+      _recent
+        ..remove(key)
+        ..add(key);
+    } else if (!session.beside && (wasFocused || _focused == null)) {
       _focus(session);
     } else {
       // Not the one shown, but in the focus history like every session,
@@ -1280,6 +1471,9 @@ class HostConnectionManager extends BaseConnectionManager {
       _endingAll--;
       endingAll.value = _endingAll > 0;
     }
+    // Listening on Wi-Fi beside the tablets follows its switch alone: it
+    // comes back after every tablet is disconnected.
+    unawaited(_listenBeside());
   }
 
   /// Every session ends ([disconnect] runs this).
@@ -1381,6 +1575,10 @@ class HostConnectionManager extends BaseConnectionManager {
     _clearProbe();
     budget.removeListener(_encoderStateChanged);
     _sessionsWorker.dispose();
+    for (final worker in [..._besideWorkers, ..._trustWorkers.values]) {
+      worker.dispose();
+    }
+    _trustWorkers.clear();
     for (final worker in _phaseWorkers.values) {
       worker.dispose();
     }
@@ -1466,10 +1664,14 @@ class HostConnectionManager extends BaseConnectionManager {
       for (final serial in free)
         if (!stoppedDevices.contains(serial)) serial,
     ]..sort();
-    final firstRun = sessions.isEmpty &&
-        _starting.isEmpty &&
+    // The beside session counts for nothing here: it only listens until a
+    // device is on it, and a tablet plugged in still connects by itself.
+    final firstRun =
+        sessions.values.every((s) => s.beside) &&
+        _starting.every((k) => k == wifiKey) &&
         _reserved.isEmpty &&
-        phase.value == ConnectionPhase.disconnected &&
+        (phase.value == ConnectionPhase.disconnected ||
+            (_focused?.beside ?? false)) &&
         free.length == 1 &&
         candidates.length == 1;
     final known = cap > 1
@@ -1480,8 +1682,11 @@ class HostConnectionManager extends BaseConnectionManager {
     // between two sessions, its mode being changed.
     var room = cap -
         {
-          ...heldUsbPlaces,
-          ..._starting,
+          ...heldPlaces,
+          // The listener's start lasts as long as it listens: it holds a
+          // place only once a device is on it (in [heldPlaces] then).
+          for (final key in _starting)
+            if (key != wifiKey) key,
           for (final key in _choosing)
             if (key != _anyDevice && key != _linkChange && key != wifiKey) key,
         }.length;
@@ -1492,6 +1697,7 @@ class HostConnectionManager extends BaseConnectionManager {
       room--;
       _start(serial);
     }
+    if (_besideWanted() && wifiBeside) _start(wifiKey);
   }
 
   /// Starts connecting [key] (over Wi-Fi, the Wi-Fi session) for the
@@ -1501,10 +1707,27 @@ class HostConnectionManager extends BaseConnectionManager {
   /// remembered (and the Wi-Fi session) takes what the selectors say.
   void _start(String key) {
     _starting.add(key);
-    unawaited(connectWith(key == wifiKey ? null : key,
-            choice: settings.knownChoice(key))
-        .catchError((Object e) => log.w('Host: auto-connect of $key: $e'))
-        .whenComplete(() => _starting.remove(key)));
+    // The Wi-Fi session is asked for by its key over USB (beside the
+    // tablets: [connectWith] gives it its own mode), by none over Wi-Fi.
+    final usb = settings.linkType == LinkType.usb;
+    final made = _besideMade;
+    unawaited(
+      connectWith(
+            key == wifiKey && !usb ? null : key,
+            choice: settings.knownChoice(key),
+          )
+          .catchError((Object e) => log.w('Host: auto-connect of $key: $e'))
+          .whenComplete(() {
+            _starting.remove(key);
+            // A listener asked for while this one was still starting (it
+            // ended meanwhile) starts now. Only when this start made one:
+            // a start refused before making any would ask again at once,
+            // for ever.
+            if (key == wifiKey && _besideMade != made) {
+              unawaited(_listenBeside());
+            }
+          }),
+    );
   }
 
   /// Home offers the link selector while nothing is connecting or live.
@@ -1514,13 +1737,23 @@ class HostConnectionManager extends BaseConnectionManager {
   Future<void> _onLinkTypeChanged(LinkType link) async {
     if (_choosing.isNotEmpty || _endingAll > 0) return;
     final all = sessions.values.toList();
-    if (all.any((s) => s.phase.value.isConnecting || s.phase.value.isActive)) {
+    if (all.any(
+      (s) =>
+          (s.phase.value.isConnecting || s.phase.value.isActive) &&
+          !isListening(s),
+    )) {
       return;
     }
-    final stale = all.where((s) => s.link != link).toList();
-    if (stale.isEmpty) return;
-    final retrying =
-        stale.any((s) => s.retryPending.value && !s.refused.value);
+    // The beside session goes with any change: over Wi-Fi the link's own
+    // session takes its place, and back on USB a new one is made.
+    final stale = all.where((s) => s.link != link || s.beside).toList();
+    if (stale.isEmpty) {
+      unawaited(_listenBeside());
+      return;
+    }
+    final retrying = stale.any(
+      (s) => !s.beside && s.retryPending.value && !s.refused.value,
+    );
     final attempt = currentAttempt;
     _choosing.add(_linkChange);
     try {
@@ -1533,11 +1766,12 @@ class HostConnectionManager extends BaseConnectionManager {
       _choosing.remove(_linkChange);
     }
     if (isCancelled(attempt)) return;
+    unawaited(_listenBeside());
     if (retrying) {
       // The hub's own connect: the tablet it settles on comes back in the
       // mode it is remembered in.
       await connectWith(null);
-    } else if (sessions.isEmpty) {
+    } else if (sessions.values.every(isListening)) {
       setPhase(ConnectionPhase.disconnected);
     }
   }

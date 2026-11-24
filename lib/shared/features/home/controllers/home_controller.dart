@@ -356,8 +356,26 @@ class HomeController extends GetxController with WidgetsBindingObserver {
   /// Host, a tablet's card: its Disconnect, or its Cancel while it connects
   /// or waits to retry. Ends that tablet's session alone, and the automatic
   /// connects leave the tablet alone until the user connects it again.
-  Future<void> onSessionStop(String key) =>
-      _connection.disconnectSession(key, userStopped: true);
+  Future<void> onSessionStop(String key) async {
+    final hub = _connection;
+    // The session beside the USB tablets is the Listen on Wi-Fi switch's:
+    // stopping it turns that off, so it does not come back by itself.
+    if (hub is HostConnectionManager &&
+        identical(hub.besideSession, hub.sessions[key]) &&
+        hub.besideSession != null) {
+      await _settings.setWifiListen(false);
+      return;
+    }
+    await _connection.disconnectSession(key, userStopped: true);
+  }
+
+  /// Host, the add panel: Listen on Wi-Fi too, turned on or off. Saved;
+  /// the hub starts or ends the session beside the tablets itself. Turning
+  /// it on needs the two permissions, like a connect from Home.
+  Future<void> onWifiListen(bool on) async {
+    if (on && isHost && !await _ensureHostPermissions()) return;
+    await _settings.setWifiListen(on);
+  }
 
   /// Host, a tablet's card: Retry, offered in `error`: when its failure
   /// armed no retry (the encoder had no room for it), or to run the retry

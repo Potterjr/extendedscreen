@@ -6,6 +6,7 @@ import 'package:extendedscreen/shared/models/device_model.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
 import 'package:extendedscreen/shared/models/link_type.dart';
 import 'package:extendedscreen/shared/models/session_choice.dart';
+import 'package:extendedscreen/shared/models/session_mode.dart';
 import 'package:extendedscreen/shared/services/settings_service.dart';
 import 'package:extendedscreen/shared/widgets/connection_card.dart';
 import 'package:extendedscreen/shared/widgets/connection_steps.dart';
@@ -66,16 +67,21 @@ class SessionCard extends StatelessWidget {
     return Obx(() {
       final s = session;
       final phase = s.phase.value;
-      final device = s.activeDevice.value ?? listed;
+      // The session beside the USB tablets, with no device on it yet.
+      final listening = s.beside && !s.trusted.value;
+      // Listening, the last device it had is no longer there.
+      final device = listening ? null : s.activeDevice.value ?? listed;
       final model = device?.model;
       final wifi = s.link == LinkType.wifi;
       final granted = s.granted.value;
-      final error = _errorLine(
-        phase,
-        s.errorKey.value,
-        s.errorMessage.value,
-        s.notice.value,
-      );
+      final error =
+          _errorLine(
+            phase,
+            s.errorKey.value,
+            s.errorMessage.value,
+            s.notice.value,
+          ) ??
+          (listening && phase.isConnecting ? 'session_wifi_waiting'.tr : null);
       final latency = s.latencyMs.value;
       final hz = s.refreshRateHz.value;
       final bitrate = s.streamBitrate.value;
@@ -108,8 +114,10 @@ class SessionCard extends StatelessWidget {
                 LayoutBuilder(
                   builder: (context, box) => Row(
                     children: [
-                      const Icon(
-                        Icons.tablet_android,
+                      Icon(
+                        model == 'iPhone'
+                            ? Icons.phone_iphone
+                            : Icons.tablet_android,
                         color: _accent,
                         size: 20,
                       ),
@@ -119,7 +127,8 @@ class SessionCard extends StatelessWidget {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              model ?? s.key,
+                              model ??
+                                  (s.beside ? 'session_wifi_beside'.tr : s.key),
                               overflow: TextOverflow.ellipsis,
                               style: const TextStyle(
                                 color: Colors.white,
@@ -129,7 +138,8 @@ class SessionCard extends StatelessWidget {
                             ),
                             if (model != null)
                               Text(
-                                s.key,
+                                // Over Wi-Fi the device's address.
+                                wifi ? device!.serial : s.key,
                                 overflow: TextOverflow.ellipsis,
                                 style: TextStyle(
                                   color: Colors.white.withValues(alpha: 0.4),
@@ -164,9 +174,10 @@ class SessionCard extends StatelessWidget {
                             // live or waits in `error`, not for one on its
                             // way to being live.
                             if (onMode case final onMode?
-                                when !wifi &&
+                                when (!wifi || s.beside) &&
                                     (phase.isActive ||
-                                        phase == ConnectionPhase.error)) ...[
+                                        phase == ConnectionPhase.error ||
+                                        listening)) ...[
                               const SizedBox(width: 2),
                               _ModeMenu(session: s, onMode: onMode),
                             ],
@@ -336,7 +347,12 @@ class _ModeMenu extends StatelessWidget {
         final current = s.effectiveChoice;
         return [
           for (final choice in SessionChoice.all)
-            _item(s, current, choice),
+            // Over Wi-Fi the Mac cannot drive the device (that takes adb):
+            // the tablet-controls-Mac item is the one remote control.
+            if (s.link == LinkType.usb ||
+                !choice.direction.isReverse ||
+                choice.mode != SessionMode.remoteControl)
+              _item(s, current, choice),
         ];
       },
       child: Padding(

@@ -1613,4 +1613,79 @@ void main() {
     expect(_modeItem('SERIAL-C', _extended), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+
+  group('Listen on Wi-Fi beside USB', () {
+    /// The session beside the USB tablets, with no device on it.
+    HostSession listener() => HostSession(
+          key: HostConnectionManager.wifiKey,
+          link: LinkType.wifi,
+          beside: true,
+          pipeline: hub.pipeline,
+          adb: adb,
+          socket: SocketService(),
+        )..phase.value = ConnectionPhase.handshaking;
+
+    testWidgets('a listener alone hides nothing: the link selector and the '
+        'facade card stay, its own card says it waits, and it holds no place',
+        (tester) async {
+      tester.view.physicalSize = const Size(1000, 2400);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await settings.setWifiListen(true);
+      await start(tester, 0, permissions: true);
+      hub.sessions[HostConnectionManager.wifiKey] = listener();
+      await tester.pump();
+
+      expect(_card(HostConnectionManager.wifiKey), findsOneWidget);
+      expect(_inCards(find.text('session_wifi_beside')), findsOneWidget);
+      expect(_inCards(find.text('session_wifi_waiting')), findsOneWidget);
+      expect(find.text('link_usb_desc'), findsOneWidget,
+          reason: 'a listener is under way for nobody');
+      expect(hub.heldPlaces, isEmpty);
+      expect(_inPicker(_next('wifi-listen')), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets("the add panel's switch turns listening on and off, and is "
+        'off with room for one tablet only', (tester) async {
+      tester.view.physicalSize = const Size(1000, 2400);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await start(tester, 1, permissions: true);
+      final toggle = find.descendant(
+          of: _next('wifi-listen'), matching: find.byType(Switch));
+      expect(tester.widget<Switch>(toggle).value, isFalse);
+
+      await tester.tap(toggle);
+      // The permissions are asked about first; then the switch moves.
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(settings.wifiListen, isTrue);
+      expect(tester.widget<Switch>(toggle).value, isTrue);
+
+      await settings.setMaxTablets(1);
+      await tester.pump();
+      expect(tester.widget<Switch>(toggle).onChanged, isNull);
+      expect(tester.widget<Switch>(toggle).value, isFalse);
+      expect(find.text('home_wifi_listen_needs_two'), findsOneWidget);
+    });
+
+    testWidgets("a listener's Cancel turns listening off rather than stopping "
+        'a tablet', (tester) async {
+      tester.view.physicalSize = const Size(1000, 2400);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await settings.setWifiListen(true);
+      await start(tester, 1, permissions: true);
+      hub.sessions[HostConnectionManager.wifiKey] = listener();
+      await tester.pump();
+
+      await tester.tap(_action(HostConnectionManager.wifiKey, 'common_cancel'));
+      await tester.pump();
+      expect(settings.wifiListen, isFalse);
+      // The hub ends it for the switch, and stops no tablet: it is not
+      // put among the ones the user stopped.
+      expect(hub.stops, [(HostConnectionManager.wifiKey, false)]);
+    });
+  });
 }

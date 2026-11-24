@@ -76,16 +76,18 @@ class HostSession extends BaseConnectionManager {
     int Function() cap = _oneTablet,
     this.vdSerial = 1,
     this.vdName = 'Extended Screen',
+    this.beside = false,
     super.socket,
     super.port,
-  })  : assert(link == LinkType.wifi || serial != null),
-        choice = choice ?? Get.find<SettingsService>().nextChoice,
-        _pipeline = pipeline,
-        _tunnels = tunnels,
-        _displays = displays,
-        _adb = adb ?? Get.find<AdbService>(),
-        _budget = budget,
-        _cap = cap {
+  }) : assert(link == LinkType.wifi || serial != null),
+       assert(!beside || link == LinkType.wifi),
+       choice = choice ?? Get.find<SettingsService>().nextChoice,
+       _pipeline = pipeline,
+       _tunnels = tunnels,
+       _displays = displays,
+       _adb = adb ?? Get.find<AdbService>(),
+       _budget = budget,
+       _cap = cap {
     _phaseWorker = ever<ConnectionPhase>(phase, (p) {
       if (p != ConnectionPhase.streaming) return;
       // Live again: the next failure is a first one.
@@ -105,6 +107,22 @@ class HostSession extends BaseConnectionManager {
 
   /// How this session reaches its tablet. Fixed for its life.
   final LinkType link;
+
+  /// The Wi-Fi session the hub runs beside its USB tablets (Listen on
+  /// Wi-Fi): it waits for whichever paired device dials in, for as long as
+  /// the toggle is on, and holds a place on the encoder only while that
+  /// device is there. Its teardown gives that place up for good
+  /// ([_releaseBudget]) rather than keeping it for the next attempt: the
+  /// device it was for may be in a pocket, and the next to dial in is an
+  /// ordinary admission. Fixed for its life; only over Wi-Fi.
+  final bool beside;
+
+  /// The peer of the current connection has proved itself ([peerTrusted]),
+  /// as an observable: set when it does, cleared at teardown. The hub reads
+  /// it to tell a [beside] session that only listens (anything on the LAN
+  /// can finish a TLS handshake and keep it waiting) from one a device is
+  /// on.
+  final trusted = false.obs;
 
   /// The tablet's adb serial (USB), fixed for the session's life: its
   /// retries look for this device and no other. Null over Wi-Fi.
@@ -483,6 +501,7 @@ class HostSession extends BaseConnectionManager {
     _panel = null;
     platform = null;
     _authedConnection = null;
+    trusted.value = false;
     _usbKey = null;
     // The device whose adb tunnel this attempt set up (USB only), so a
     // cancelled attempt knows which one to remove.
@@ -1668,13 +1687,19 @@ class HostSession extends BaseConnectionManager {
     _stopBitrateAdaptation();
     // The others may climb into this one's share at once: its encoder stops
     // a moment later, behind the queue. It keeps its place for its next
-    // attempt (a retry, a reconnect) unless the hub has ended it.
-    if (_retired) {
+    // attempt (a retry, a reconnect) unless the hub has ended it, or it is
+    // the session beside the USB tablets, which holds one only while its
+    // device is there ([beside]).
+    if (_retired || beside) {
       _releaseBudget();
     } else {
       _reserveBudget();
     }
-    if (Get.isRegistered<WifiDiscoveryService>()) _discovery.stopResponder();
+    // The responder is the Wi-Fi session's: a USB session's teardown must
+    // not stop it under the session listening beside it.
+    if (_wifiSession && Get.isRegistered<WifiDiscoveryService>()) {
+      _discovery.stopResponder();
+    }
     final reverse = spec.isReverseRemote;
     // Best-effort: tell the client to stop capturing before the socket
     // drops. On a link that is already dead it never arrives; the tablet's
@@ -1683,6 +1708,7 @@ class HostSession extends BaseConnectionManager {
     // From here on nobody is authenticated, whoever the socket belongs to,
     // and this attempt's USB key opens nothing any more.
     _authedConnection = null;
+    trusted.value = false;
     _usbKey = null;
     // Wake a connect() parked on the proof or the HELLO: its session is over,
     // and it must find that out now, not when its timeout fires seconds later
@@ -1792,6 +1818,7 @@ class HostSession extends BaseConnectionManager {
   void _trustConnection() {
     _authedConnection = socket.connectionId;
     socket.trustPeer();
+    trusted.value = true;
   }
 
 
@@ -1864,8 +1891,20 @@ class HostSession extends BaseConnectionManager {
     // (everything mode-dependent waits for this HELLO). The display mode
     // stays the attempt's own.
     if (isApple) {
-      _spec = SessionSpec.from(choice, link,
-          displayMode: spec.displayMode, android: false);
+      _spec = SessionSpec.from(
+        choice,
+        link,
+        displayMode: spec.displayMode,
+        android: false,
+      );
+      // Over Wi-Fi nothing else names the device (adb gives a USB tablet
+      // its model), and the cards would call it an Android tablet.
+      final device = activeDevice.value;
+      if (_wifiSession && device != null && device.model == null) {
+        activeDevice.value = device.copyWith(
+          model: platform == helloPlatformIphone ? 'iPhone' : 'iPad',
+        );
+      }
     }
     _panel = ClientPanel(w, h, hz);
     // Only an Android HELLO (or one too old to name a platform) becomes the

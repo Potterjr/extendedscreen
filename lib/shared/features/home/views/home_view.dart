@@ -43,8 +43,13 @@ class HomeView extends GetView<HomeController> {
         // trips GetX's "improper use").
         title: controller.isHost
             ? Obx(() {
-                final sessions =
-                    (cm as HostConnectionManager).sessions.values.toList();
+                // A session beside the tablets that only listens on Wi-Fi
+                // is no device yet.
+                final sessions = [
+                  for (final s
+                      in (cm as HostConnectionManager).sessions.values)
+                    if (!HostConnectionManager.isListening(s)) s,
+                ];
                 final count = sessions.length;
                 const style = TextStyle(fontWeight: FontWeight.w600);
                 if (count == 0) {
@@ -209,14 +214,27 @@ class _HostBody extends StatelessWidget {
         ..sort((a, b) => a.key.compareTo(b.key));
       // Every session's phase and grant read here, so this builder hears
       // each of them change (the facade follows only the focused one).
-      final phases = [for (final s in sessions) s.phase.value];
-      final capturing = [for (final s in sessions) s.granted.value]
-          .any((g) => g != null);
+      for (final s in sessions) {
+        s.phase.value;
+      }
+      final capturing = [
+        for (final s in sessions) s.granted.value,
+      ].any((g) => g != null);
+      // The session beside the USB tablets that only listens for a device
+      // on Wi-Fi is under way for nobody: it neither hides the selectors
+      // nor counts as a tablet here (its card still shows).
+      final engaged = [
+        for (final s in sessions)
+          if (!HostConnectionManager.isListening(s)) s,
+      ];
       // The encoder's load line and the picker's room follow what the
       // encoder is taken to manage, which can be learned while nothing
       // else here changes.
       hub.capacityChanges.value;
-      final busy = phases.any((p) => p.isConnecting || p.isActive) ||
+      final busy =
+          engaged.any(
+            (s) => s.phase.value.isConnecting || s.phase.value.isActive,
+          ) ||
           phase.isConnecting ||
           phase.isActive;
       // The link is every tablet's at once: its selector shows only while
@@ -231,7 +249,7 @@ class _HostBody extends StatelessWidget {
       // Nor while a tablet is between two sessions (its mode being changed
       // from its card): it is in none of [sessions] for a moment, the hub
       // acts on no link change meanwhile, and it comes back over USB.
-      final selectors = !busy && sessions.length <= 1 && !hub.replacing;
+      final selectors = !busy && engaged.length <= 1 && !hub.replacing;
       return ListView(
         padding: const EdgeInsets.all(20),
         children: [
@@ -245,7 +263,15 @@ class _HostBody extends StatelessWidget {
           if (wifi)
             ..._wifi(phase, codecLabel, selectors)
           else
-            ..._usb(phase, codecLabel, sessions, busy, selectors, capturing),
+            ..._usb(
+              phase,
+              codecLabel,
+              sessions,
+              engaged,
+              busy,
+              selectors,
+              capturing,
+            ),
         ],
       );
     });
@@ -295,14 +321,21 @@ class _HostBody extends StatelessWidget {
   /// what the hub is doing: looking for a device, or that none is
   /// attached), the link selector while idle, and the add panel, which
   /// holds the mode the next tablet added runs in above its tiles.
-  List<Widget> _usb(ConnectionPhase phase, String codecLabel,
-      List<HostSession> sessions, bool busy, bool selectors, bool capturing) {
+  List<Widget> _usb(
+    ConnectionPhase phase,
+    String codecLabel,
+    List<HostSession> sessions,
+    List<HostSession> engaged,
+    bool busy,
+    bool selectors,
+    bool capturing,
+  ) {
     final focusedKey = hub.focusedKey.value;
     final devices = hub.availableDevices.toList();
     final cap = hub.cap;
     // With one tablet at most (cap 1), picking another one replaces the
     // session there is while it is not under way, as it always has.
-    final canPick = hub.canAdd || (cap == 1 && sessions.length <= 1 && !busy);
+    final canPick = hub.canAdd || (cap == 1 && engaged.length <= 1 && !busy);
     // A Disconnect of every tablet (the remote view's, say) is still ending
     // them: the tablets it freed are not short of room, and the facade
     // still reads the phase of a session that has no card any more.
@@ -347,8 +380,10 @@ class _HostBody extends StatelessWidget {
     };
     // Places in use: a tablet between two sessions holds its own.
     final header = [
-      'home_tablets_count'
-          .trParams({'n': '${hub.heldUsbPlaces.length}', 'cap': '$cap'}),
+      'home_tablets_count'.trParams({
+        'n': '${hub.heldPlaces.length}',
+        'cap': '$cap',
+      }),
       if (capturing)
         'home_encoder_load'.trParams({
           'load': '${(hub.budget.load * 100).round()}',
@@ -356,7 +391,7 @@ class _HostBody extends StatelessWidget {
         }),
     ].join(' · ');
     return [
-      if (sessions.isEmpty) ...[
+      if (engaged.isEmpty) ...[
         ConnectionCard(
           // Nothing left to stop while every session ends: no Disconnect
           // for a session that has gone.
@@ -378,7 +413,7 @@ class _HostBody extends StatelessWidget {
         SessionCard(
           key: ValueKey('session/${s.key}'),
           session: s,
-          focused: sessions.length > 1 && s.key == focusedKey,
+          focused: engaged.length > 1 && s.key == focusedKey,
           listed: devices.firstWhereOrNull((d) => d.serial == s.key),
           onFocus: () => controller.onFocus(s.key),
           onStop: controller.onSessionStop,
@@ -402,7 +437,7 @@ class _HostBody extends StatelessWidget {
         title: 'home_add_tablet'.tr,
         header: header,
         // A tablet between two sessions is attached, and on its way back.
-        emptyText: sessions.isNotEmpty || hub.replacing
+        emptyText: engaged.isNotEmpty || hub.replacing
             ? 'home_all_attached_connected'.tr
             : null,
         disabledReasons: disabled,
@@ -423,6 +458,13 @@ class _HostBody extends StatelessWidget {
             ),
           ),
           ..._modeSelectors(gap: 12),
+          _WifiListenSwitch(
+            key: const ValueKey('next/wifi-listen'),
+            on: settings.wifiListenRx.value,
+            // Beside the tablets means two places at least.
+            allowed: hub.canListenBeside,
+            onChanged: controller.onWifiListen,
+          ),
         ],
         refreshing: controller.refreshingDevices.value,
         onSelect: controller.onSelectDevice,
@@ -1040,6 +1082,50 @@ class _ErrorBanner extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// The add panel's "Listen on Wi-Fi too" switch: while it is on, the Mac
+/// also waits for one paired device on Wi-Fi (an iPhone, say) beside the
+/// USB tablets. With room for one tablet only it cannot be on, and says
+/// why.
+class _WifiListenSwitch extends StatelessWidget {
+  final bool on;
+  final bool allowed;
+  final ValueChanged<bool> onChanged;
+  const _WifiListenSwitch({
+    super.key,
+    required this.on,
+    required this.allowed,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    // A Material of its own: the card it sits in paints its colour on a
+    // plain box, which a list tile's ink would be drawn under.
+    return Material(
+      type: MaterialType.transparency,
+      child: SwitchListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+        value: on && allowed,
+        onChanged: allowed ? onChanged : null,
+        secondary: const Icon(Icons.wifi, color: Colors.white70, size: 20),
+        title: Text(
+          'home_wifi_listen'.tr,
+          style: const TextStyle(color: Colors.white, fontSize: 14),
+        ),
+        subtitle: Text(
+          allowed
+              ? 'home_wifi_listen_desc'.tr
+              : 'home_wifi_listen_needs_two'.tr,
+          style: TextStyle(
+            color: Colors.white.withValues(alpha: 0.5),
+            fontSize: 12,
+          ),
+        ),
       ),
     );
   }
