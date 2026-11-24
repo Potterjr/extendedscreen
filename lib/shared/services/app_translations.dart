@@ -101,6 +101,9 @@ class AppTranslations extends Translations {
     'wifi_client_not_paired':
         'Not paired yet. Switch to USB, connect to the Mac once, then come '
             'back to Wi-Fi.',
+    'wifi_client_not_paired_ios':
+        'Not paired yet. Plug the iPhone into the Mac and press Pair in the '
+            'Mac\'s Settings → Wi-Fi.',
     'wifi_client_forget': 'Forget this Mac',
     'wifi_forget_title': 'Forget @name?',
     'wifi_forget_message':
@@ -223,6 +226,29 @@ class AppTranslations extends Translations {
     'settings_encoder': 'Encoder',
     'settings_encoder_estimated': '@mpx Mpx/s (estimated)',
     'settings_encoder_measured': '@mpx Mpx/s (measured)',
+
+    // ── Settings: iPhones (debug builds only, P0 spike) ────────────────
+    'settings_ios_debug_title': 'iPhones (debug)',
+    'settings_ios_debug_desc':
+        'Pairs a cabled iPhone for Wi-Fi through Xcode\'s devicectl, or a '
+            'booted simulator through its container. Debug builds only.',
+    'settings_ios_debug_none': 'devicectl lists no iPhone',
+    'settings_ios_debug_unavailable': 'devicectl could not be asked',
+    'settings_ios_pair': 'Pair',
+    'settings_ios_pairing': 'Pairing…',
+    'settings_ios_ready': 'Ready to pair',
+    'ios_delivery_sent': 'Sent: the app takes it when it next runs',
+    'ios_delivery_stored': 'Paired',
+    'ios_delivery_refused':
+        'Refused: forget this Mac on the iPhone, then pair again',
+    'ios_delivery_noXcode': 'Xcode\'s devicectl is not installed',
+    'ios_delivery_notPaired': 'The iPhone does not trust this Mac',
+    'ios_delivery_devModeOff': 'Developer Mode is off on the iPhone',
+    'ios_delivery_notWired': 'Not cabled to this Mac',
+    'ios_delivery_failed': 'Pairing failed',
+    'ios_delivery_notInstalled': 'The app is not installed on the simulator',
+    'ios_delivery_notBooted': 'The simulator is not booted',
+    'settings_ios_simulator': 'Simulator',
 
     // ── Settings: Wi-Fi pairing (host) ──────────────────────────────────
     'settings_wifi_reset': 'Reset Wi-Fi pairing',
@@ -426,6 +452,9 @@ class AppTranslations extends Translations {
     'wifi_client_not_paired':
         'ยังไม่ได้จับคู่ ให้สลับเป็น USB เชื่อมต่อกับ Mac หนึ่งครั้ง '
             'แล้วกลับมาเลือก Wi-Fi',
+    'wifi_client_not_paired_ios':
+        'ยังไม่ได้จับคู่ ให้เสียบสาย iPhone เข้ากับ Mac แล้วกด "จับคู่" '
+            'ในการตั้งค่า → Wi-Fi บน Mac',
     'wifi_client_forget': 'เลิกจับคู่กับ Mac เครื่องนี้',
     'wifi_forget_title': 'เลิกจับคู่กับ @name หรือไม่',
     'wifi_forget_message':
@@ -544,6 +573,29 @@ class AppTranslations extends Translations {
     'settings_encoder': 'ตัวเข้ารหัสวิดีโอ',
     'settings_encoder_estimated': '@mpx Mpx/s (ประมาณการ)',
     'settings_encoder_measured': '@mpx Mpx/s (วัดจริง)',
+
+    // ── Settings: iPhones (debug builds only, P0 spike) ────────────────
+    'settings_ios_debug_title': 'iPhone (ดีบัก)',
+    'settings_ios_debug_desc':
+        'จับคู่ iPhone ที่ต่อสายไว้สำหรับ Wi-Fi ผ่าน devicectl ของ Xcode '
+            'หรือซิมูเลเตอร์ที่บูตอยู่ผ่านคอนเทนเนอร์ของแอป เฉพาะบิลด์ดีบัก',
+    'settings_ios_debug_none': 'devicectl ไม่พบ iPhone',
+    'settings_ios_debug_unavailable': 'เรียกใช้ devicectl ไม่ได้',
+    'settings_ios_pair': 'จับคู่',
+    'settings_ios_pairing': 'กำลังจับคู่…',
+    'settings_ios_ready': 'พร้อมจับคู่',
+    'ios_delivery_sent': 'ส่งแล้ว แอปจะรับเมื่อเปิดครั้งถัดไป',
+    'ios_delivery_stored': 'จับคู่แล้ว',
+    'ios_delivery_refused':
+        'ถูกปฏิเสธ: ให้ลืม Mac เครื่องนี้บน iPhone แล้วจับคู่ใหม่',
+    'ios_delivery_noXcode': 'ไม่ได้ติดตั้ง devicectl ของ Xcode',
+    'ios_delivery_notPaired': 'iPhone ยังไม่เชื่อถือ Mac เครื่องนี้',
+    'ios_delivery_devModeOff': 'Developer Mode ปิดอยู่บน iPhone',
+    'ios_delivery_notWired': 'ไม่ได้ต่อสายกับ Mac เครื่องนี้',
+    'ios_delivery_failed': 'จับคู่ไม่สำเร็จ',
+    'ios_delivery_notInstalled': 'ยังไม่ได้ติดตั้งแอปบนซิมูเลเตอร์',
+    'ios_delivery_notBooted': 'ซิมูเลเตอร์ยังไม่ได้บูต',
+    'settings_ios_simulator': 'ซิมูเลเตอร์',
 
     // ── Settings: Wi-Fi pairing (host) ──────────────────────────────────
     'settings_wifi_reset': 'รีเซ็ตการจับคู่ Wi-Fi',

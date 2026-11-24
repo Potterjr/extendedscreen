@@ -2,10 +2,12 @@ import 'dart:async';
 import 'dart:io' show InternetAddress, InternetAddressType, TlsException;
 import 'dart:typed_data';
 import 'dart:ui';
-import 'package:flutter/widgets.dart' show WidgetsBinding;
+import 'package:flutter/painting.dart' show EdgeInsets;
+import 'package:flutter/widgets.dart' show AppLifecycleState, WidgetsBinding;
 import 'package:get/get.dart';
 import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
 import 'package:extendedscreen/shared/connection/connection_state.dart';
+import 'package:extendedscreen/shared/connection/link_measure.dart';
 import 'package:extendedscreen/shared/connection/usb_session_service.dart';
 import 'package:extendedscreen/shared/connection/wifi_discovery_service.dart';
 import 'package:extendedscreen/shared/connection/wifi_pairing_service.dart';
@@ -13,11 +15,14 @@ import 'package:extendedscreen/shared/models/display_config_model.dart';
 import 'package:extendedscreen/shared/models/link_type.dart';
 import 'package:extendedscreen/shared/models/packet_model.dart';
 import 'package:extendedscreen/shared/models/session_mode.dart';
+import 'package:extendedscreen/shared/platform/ios_app.dart';
 import 'package:extendedscreen/shared/platform/keepalive_channel.dart';
+import 'package:extendedscreen/shared/protocol/client_hello.dart';
 import 'package:extendedscreen/modules/remote_screen/client/android_capture_channel.dart';
 import 'package:extendedscreen/modules/extended_screen/client/video_decoder_channel.dart';
 
-/// CLIENT role (Android): dials into the adb-reverse tunnel, reports its native
+/// CLIENT role (Android, and the iOS client: iPhone or iPad, Wi-Fi only):
+/// dials into the adb-reverse tunnel or a paired Mac, reports its native
 /// panel size + top refresh rate in the HELLO, then decodes + renders frames
 /// (in DisplayController) and forwards touch input back to the host. The macOS
 /// host is the control surface: stream settings are edited only there, and the
@@ -32,12 +37,25 @@ import 'package:extendedscreen/modules/extended_screen/client/video_decoder_chan
 /// Until then nothing it sends is acted on or shown, and it is sent nothing
 /// but that hello.
 class ClientConnectionManager extends BaseConnectionManager {
-  ClientConnectionManager({super.socket, super.port});
+  /// [ios] defaults to the platform ([runsOnIos]); tests pass it to play the
+  /// iOS client's lifecycle on any host.
+  ClientConnectionManager({super.socket, super.port, bool? ios})
+      : ios = ios ?? runsOnIos;
+
+  /// The iOS client: foreground only (see [didChangeAppLifecycleState]),
+  /// HELLO platform `0x03`/`0x04`, no reverse capture.
+  final bool ios;
 
   @override
   bool get isHost => false;
 
-  AndroidCaptureChannel get _capture => Get.find<AndroidCaptureChannel>();
+  /// Reverse remote's capturer. Registered on Android only: iOS can neither
+  /// capture its screen for the Mac nor take the Mac's input, so there every
+  /// reverse-remote path does nothing.
+  AndroidCaptureChannel? get _capture =>
+      Get.isRegistered<AndroidCaptureChannel>()
+          ? Get.find<AndroidCaptureChannel>()
+          : null;
   WifiPairingService get _pairing => Get.find<WifiPairingService>();
   WifiDiscoveryService get _discovery => Get.find<WifiDiscoveryService>();
   UsbSessionService get _usb => Get.find<UsbSessionService>();
@@ -167,6 +185,7 @@ class ClientConnectionManager extends BaseConnectionManager {
       _sendHandshake(_maxRefreshHz!);
 
       setPhase(ConnectionPhase.streaming);
+      if (measureLink) _measure!.linkStarted();
       startHeartbeat();
       // Hold the process at foreground priority so backgrounding the tablet
       // (e.g. switching to a game) can't get us frozen + killed, dropping the
@@ -318,44 +337,129 @@ class ClientConnectionManager extends BaseConnectionManager {
   // This panel's top refresh rate — fixed per device, so queried once.
   int? _maxRefreshHz;
 
+  /// The size the last HELLO reported (physical px, landscape): the shape
+  /// of the stream the Mac sends back, which the iOS display view fits its
+  /// texture to. Null before the first HELLO.
+  final helloSize = Rxn<Size>();
+
   void _sendHandshake(int maxRefreshHz) {
-    // HELLO: version byte + platform byte (0x02 = Android client) + native
-    // panel size (uint16 BE width, uint16 BE height, physical px, landscape)
-    // + the panel's top refresh rate (Hz). The host derives its capture
-    // resolution and the Max preset's rate from these, so any connected
-    // device gets a pixel- and refresh-matched stream.
-    final panel = _nativePanelSize();
+    // HELLO: command + platform byte (0x02 Android, 0x03 iPhone, 0x04 iPad)
+    // + the size this client renders (uint16 BE width, uint16 BE height,
+    // physical px, landscape) + the panel's top refresh rate (Hz). The host
+    // derives its capture resolution and the Max preset's rate from these,
+    // so any connected device gets a pixel- and refresh-matched stream.
+    final hello = _helloPanel();
+    helloSize.value =
+        Size(hello.panel.w.toDouble(), hello.panel.h.toDouble());
     socket.send(Packet(
       type: PacketType.control,
       timestampUs: DateTime.now().microsecondsSinceEpoch,
-      payload: Uint8List.fromList([
-        0x01,
-        0x02,
-        (panel.w >> 8) & 0xFF, panel.w & 0xFF,
-        (panel.h >> 8) & 0xFF, panel.h & 0xFF,
-        maxRefreshHz.clamp(0, 255),
-      ]),
+      payload: ClientHello.payload(
+        platform: hello.platform,
+        width: hello.panel.w,
+        height: hello.panel.h,
+        maxRefreshHz: maxRefreshHz,
+      ),
     ));
   }
 
-  /// Physical screen size in landscape orientation (the client is landscape-
-  /// locked, but normalize anyway in case this runs before rotation applies).
-  /// Taken from the display, not the Flutter view: outside immersive mode on
-  /// Android 14 and earlier the view leaves out the navigation bar, so the
-  /// first HELLO after launch reported a shorter panel than later ones.
-  ({int w, int h}) _nativePanelSize() {
+  /// This client's kind and the size it reports ([ClientHello.panelSize]).
+  /// Android: the whole display, not the Flutter view: outside immersive
+  /// mode on Android 14 and earlier the view leaves out the navigation bar,
+  /// so the first HELLO after launch reported a shorter panel than later
+  /// ones. iOS: the safe area (see [ClientHello.panelSize]).
+  ({ClientPlatform platform, ({int w, int h}) panel}) _helloPanel() {
     // Via the binding (the same dispatcher at runtime) so tests can set it.
     final view = WidgetsBinding.instance.platformDispatcher.views.first;
-    var size = Size.zero;
+    Size? display;
+    var displayPoints = Size.zero;
     try {
-      size = view.display.size;
+      display = view.display.size;
+      displayPoints = display / view.display.devicePixelRatio;
     } catch (_) {
-      // The engine hasn't reported this view's display; use the view below.
+      // The engine hasn't reported this view's display; use the view.
     }
-    if (size.isEmpty) size = view.physicalSize;
-    final long = size.longestSide.round();
-    final short = size.shortestSide.round();
-    return (w: long, h: short);
+    if (displayPoints.isEmpty) {
+      displayPoints = view.physicalSize / view.devicePixelRatio;
+    }
+    final platform = ios
+        ? ClientHello.iosPlatformFor(displayPoints)
+        : ClientPlatform.android;
+    return (
+      platform: platform,
+      panel: ClientHello.panelSize(
+        platform: platform,
+        display: display,
+        window: view.physicalSize,
+        padding: EdgeInsets.fromViewPadding(view.padding, 1),
+      ),
+    );
+  }
+
+  /// The P0 measurements, only in an `ES_MEASURE` build.
+  final LinkMeasure? _measure =
+      measureLink ? LinkMeasure(sink: _measureSink) : null;
+
+  static void _measureSink(String line) {
+    if (runsOnIos) {
+      IosSystemChannel.log(line);
+    } else {
+      // ignore: avoid_print
+      print('[measure] $line');
+    }
+  }
+
+  @override
+  void onRoundTrip(int rttUs) {
+    if (measureLink) _measure!.roundTrip(rttUs);
+  }
+
+  // ─── iOS: foreground only ─────────────────────────────────────────────────
+
+  // Hidden or paused since the last resume.
+  bool _wentAway = false;
+
+  /// On iOS the app is suspended within seconds of leaving the foreground,
+  /// and nothing keeps it running (Android has its keep-alive service). So:
+  ///
+  ///  - `hidden`/`paused`: end the link at once, the way a lost link ends,
+  ///    with no retry ([BaseConnectionManager.handleLinkFailure] with `retry:
+  ///    false`, and a retry already armed is dropped). Closing the socket
+  ///    lets the Mac tear down now instead of after its 6 s heartbeat
+  ///    timeout, and nothing dials from the background (where a dial would
+  ///    freeze mid-way, or be denied Local Network access).
+  ///  - `resumed` after that: [restartLink] at once, whatever the phase
+  ///    reads, unless the user had stopped it (`disconnected`).
+  ///  - `inactive` alone (Control Centre, a notification) ends nothing, and
+  ///    the `resumed` that follows it leaves a live link alone.
+  ///  - `detached`: the base rule ([disconnect]).
+  ///
+  /// Android keeps the base rule for everything: it streams on in the
+  /// background.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (!ios) {
+      super.didChangeAppLifecycleState(state);
+      return;
+    }
+    switch (state) {
+      case AppLifecycleState.hidden || AppLifecycleState.paused:
+        _wentAway = true;
+        if (phase.value == ConnectionPhase.disconnected) return;
+        cancelPendingRetry();
+        unawaited(handleLinkFailure(retry: false));
+      case AppLifecycleState.resumed:
+        final wentAway = _wentAway;
+        _wentAway = false;
+        final p = phase.value;
+        if (p == ConnectionPhase.disconnected) return;
+        if (!wentAway && (p.isActive || p.isConnecting)) return;
+        unawaited(restartLink());
+      case AppLifecycleState.inactive:
+        return;
+      case AppLifecycleState.detached:
+        super.didChangeAppLifecycleState(state);
+    }
   }
 
   // ─── Reverse remote (Mac controls tablet): capture this device's screen ────
@@ -364,7 +468,7 @@ class ClientConnectionManager extends BaseConnectionManager {
   @override
   Future<void> startScreenShare() async {
     final codec = _pendingCodec;
-    if (codec == null) return;
+    if (codec == null || _capture == null) return;
     await _startReverseCapture(
       codec: codec,
       fps: _pendingFps,
@@ -377,15 +481,17 @@ class ClientConnectionManager extends BaseConnectionManager {
     required int fps,
     required int bitrateMbps,
   }) async {
+    final capture = _capture;
+    if (capture == null) return; // iOS: nothing to capture with
     if (_captureFrameSub != null) return; // already capturing
-    final granted = await _capture.requestProjection();
+    final granted = await capture.requestProjection();
     if (!granted) {
       log.w('Client: screen-capture consent denied');
       return;
     }
     needsScreenShare.value = false;
     isScreenSharing.value = true;
-    final panel = _nativePanelSize();
+    final panel = _helloPanel().panel;
     final config = DisplayConfigModel.defaultConfig.copyWith(
       width: panel.w,
       height: panel.h,
@@ -393,8 +499,8 @@ class ClientConnectionManager extends BaseConnectionManager {
       bitrate: bitrateMbps * 1000000,
       codec: codec,
     );
-    await _capture.startCapture(config);
-    _captureFrameSub = _capture.frameStream.listen((nal) {
+    await capture.startCapture(config);
+    _captureFrameSub = capture.frameStream.listen((nal) {
       // A capture can outlive its session (see `0xF7`): this tablet's screen
       // goes to a Mac that has proved itself, or nowhere.
       if (!peerTrusted) return;
@@ -410,7 +516,7 @@ class ClientConnectionManager extends BaseConnectionManager {
   Future<void> _stopReverseCapture() async {
     await _captureFrameSub?.cancel();
     _captureFrameSub = null;
-    await _capture.stopCapture();
+    await _capture?.stopCapture();
     isScreenSharing.value = false;
   }
 
@@ -428,6 +534,12 @@ class ClientConnectionManager extends BaseConnectionManager {
 
   @override
   void onRolePacket(Packet packet) {
+    // FRAME_DATA is DisplayController's (through packetStream); measured
+    // here, in an ES_MEASURE build, as it arrives.
+    if (measureLink && packet.type == PacketType.frameData) {
+      _measure!.frame(packet.timestampUs);
+      return;
+    }
     if (packet.type != PacketType.control || packet.payload.isEmpty) return;
     final p = packet.payload;
 
@@ -466,6 +578,9 @@ class ClientConnectionManager extends BaseConnectionManager {
     // this screen. Stash the params and surface the "Start screen sharing"
     // button; the user starts it so the consent prompt fires in the foreground.
     if (p.length >= 4 && p[0] == 0xF8) {
+      // iOS never captures its screen for the Mac (the host never asks a
+      // Wi-Fi client either).
+      if (_capture == null) return;
       _pendingCodec = p[1] == 1 ? CodecType.h265 : CodecType.h264;
       _pendingFps = p[2];
       _pendingBitrateMbps = p[3];
@@ -483,7 +598,7 @@ class ClientConnectionManager extends BaseConnectionManager {
 
     // 0xFF — Host → Tablet: request a fresh keyframe from our encoder.
     if (p[0] == 0xFF) {
-      _capture.requestIdr();
+      _capture?.requestIdr();
       return;
     }
 

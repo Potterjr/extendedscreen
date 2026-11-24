@@ -19,11 +19,18 @@ class DisplayView extends GetView<DisplayController> {
       body: Stack(
         fit: StackFit.expand,
         children: [
-          // Video surface — AndroidView bridges to SurfaceView + MediaCodec
-          _VideoSurface(controller: controller),
+          if (controller.usesTexture)
+            // iOS: the decoder's texture in a box of the stream's shape,
+            // black around it, with the touch overlay over that box alone,
+            // since touches are normalized over the picture.
+            _TextureStage(controller: controller)
+          else ...[
+            // Video surface — AndroidView bridges to SurfaceView + MediaCodec
+            _VideoSurface(controller: controller),
 
-          // Touch capture overlay
-          _TouchOverlay(controller: controller),
+            // Touch capture overlay
+            _TouchOverlay(controller: controller),
+          ],
 
           // HUD — a bar that collapses to a small handle at the top centre so
           // it doesn't cover the Mac's menu bar. The host's 'Show HUD' switch
@@ -149,20 +156,59 @@ class _VideoSurface extends StatelessWidget {
   }
 }
 
-class _TouchOverlay extends StatelessWidget {
+/// iOS: the Mac's picture as a Flutter [Texture], centred in a box with
+/// the stream's aspect ratio (the size this client reported in its HELLO,
+/// which leaves out the safe area), black around it. The touch overlay
+/// covers the box only, so a touch's normalized position is its position
+/// on the picture.
+class _TextureStage extends StatelessWidget {
   final DisplayController controller;
-  const _TouchOverlay({required this.controller});
+  const _TextureStage({required this.controller});
 
   @override
   Widget build(BuildContext context) {
+    return Obx(() {
+      final id = controller.textureId.value;
+      final stream = controller.streamSize;
+      final box = Stack(
+        fit: StackFit.expand,
+        children: [
+          if (id != null) Texture(textureId: id) else const ColoredBox(color: Colors.black),
+          _TouchOverlay(controller: controller, sizedByBox: true),
+        ],
+      );
+      if (stream == null || stream.isEmpty) return box;
+      return Center(
+        child: AspectRatio(
+          aspectRatio: stream.width / stream.height,
+          child: box,
+        ),
+      );
+    });
+  }
+}
+
+class _TouchOverlay extends StatelessWidget {
+  final DisplayController controller;
+
+  /// Normalize over this widget's own box (iOS, where the picture is
+  /// letterboxed) instead of the whole screen.
+  final bool sizedByBox;
+  const _TouchOverlay({required this.controller, this.sizedByBox = false});
+
+  @override
+  Widget build(BuildContext context) {
+    Size size() => sizedByBox
+        ? (context.size ?? MediaQuery.sizeOf(context))
+        : MediaQuery.sizeOf(context);
     return Listener(
       behavior: HitTestBehavior.translucent,
-      onPointerDown: (e) => controller.onPointerDown(
-          e.pointer, e.localPosition, MediaQuery.sizeOf(context)),
-      onPointerMove: (e) => controller.onPointerMove(
-          e.pointer, e.localPosition, MediaQuery.sizeOf(context)),
-      onPointerUp: (e) => controller.onPointerUp(
-          e.pointer, e.localPosition, MediaQuery.sizeOf(context)),
+      onPointerDown: (e) =>
+          controller.onPointerDown(e.pointer, e.localPosition, size()),
+      onPointerMove: (e) =>
+          controller.onPointerMove(e.pointer, e.localPosition, size()),
+      onPointerUp: (e) =>
+          controller.onPointerUp(e.pointer, e.localPosition, size()),
       onPointerCancel: (e) => controller.onPointerCancel(e.pointer),
       child: const SizedBox.expand(),
     );

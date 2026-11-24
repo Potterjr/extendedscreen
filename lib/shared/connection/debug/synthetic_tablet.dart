@@ -45,11 +45,16 @@ class FakeTablet {
     this.serial, {
     this.panel = const ClientPanel(2560, 1600, 60),
     this.model = 'Synthetic_tablet',
+    this.helloPlatform = 0x02,
   });
 
   final String serial;
   final String model;
   final ClientPanel panel;
+
+  /// HELLO's platform byte: Android (`0x02`) unless a test plays another
+  /// client (`0x03` iPhone, `0x04` iPad).
+  final int helloPlatform;
 
   final _socket = SocketService();
   StreamSubscription<Packet>? _sub;
@@ -251,10 +256,10 @@ class FakeTablet {
     return true;
   }
 
-  /// HELLO: platform Android, the panel's size and top rate.
+  /// HELLO: [helloPlatform], the panel's size and top rate.
   void _sendHello() => _send(Uint8List.fromList([
         0x01,
-        0x02,
+        helloPlatform,
         panel.width >> 8,
         panel.width & 0xFF,
         panel.height >> 8,

@@ -35,6 +35,7 @@ class _FakeConnection extends BaseConnectionManager {
 /// downs that reach the touch overlay (i.e. would be sent to the Mac).
 class _FakeDisplayController extends DisplayController {
   final touches = <Offset>[];
+  final touchedSizes = <Size>[];
 
   @override
   bool get isAndroid => false;
@@ -46,7 +47,22 @@ class _FakeDisplayController extends DisplayController {
   void onClose() {}
 
   @override
-  void onPointerDown(int id, Offset pos, Size size) => touches.add(pos);
+  void onPointerDown(int id, Offset pos, Size size) {
+    touches.add(pos);
+    touchedSizes.add(size);
+  }
+}
+
+/// The iOS display: the decoder's texture, for a stream of [stream]'s shape.
+class _TextureDisplayController extends _FakeDisplayController {
+  _TextureDisplayController(this.stream);
+  final Size stream;
+
+  @override
+  bool get usesTexture => true;
+
+  @override
+  Size? get streamSize => stream;
 }
 
 const _home = 'home page';
@@ -55,6 +71,7 @@ void main() {
   late _FakeConnection connection;
   late _FakeDisplayController display;
   late SettingsService settings;
+  _FakeDisplayController Function() makeDisplay = _FakeDisplayController.new;
 
   setUp(() async {
     Get.testMode = true;
@@ -68,7 +85,10 @@ void main() {
     connection.phase.value = ConnectionPhase.streaming;
   });
 
-  tearDown(Get.reset);
+  tearDown(() {
+    makeDisplay = _FakeDisplayController.new;
+    Get.reset();
+  });
 
   Future<void> openDisplay(WidgetTester tester) async {
     // A landscape tablet panel (2960×1848 at 2×), not the 800×600 default.
@@ -87,7 +107,7 @@ void main() {
           // Registered per route like the app's DisplayBinding; a controller
           // put in setUp is deleted when the previous test's route goes away.
           binding: BindingsBuilder(() {
-            display = Get.put<DisplayController>(_FakeDisplayController())
+            display = Get.put<DisplayController>(makeDisplay())
                 as _FakeDisplayController;
           }),
         ),
@@ -264,5 +284,35 @@ void main() {
       expect(connection.disconnects, 0);
       expect(find.text(_home), findsOneWidget);
     });
+  });
+
+  testWidgets('iOS: the texture sits in a box of the stream\'s shape, and '
+      'touches are measured over that box alone', (tester) async {
+    makeDisplay = () => _TextureDisplayController(const Size(2496, 1320));
+    await openDisplay(tester);
+    // The iPhone's 956×440 pt, not the tablet panel openDisplay set.
+    tester.view.physicalSize = const Size(2868, 1320);
+    tester.view.devicePixelRatio = 3.0;
+    await tester.pump();
+
+    // No texture yet: black, no Texture widget.
+    expect(find.byType(Texture), findsNothing);
+    display.textureId.value = 5;
+    await tester.pump();
+    final texture = find.byType(Texture);
+    expect(tester.widget<Texture>(texture).textureId, 5);
+    // 2496×1320 fitted into 956×440: 832×440, centred.
+    expect(tester.getSize(texture), const Size(832, 440));
+    expect(tester.getTopLeft(texture), const Offset(62, 0));
+
+    // Let the HUD collapse so the middle of the screen is the overlay's.
+    await waitForHide(tester);
+    await tester.tapAt(const Offset(478, 300));
+    expect(display.touches.single, const Offset(416, 300));
+    expect(display.touchedSizes.single, const Size(832, 440));
+
+    // The black bar beside the picture is not the Mac's.
+    await tester.tapAt(const Offset(30, 300));
+    expect(display.touches, hasLength(1));
   });
 }

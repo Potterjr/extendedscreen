@@ -7,9 +7,11 @@ import 'package:extendedscreen/shared/services/settings_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  // The Android client is a second monitor — it only ever renders landscape
-  // (also enforced via android:screenOrientation in the manifest).
-  if (defaultTargetPlatform == TargetPlatform.android) {
+  // The client is a second monitor — it only ever renders landscape (also
+  // enforced by android:screenOrientation in the manifest, and on iOS by
+  // Info.plist's supported orientations).
+  if (defaultTargetPlatform == TargetPlatform.android ||
+      defaultTargetPlatform == TargetPlatform.iOS) {
     await SystemChrome.setPreferredOrientations([
       DeviceOrientation.landscapeLeft,
       DeviceOrientation.landscapeRight,

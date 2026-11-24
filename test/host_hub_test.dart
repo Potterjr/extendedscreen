@@ -186,6 +186,48 @@ void main() {
       expect(settings.lastClientPanel, plain);
     });
 
+    test("an iPhone's (or an iPad's) HELLO is remembered for it alone, never "
+        'as the last panel a new tablet falls back on', () async {
+      const iphone = ClientPanel(2496, 1320, 120);
+      const ipad = ClientPanel(2732, 2048, 120);
+      final tab = FakeTablet('TAB', panel: ultra);
+      final phone = FakeTablet('PHONE', panel: iphone, helloPlatform: 0x03);
+      final pad = FakeTablet('PAD', panel: ipad, helloPlatform: 0x04);
+      final unknown = FakeTablet('ODD', panel: plain, helloPlatform: 0x7E);
+      for (final t in [tab, phone, pad, unknown]) {
+        addTearDown(t.hangUp);
+      }
+      final hub = hubWith(SynthAdb([tab, phone, pad, unknown]));
+
+      await hub.connect(serial: 'TAB');
+      expect(hub.focused!.platform, HostSession.helloPlatformAndroid);
+      await hub.disconnect();
+      expect(settings.lastClientPanel, ultra);
+
+      await hub.connect(serial: 'PHONE');
+      expect(hub.phase.value, ConnectionPhase.streaming);
+      expect(hub.focused!.platform, 0x03);
+      expect(hub.focused!.panel, iphone);
+      expect(capture.starts.last.width, 1248,
+          reason: 'its own capture is sized from its own HELLO');
+      await hub.disconnect();
+      expect(settings.clientPanelFor('PHONE'), iphone);
+      expect(settings.lastClientPanel, ultra,
+          reason: "an iPhone's area is no guess for a new tablet");
+
+      await hub.connect(serial: 'PAD');
+      await hub.disconnect();
+      expect(settings.clientPanelFor('PAD'), ipad);
+      expect(settings.lastClientPanel, ultra);
+
+      // A platform this build does not know is taken for Android, as every
+      // HELLO was before the byte meant anything.
+      await hub.connect(serial: 'ODD');
+      expect(hub.focused!.platform, isNull);
+      await hub.disconnect();
+      expect(settings.lastClientPanel, plain);
+    });
+
     test("an unplugged tablet's session waits for that tablet, and picking "
         'another one ends it (one tablet at a time)', () async {
       await settings.setMaxTablets(1);

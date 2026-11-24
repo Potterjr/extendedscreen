@@ -12,6 +12,7 @@ import 'package:extendedscreen/shared/models/display_config_model.dart';
 import 'package:extendedscreen/shared/models/link_type.dart';
 import 'package:extendedscreen/shared/models/session_mode.dart';
 import 'package:extendedscreen/shared/models/session_spec.dart';
+import 'package:extendedscreen/shared/platform/ios_app.dart';
 import 'package:extendedscreen/shared/services/settings_service.dart';
 import 'package:extendedscreen/shared/widgets/battery_chip.dart';
 import 'package:extendedscreen/shared/widgets/confirm_dialog.dart';
@@ -131,10 +132,13 @@ class _ClientBody extends StatelessWidget {
           }),
           // Where to dial. Hidden during a session; while waiting for the
           // Mac (the client's usual state) it stays put, so a tablet set to
-          // the wrong link can be switched without stopping.
+          // the wrong link can be switched without stopping. iOS has no
+          // choice to make: it is always Wi-Fi.
           if (!phase.isActive) ...[
-            _LinkTypeSelector(controller: controller),
-            const SizedBox(height: 16),
+            if (!runsOnIos) ...[
+              _LinkTypeSelector(controller: controller),
+              const SizedBox(height: 16),
+            ],
             if (wifi) ...[
               _WifiClientCard(
                 controller: controller,
@@ -782,7 +786,10 @@ class _WifiClientCardState extends State<_WifiClientCard> {
                 const SizedBox(width: 12),
                 Expanded(
                   child: Text(
-                    'wifi_client_not_paired'.tr,
+                    (runsOnIos
+                            ? 'wifi_client_not_paired_ios'
+                            : 'wifi_client_not_paired')
+                        .tr,
                     style: const TextStyle(color: Colors.white, fontSize: 14),
                   ),
                 ),

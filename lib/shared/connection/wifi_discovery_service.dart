@@ -219,7 +219,9 @@ class WifiDiscoveryService extends GetxService {
       }
       for (var i = 0; i < targets.length; i++) {
         final sock = sockets[i];
-        sock.broadcastEnabled = true;
+        // Off when this service sends no broadcast: iOS refuses SO_BROADCAST
+        // without the multicast entitlement, which a free team cannot get.
+        if (broadcast) sock.broadcastEnabled = true;
         subs.add(sock.listen(
           (event) {
             if (event == RawSocketEvent.read) read(sock);
