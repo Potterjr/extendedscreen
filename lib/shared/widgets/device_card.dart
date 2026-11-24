@@ -74,7 +74,7 @@ class DeviceCard extends StatelessWidget {
   /// [SessionChoice.effective] says.
   static List<SessionChoice> choicesFor(HostSession s) => [
     for (final c in SessionChoice.all)
-      if (!c.isReverse || (s.link == LinkType.usb && !s.isApple)) c,
+      if (!c.isReverse || (s.link == LinkType.usb && !s.notAndroid)) c,
   ];
 
   /// What a change from [from] to [to] asks of the device's user, as the
@@ -193,10 +193,13 @@ class DeviceCard extends StatelessWidget {
                       switch (s.platform) {
                         HostSession.helloPlatformIphone => Icons.phone_iphone,
                         HostSession.helloPlatformIpad => Icons.tablet_mac,
-                        _ =>
-                          model == 'iPhone'
-                              ? Icons.phone_iphone
-                              : Icons.tablet_android,
+                        HostSession.helloPlatformWindows =>
+                          Icons.desktop_windows,
+                        _ => switch (model) {
+                          'iPhone' => Icons.phone_iphone,
+                          'Windows' => Icons.desktop_windows,
+                          _ => Icons.tablet_android,
+                        },
                       },
                       color: _accent,
                       size: 22,

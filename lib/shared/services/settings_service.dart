@@ -15,7 +15,7 @@ import 'package:extendedscreen/shared/models/link_type.dart';
 import 'package:extendedscreen/shared/models/session_choice.dart';
 import 'package:extendedscreen/shared/models/session_mode.dart';
 import 'package:extendedscreen/shared/models/session_spec.dart';
-import 'package:extendedscreen/shared/platform/ios_app.dart';
+import 'package:extendedscreen/shared/platform/windows_app.dart';
 import 'package:extendedscreen/shared/services/app_translations.dart';
 import 'package:extendedscreen/shared/services/logger_service.dart';
 
@@ -131,10 +131,10 @@ class SettingsService extends GetxService {
         _prefs.getInt(_keyPanelMaxHz) ?? clientMaxRefreshHz.value;
     sessionModeRx.value = _resolveSessionMode();
     remoteDirectionRx.value = _resolveRemoteDirection();
-    // The iOS client has no adb, so no USB link: Wi-Fi always, whatever was
-    // saved, and every reader (the Rx included) sees it.
+    // The iOS and Windows clients have no adb, so no USB link: Wi-Fi always,
+    // whatever was saved, and every reader (the Rx included) sees it.
     linkTypeRx.value =
-        runsOnIos || _prefs.getString(_keyLinkType) == LinkType.wifi.name
+        wifiOnlyClient || _prefs.getString(_keyLinkType) == LinkType.wifi.name
         ? LinkType.wifi
         : LinkType.usb;
     maxTabletsRx.value = (_prefs.getInt(_keyMaxTablets) ?? defaultMaxTablets)
@@ -177,9 +177,9 @@ class SettingsService extends GetxService {
 
   LinkType get linkType => linkTypeRx.value;
 
-  /// Does nothing on iOS, where the link is always Wi-Fi.
+  /// Does nothing on iOS and Windows, where the link is always Wi-Fi.
   Future<void> setLinkType(LinkType type) async {
-    if (runsOnIos) return;
+    if (wifiOnlyClient) return;
     linkTypeRx.value = type;
     await _prefs.setString(_keyLinkType, type.name);
   }

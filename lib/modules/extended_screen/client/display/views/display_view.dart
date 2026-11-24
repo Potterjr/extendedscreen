@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:get/get.dart';
@@ -174,7 +175,10 @@ class _TextureStage extends StatelessWidget {
         fit: StackFit.expand,
         children: [
           if (id != null) Texture(textureId: id) else const ColoredBox(color: Colors.black),
-          _TouchOverlay(controller: controller, sizedByBox: true),
+          if (controller.usesMouse)
+            _MouseOverlay(controller: controller)
+          else
+            _TouchOverlay(controller: controller, sizedByBox: true),
         ],
       );
       if (stream == null || stream.isEmpty) return box;
@@ -185,6 +189,37 @@ class _TextureStage extends StatelessWidget {
         ),
       );
     });
+  }
+}
+
+/// Windows: the mouse over the picture, sent to the Mac as it is (see
+/// [DisplayController.onMouseMove]). Normalized over this box, which has the
+/// picture's shape.
+class _MouseOverlay extends StatelessWidget {
+  final DisplayController controller;
+  const _MouseOverlay({required this.controller});
+
+  @override
+  Widget build(BuildContext context) {
+    Size size() => context.size ?? Size.zero;
+    return MouseRegion(
+      onHover: (e) => controller.onMouseMove(e.localPosition, size()),
+      child: Listener(
+        behavior: HitTestBehavior.opaque,
+        onPointerDown: (e) =>
+            controller.onMouseDown(e.buttons, e.localPosition, size()),
+        onPointerMove: (e) => controller.onMouseMove(e.localPosition, size()),
+        onPointerUp: (e) => controller.onMouseUp(e.localPosition, size()),
+        onPointerCancel: (e) =>
+            controller.onMouseCancel(e.localPosition, size()),
+        onPointerSignal: (e) {
+          if (e is PointerScrollEvent) {
+            controller.onMouseScroll(e.scrollDelta, e.localPosition, size());
+          }
+        },
+        child: const SizedBox.expand(),
+      ),
+    );
   }
 }
 

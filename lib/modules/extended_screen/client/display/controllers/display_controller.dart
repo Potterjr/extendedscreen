@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
@@ -48,14 +49,22 @@ class DisplayController extends GetxController with WidgetsBindingObserver {
 
   bool get isAndroid => defaultTargetPlatform == TargetPlatform.android;
 
-  /// A native decoder exists here: Android (SurfaceView) or iOS (texture).
+  /// A native decoder exists here: Android (SurfaceView), iOS or Windows
+  /// (texture).
   bool get hasClientDecoder =>
       defaultTargetPlatform == TargetPlatform.android ||
-      defaultTargetPlatform == TargetPlatform.iOS;
+      defaultTargetPlatform == TargetPlatform.iOS ||
+      defaultTargetPlatform == TargetPlatform.windows;
 
-  /// iOS: the decoder draws into a Flutter texture rather than a platform
-  /// view.
-  bool get usesTexture => defaultTargetPlatform == TargetPlatform.iOS;
+  /// iOS and Windows: the decoder draws into a Flutter texture rather than a
+  /// platform view.
+  bool get usesTexture =>
+      defaultTargetPlatform == TargetPlatform.iOS ||
+      defaultTargetPlatform == TargetPlatform.windows;
+
+  /// Windows: a real mouse, sent to the Mac as it is (move, both buttons,
+  /// the wheel) instead of through the touch gestures.
+  bool get usesMouse => defaultTargetPlatform == TargetPlatform.windows;
 
   /// iOS: the texture the decoder draws into, from its `initialize`; null
   /// while there is none (before the first build, during a rebuild).
@@ -244,6 +253,76 @@ class DisplayController extends GetxController with WidgetsBindingObserver {
       _gestures.up(id, pos, size);
 
   void onPointerCancel(int id) => _gestures.cancel(id);
+
+  // ─── Mouse (Windows) ───────────────────────────────────────────────────────
+  // The pointer goes to the Mac as it is: a move for every move, a down and
+  // an up per button (left or right; the host posts a drag while one is
+  // held), and the wheel as scroll. Positions are normalized over the
+  // picture, as touches are.
+
+  /// Wheel logical px → wheel units, the touch gestures' gain (Swift turns a
+  /// unit into about 10 device pixels), so a notch scrolls about 60 px.
+  static const double mouseWheelGain = 0.12;
+
+  /// The button a down sent, so its up names the same one, and a second
+  /// button pressed meanwhile is not sent (the host holds one at a time).
+  MouseButton? _mouseHeld;
+
+  static double _clamp01(double v) => v.isNaN ? 0 : v.clamp(0.0, 1.0);
+
+  void onMouseMove(Offset pos, Size size) {
+    if (size.isEmpty) return;
+    _sendMouseButton(MouseAction.move, _mouseHeld ?? MouseButton.none,
+        _clamp01(pos.dx / size.width), _clamp01(pos.dy / size.height));
+  }
+
+  /// [buttons] is the pointer event's bitmask: primary (left) or secondary
+  /// (right); any other button is not sent.
+  void onMouseDown(int buttons, Offset pos, Size size) {
+    if (size.isEmpty || _mouseHeld != null) return;
+    final button = buttons & kSecondaryMouseButton != 0 &&
+            buttons & kPrimaryMouseButton == 0
+        ? MouseButton.right
+        : buttons & kPrimaryMouseButton != 0
+            ? MouseButton.left
+            : null;
+    if (button == null) return;
+    _mouseHeld = button;
+    _sendMouseButton(MouseAction.down, button, _clamp01(pos.dx / size.width),
+        _clamp01(pos.dy / size.height));
+  }
+
+  void onMouseUp(Offset pos, Size size) {
+    final button = _mouseHeld;
+    if (button == null || size.isEmpty) return;
+    _mouseHeld = null;
+    _sendMouseButton(MouseAction.up, button, _clamp01(pos.dx / size.width),
+        _clamp01(pos.dy / size.height));
+  }
+
+  /// A cancelled press still lets go of the Mac's button.
+  void onMouseCancel(Offset pos, Size size) => onMouseUp(pos, size);
+
+  /// [delta] is Flutter's scroll delta (positive y: the wheel turned towards
+  /// the user, the page moving up). The Mac's wheel units have the
+  /// opposite sign. The host scrolls at the last pointer position, so the
+  /// pointer's place goes first, as a move.
+  void onMouseScroll(Offset delta, Offset pos, Size size) {
+    if (size.isEmpty) return;
+    onMouseMove(pos, size);
+    _sendScroll(-delta.dx * mouseWheelGain, -delta.dy * mouseWheelGain);
+  }
+
+  void _sendMouseButton(
+      MouseAction action, MouseButton button, double nx, double ny) {
+    _cm.sendMouse(MouseEventModel(
+      normalizedX: nx,
+      normalizedY: ny,
+      button: button,
+      action: action,
+      timestampUs: DateTime.now().microsecondsSinceEpoch,
+    ));
+  }
 
   void onDisconnect() {
     _cm.disconnect();

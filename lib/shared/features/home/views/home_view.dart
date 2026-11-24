@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:extendedscreen/app/routes/app_routes.dart';
@@ -11,6 +12,7 @@ import 'package:extendedscreen/shared/models/device_model.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
 import 'package:extendedscreen/shared/models/link_type.dart';
 import 'package:extendedscreen/shared/platform/ios_app.dart';
+import 'package:extendedscreen/shared/platform/windows_app.dart';
 import 'package:extendedscreen/shared/services/settings_service.dart';
 import 'package:extendedscreen/shared/widgets/add_device_panel.dart';
 import 'package:extendedscreen/shared/widgets/battery_chip.dart';
@@ -109,10 +111,10 @@ class _ClientBody extends StatelessWidget {
           }),
           // Where to dial. Hidden during a session; while waiting for the
           // Mac (the client's usual state) it stays put, so a tablet set to
-          // the wrong link can be switched without stopping. iOS has no
-          // choice to make: it is always Wi-Fi.
+          // the wrong link can be switched without stopping. iOS and
+          // Windows have no choice to make: they are always Wi-Fi.
           if (!phase.isActive) ...[
-            if (!runsOnIos) ...[
+            if (!wifiOnlyClient) ...[
               _LinkTypeSelector(controller: controller),
               const SizedBox(height: 16),
             ],
@@ -737,7 +739,9 @@ class _WifiClientCardState extends State<_WifiClientCard> {
                   child: Text(
                     (runsOnIos
                             ? 'wifi_client_not_paired_ios'
-                            : 'wifi_client_not_paired')
+                            : runsOnWindows
+                                ? 'wifi_client_not_paired_windows'
+                                : 'wifi_client_not_paired')
                         .tr,
                     style: const TextStyle(color: Colors.white, fontSize: 14),
                   ),
@@ -792,8 +796,85 @@ class _WifiClientCardState extends State<_WifiClientCard> {
               ),
             ),
           ],
+          // A client with neither adb nor devicectl (Windows) has no other
+          // way to be paired yet. Debug builds only: a const, so no other
+          // build contains the field.
+          if (kDebugMode && runsOnWindows) ...[
+            const SizedBox(height: 12),
+            _PairingCodeField(controller: widget.controller),
+          ],
         ],
       ),
+    );
+  }
+}
+
+/// Debug builds of the Windows client: paste the pairing code a debug build
+/// of the Mac shows in Settings → Wi-Fi ([PairingCode]).
+class _PairingCodeField extends StatefulWidget {
+  final HomeController controller;
+  const _PairingCodeField({required this.controller});
+
+  @override
+  State<_PairingCodeField> createState() => _PairingCodeFieldState();
+}
+
+class _PairingCodeFieldState extends State<_PairingCodeField> {
+  final _code = TextEditingController();
+  bool _busy = false;
+  bool? _stored;
+
+  @override
+  void dispose() {
+    _code.dispose();
+    super.dispose();
+  }
+
+  Future<void> _pair() async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    final stored = await widget.controller.onPastePairingCode(_code.text);
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      _stored = stored;
+      if (stored) _code.clear();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: TextField(
+            key: const ValueKey('pairing-code/field'),
+            controller: _code,
+            autocorrect: false,
+            obscureText: true,
+            style: const TextStyle(color: Colors.white, fontSize: 14),
+            decoration: InputDecoration(
+              isDense: true,
+              labelText: 'wifi_client_pairing_code_label'.tr,
+              helperText: switch (_stored) {
+                true => 'wifi_client_pairing_code_stored'.tr,
+                false => 'wifi_client_pairing_code_refused'.tr,
+                null => 'wifi_client_pairing_code_hint'.tr,
+              },
+              helperMaxLines: 2,
+              border: const OutlineInputBorder(),
+            ),
+            onSubmitted: (_) => _pair(),
+          ),
+        ),
+        const SizedBox(width: 8),
+        FilledButton(
+          key: const ValueKey('pairing-code/pair'),
+          onPressed: _busy ? null : _pair,
+          child: Text('wifi_client_pairing_code_pair'.tr),
+        ),
+      ],
     );
   }
 }

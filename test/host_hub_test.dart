@@ -257,6 +257,40 @@ void main() {
       expect(settings.lastClientPanel, plain);
     });
 
+    test("a Windows PC's HELLO (0x05) is remembered for it alone, and it "
+        'drives the Mac even when picked for the Mac to control it', () async {
+      await settings.setSessionMode(SessionMode.remoteControl);
+      await settings.setRemoteDirection(RemoteDirection.macControlsTab);
+      const monitor = ClientPanel(2560, 1440, 144);
+      final tab = FakeTablet('TAB', panel: ultra);
+      final pc = FakeTablet('PC', panel: monitor, helloPlatform: 0x05);
+      addTearDown(tab.hangUp);
+      addTearDown(pc.hangUp);
+      final hub = hubWith(SynthAdb([tab, pc]));
+      await settings.setSessionMode(SessionMode.extendedScreen);
+      await hub.connect(serial: 'TAB');
+      await hub.disconnect();
+      expect(settings.lastClientPanel, ultra);
+
+      await settings.setSessionMode(SessionMode.remoteControl);
+      await hub.connect(serial: 'PC');
+      expect(hub.phase.value, ConnectionPhase.streaming);
+      final session = hub.focused!;
+      expect(session.platform, HostSession.helloPlatformWindows);
+      expect(session.notAndroid, isTrue);
+      expect(session.isApple, isFalse);
+      expect(session.panel, monitor);
+      expect(session.spec.direction, RemoteDirection.tabControlsMac);
+      expect(session.spec.isReverseRemote, isFalse);
+      await _until(() => pc.direction == RemoteDirection.tabControlsMac);
+      expect(pc.captureRequests, 0,
+          reason: 'the Mac never asks a PC to capture its screen');
+      await hub.disconnect();
+      expect(settings.clientPanelFor('PC'), monitor);
+      expect(settings.lastClientPanel, ultra,
+          reason: "a PC's monitor is no guess for a new tablet");
+    });
+
     test("a tablet's own profile reaches its capture alone: text size, "
         'frame-rate cap and codec, the other tablet on the app-wide values',
         () async {

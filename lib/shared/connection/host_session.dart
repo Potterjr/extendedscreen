@@ -259,10 +259,14 @@ class HostSession extends BaseConnectionManager {
   SessionSpec _specNow() =>
       SessionSpec.from(choice, link, displayMode: settings.displayModeFor(key));
 
-  /// Whether this attempt's HELLO named a device that is not Android (an
-  /// iPhone or iPad), which can only drive the Mac whatever its [choice].
+  /// Whether this attempt's HELLO named an iPhone or iPad.
   bool get isApple =>
       platform == helloPlatformIphone || platform == helloPlatformIpad;
+
+  /// Whether this attempt's HELLO named a device that is not Android (an
+  /// iPhone, an iPad or a Windows PC), which can only drive the Mac whatever
+  /// its [choice]: nothing but adb lets the Mac drive a device.
+  bool get notAndroid => isApple || platform == helloPlatformWindows;
 
   /// The mode and direction this session runs as ([spec]'s: what its
   /// [choice] comes to on its link), for the UI.
@@ -286,6 +290,9 @@ class HostSession extends BaseConnectionManager {
   /// HELLO's platform bytes for the iOS client on an iPhone and an iPad.
   static const helloPlatformIphone = 0x03;
   static const helloPlatformIpad = 0x04;
+
+  /// HELLO's platform byte for the Windows client.
+  static const helloPlatformWindows = 0x05;
 
   /// The bitrate this session's capture was started at (its preset at its
   /// panel), which the Wi-Fi adaptation moves from.
@@ -1968,12 +1975,16 @@ class HostSession extends BaseConnectionManager {
       hz = p[6];
       log.i('Host: client panel max refresh $hz Hz');
     }
-    platform = p.length >= 2 && p[1] >= 0x02 && p[1] <= 0x04 ? p[1] : null;
-    // An iPhone or iPad can only drive the Mac: the attempt's spec is taken
-    // again with that clamp, before anything reads it for the pipeline
-    // (everything mode-dependent waits for this HELLO). The display mode
-    // stays the attempt's own.
-    if (isApple) {
+    platform = p.length >= 2 &&
+            p[1] >= helloPlatformAndroid &&
+            p[1] <= helloPlatformWindows
+        ? p[1]
+        : null;
+    // An iPhone, iPad or Windows PC can only drive the Mac: the attempt's
+    // spec is taken again with that clamp, before anything reads it for the
+    // pipeline (everything mode-dependent waits for this HELLO). The display
+    // mode stays the attempt's own.
+    if (notAndroid) {
       _spec = SessionSpec.from(
         choice,
         link,
@@ -1985,15 +1996,19 @@ class HostSession extends BaseConnectionManager {
       final device = activeDevice.value;
       if (_wifiSession && device != null && device.model == null) {
         activeDevice.value = device.copyWith(
-          model: platform == helloPlatformIphone ? 'iPhone' : 'iPad',
+          model: switch (platform) {
+            helloPlatformIphone => 'iPhone',
+            helloPlatformIpad => 'iPad',
+            _ => 'Windows',
+          },
         );
       }
     }
     _panel = ClientPanel(w, h, hz);
     // Only an Android HELLO (or one too old to name a platform) becomes the
     // last panel any tablet reported, which a new tablet's first config and
-    // Home's wouldFit fall back on: an iPhone's area (about 2496×1320) or
-    // an iPad's window would be a poor guess for one.
+    // Home's wouldFit fall back on: an iPhone's area (about 2496×1320), an
+    // iPad's window or a PC's monitor would be a poor guess for one.
     settings.setClientPanelFor(key, _panel!,
         global: platform == null || platform == helloPlatformAndroid);
     if (!(_helloReceived?.isCompleted ?? true)) _helloReceived!.complete();

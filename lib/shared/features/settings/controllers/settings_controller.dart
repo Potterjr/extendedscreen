@@ -8,7 +8,7 @@ import 'package:extendedscreen/shared/connection/host_connection_manager.dart';
 import 'package:extendedscreen/shared/models/client_panel.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
 import 'package:extendedscreen/shared/models/link_type.dart';
-import 'package:extendedscreen/shared/platform/ios_app.dart';
+import 'package:extendedscreen/shared/platform/windows_app.dart';
 import 'package:extendedscreen/shared/platform/permissions_channel.dart';
 import 'package:extendedscreen/shared/services/settings_service.dart';
 
@@ -220,8 +220,9 @@ class SettingsController extends GetxController {
 
   List<PermissionItem> _buildPermissionList(Map<String, bool> status) {
     // The Android rows (battery, overlay) mean nothing on iOS, which has no
-    // permissions plugin. TODO(P2): one Local Network row there.
-    if (runsOnIos) return const [];
+    // permissions plugin, nor on Windows. TODO(P2): one Local Network row
+    // on iOS.
+    if (wifiOnlyClient) return const [];
     if (defaultTargetPlatform == TargetPlatform.macOS) {
       return [
         PermissionItem(
