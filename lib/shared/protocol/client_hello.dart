@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:ui' show Size;
 
@@ -82,12 +83,17 @@ class ClientHello {
   }
 
   /// HELLO: command, platform byte, width and height (uint16 BE each,
-  /// physical px, landscape), the panel's top refresh rate (1 byte, Hz).
+  /// physical px, landscape), the panel's top refresh rate (1 byte, Hz),
+  /// then, with [installId], the identity tail ([HelloTail]). Hosts read
+  /// only the first seven bytes, or the tail too: a host that does not know
+  /// the tail ignores it.
   static Uint8List payload({
     required ClientPlatform platform,
     required int width,
     required int height,
     required int maxRefreshHz,
+    Uint8List? installId,
+    String name = '',
   }) =>
       Uint8List.fromList([
         command,
@@ -95,5 +101,60 @@ class ClientHello {
         (width >> 8) & 0xFF, width & 0xFF,
         (height >> 8) & 0xFF, height & 0xFF,
         maxRefreshHz.clamp(0, 255),
+        if (installId != null) ...HelloTail.encode(installId, name),
       ]);
+}
+
+/// The identity a client adds after HELLO's seven bytes: `0xA1`, its install
+/// id (16 random bytes made once and kept by the app), the length of its
+/// name (1 byte) and the name in UTF-8, at most [maxNameBytes]. Sent only
+/// after the peer is trusted, so the 1 KB untrusted limit is no concern.
+/// Lets the Mac recognise a Wi-Fi device across connections and addresses.
+class HelloTail {
+  const HelloTail(this.installId, this.name);
+
+  final Uint8List installId;
+  final String name;
+
+  static const tag = 0xA1;
+  static const idLength = 16;
+  static const maxNameBytes = 64;
+
+  /// The install id as lowercase hex, for keys.
+  String get idHex =>
+      installId.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+
+  static List<int> encode(Uint8List installId, String name) {
+    assert(installId.length == idLength);
+    var bytes = utf8.encode(name);
+    if (bytes.length > maxNameBytes) {
+      // Cut between characters, never inside one.
+      var end = maxNameBytes;
+      while (end > 0 && (bytes[end] & 0xC0) == 0x80) {
+        end--;
+      }
+      bytes = bytes.sublist(0, end);
+    }
+    return [tag, ...installId, bytes.length, ...bytes];
+  }
+
+  /// The tail of [hello] (a whole HELLO payload, command byte first), or
+  /// null when it has none or it is malformed.
+  static HelloTail? parse(Uint8List hello) {
+    const at = 7;
+    if (hello.length < at + 1 + idLength + 1 || hello[at] != tag) return null;
+    final id = Uint8List.fromList(hello.sublist(at + 1, at + 1 + idLength));
+    final nameLength = hello[at + 1 + idLength];
+    final start = at + 2 + idLength;
+    if (nameLength > maxNameBytes || hello.length < start + nameLength) {
+      return null;
+    }
+    String name;
+    try {
+      name = utf8.decode(hello.sublist(start, start + nameLength));
+    } on FormatException {
+      name = '';
+    }
+    return HelloTail(id, name.trim());
+  }
 }

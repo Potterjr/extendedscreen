@@ -36,6 +36,7 @@ class SettingsService extends GetxService {
   // The configured cap on tablets at once (host).
   static const _keyMaxTablets = 'max_tablets';
   static const _keyWifiListen = 'wifi_listen';
+  static const _keyInstallId = 'install_id';
   static const _keyWifiListenMode = 'wifi_listen_mode';
   static const _keyWifiListenDirection = 'wifi_listen_direction';
   // Native panel of the connected client (physical px, landscape), learned
@@ -181,6 +182,17 @@ class SettingsService extends GetxService {
     await _prefs.setString(_keyLinkType, type.name);
   }
 
+  /// Host, once per launch: a Mac saved on the Wi-Fi link from before the
+  /// Listen switch moves to USB with the switch on, which is what that
+  /// setting means now. Both observables change before the first await.
+  Future<void> migrateHostLinkToListen() async {
+    if (linkType != LinkType.wifi) return;
+    wifiListenRx.value = true;
+    linkTypeRx.value = LinkType.usb;
+    await _prefs.setBool(_keyWifiListen, true);
+    await _prefs.setString(_keyLinkType, LinkType.usb.name);
+  }
+
   /// Client, Wi-Fi: an address typed by the user for the Mac. Empty means
   /// find it by discovery.
   String get wifiHostAddress => _prefs.getString(_keyWifiHostAddress) ?? '';
@@ -279,7 +291,11 @@ class SettingsService extends GetxService {
   Future<void> setClientPanelFor(String key, ClientPanel panel,
       {bool global = true}) async {
     if (isSyntheticKey(key)) return;
-    await _prefs.setString('$_keyClientPanelPrefix$key', panel.encode());
+    // A Wi-Fi device that did not say who it is has a new key on every
+    // connection: nothing kept under it would be found again.
+    if (!key.startsWith('wifi:conn')) {
+      await _prefs.setString('$_keyClientPanelPrefix$key', panel.encode());
+    }
     if (!global) return;
     await setClientPanel(panel.width, panel.height);
     await setClientMaxRefresh(panel.maxHz);
@@ -591,7 +607,10 @@ class SettingsService extends GetxService {
   /// is remembered in; without one a stored mode stays. Nothing for a
   /// synthetic tablet.
   Future<void> rememberDevice(String serial,
-      {String? model, required int vdSerial, SessionChoice? choice}) async {
+      {String? model,
+      required int vdSerial,
+      SessionChoice? choice,
+      bool lastDevice = true}) async {
     if (isSyntheticKey(serial)) return;
     final hasModel = model != null && model.isNotEmpty;
     final devices = knownDevices.toList();
@@ -607,6 +626,7 @@ class SettingsService extends GetxService {
           .copyWith(model: hasModel ? model : null, choice: choice);
     }
     await _saveKnownDevices(devices);
+    if (!lastDevice) return;
     await setLastDevice(serial);
     if (hasModel) await setLastDeviceName(model);
   }
@@ -618,6 +638,27 @@ class SettingsService extends GetxService {
     final v = n.clamp(1, maxTabletsLimit);
     maxTabletsRx.value = v;
     await _prefs.setInt(_keyMaxTablets, v);
+  }
+
+  /// Client: this install's id, 16 random bytes made the first time it is
+  /// asked for and kept from then on, sent in HELLO's identity tail
+  /// (`HelloTail`) so a Mac knows this device again on Wi-Fi. Not a secret:
+  /// it identifies, the pairing token is what proves.
+  Uint8List get installId {
+    final saved = _prefs.getString(_keyInstallId);
+    if (saved != null) {
+      try {
+        final bytes = base64Decode(saved);
+        if (bytes.length == 16) return bytes;
+      } on FormatException {
+        // Made again below.
+      }
+    }
+    final random = math.Random.secure();
+    final made = Uint8List.fromList(
+        List<int>.generate(16, (_) => random.nextInt(256)));
+    unawaited(_prefs.setString(_keyInstallId, base64Encode(made)));
+    return made;
   }
 
   /// Host: whether the Mac listens on Wi-Fi beside the USB tablets

@@ -251,22 +251,18 @@ void main() {
       expect(cm.connects, 0);
     });
 
-    testWidgets('the selector switches the link and is saved', (tester) async {
+    testWidgets('the Mac offers no link selector: USB always runs, and Wi-Fi '
+        'is the add panel\'s Listen switch', (tester) async {
       await start(host: true, permissions: false);
       await tester.pumpWidget(const GetMaterialApp(home: HomeView()));
       await tester.pump();
 
-      await tester.tap(find.text('link_wifi_label'));
-      await tester.pump();
-      expect(settings.linkType, LinkType.wifi);
-      expect(find.byType(DevicePickerCard), findsNothing);
-      expect(find.text('wifi_host_title'), findsOneWidget);
-
-      await tester.tap(find.text('link_usb_label'));
-      await tester.pump();
-      expect(settings.linkType, LinkType.usb);
+      expect(find.text('link_wifi_label'), findsNothing);
+      expect(find.text('link_usb_label'), findsNothing);
       expect(find.byType(DevicePickerCard), findsOneWidget);
-      expect(cm.connects, 0, reason: 'choosing a link is not connecting');
+      expect(find.byKey(const ValueKey('next/wifi-listen')), findsOneWidget);
+      expect(settings.linkType, LinkType.usb);
+      expect(cm.connects, 0);
     });
 
     testWidgets('while retrying after an error the card offers Cancel, not '

@@ -359,6 +359,16 @@ class ClientConnectionManager extends BaseConnectionManager {
         width: hello.panel.w,
         height: hello.panel.h,
         maxRefreshHz: maxRefreshHz,
+        // Who this is, so the Mac knows it again on Wi-Fi whatever its
+        // address (a Mac from before the tail ignores it).
+        installId: settings.installId,
+        // What the Mac calls it on its card (no device model is at hand
+        // without a plugin; a tablet sends none).
+        name: switch (hello.platform) {
+          ClientPlatform.iphone => 'iPhone',
+          ClientPlatform.ipad => 'iPad',
+          ClientPlatform.android => '',
+        },
       ),
     ));
   }

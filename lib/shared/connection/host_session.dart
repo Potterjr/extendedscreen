@@ -28,6 +28,7 @@ import 'package:extendedscreen/shared/connection/encode_budget.dart';
 import 'package:extendedscreen/shared/connection/pipeline_queue.dart';
 import 'package:extendedscreen/shared/connection/usb_session_service.dart';
 import 'package:extendedscreen/shared/connection/wifi_discovery_service.dart';
+import 'package:extendedscreen/shared/connection/wifi_listener.dart';
 import 'package:extendedscreen/shared/connection/wifi_pairing_service.dart';
 
 /// One tablet's session on the HOST (macOS), as the hub
@@ -77,10 +78,13 @@ class HostSession extends BaseConnectionManager {
     this.vdSerial = 1,
     this.vdName = 'Extended Screen',
     this.beside = false,
+    this.peer,
+    this.onPeerGone,
     super.socket,
     super.port,
   }) : assert(link == LinkType.wifi || serial != null),
        assert(!beside || link == LinkType.wifi),
+       assert(peer == null || beside),
        choice = choice ?? Get.find<SettingsService>().nextChoice,
        _pipeline = pipeline,
        _tunnels = tunnels,
@@ -116,6 +120,27 @@ class HostSession extends BaseConnectionManager {
   /// device it was for may be in a pocket, and the next to dial in is an
   /// ordinary admission. Fixed for its life; only over Wi-Fi.
   final bool beside;
+
+  /// A Wi-Fi device the hub's listener accepted and saw prove itself: this
+  /// session takes its connection over ([WifiPeer.socket], which is this
+  /// session's socket) and its HELLO, and has no listener of its own. Such
+  /// a session lives exactly as long as that one connection: it never
+  /// retries (the device redials, and the listener makes a new session),
+  /// and whatever would connect it again (a retry, a reconnect, an identity
+  /// reset) asks the hub to end it instead ([onPeerGone]).
+  final WifiPeer? peer;
+
+  /// Called once this [peer] session's connection is over, so the hub ends
+  /// it.
+  final void Function(HostSession session)? onPeerGone;
+
+  // The one connect a [peer] session makes has run.
+  bool _peerTaken = false;
+
+  void _peerGone() {
+    if (_retired) return;
+    onPeerGone?.call(this);
+  }
 
   /// The peer of the current connection has proved itself ([peerTrusted]),
   /// as an observable: set when it does, cleared at teardown. The hub reads
@@ -491,6 +516,12 @@ class HostSession extends BaseConnectionManager {
         phase.value.isActive) {
       return;
     }
+    // A device's connection is good for one connect: anything after it (a
+    // retry, a settings reconnect) has no link to run on.
+    if (peer != null && _peerTaken) {
+      _peerGone();
+      return;
+    }
     final attempt = currentAttempt;
     final seq = beginConnect();
     refused.value = false;
@@ -507,8 +538,25 @@ class HostSession extends BaseConnectionManager {
     // cancelled attempt knows which one to remove.
     String? tunnelled;
     Future<void> abandon() => _abandon(tunnelled, seq);
+    final adopted = peer;
     try {
-      if (wifi) {
+      if (adopted != null) {
+        // Proven by the listener already: its token and its HELLO came in
+        // before this session existed. Straight on to the pipeline.
+        _peerTaken = true;
+        setPhase(ConnectionPhase.configuring);
+        _helloReceived = Completer<void>();
+        _proof = Completer<_Proof>()..complete(_Proof.given);
+        startPacketLoop();
+        _trustConnection();
+        final name = adopted.tail?.name ?? '';
+        activeDevice.value = DeviceModel(
+          serial: adopted.address ?? LinkType.wifi.chipLabel,
+          model: name.isEmpty ? null : name,
+          status: DeviceStatus.connected,
+        );
+        _onHello(adopted.hello);
+      } else if (wifi) {
         // No device to detect and no port to forward: listen, then wait for
         // the tablet to find this Mac and dial in.
         setPhase(ConnectionPhase.handshaking);
@@ -603,7 +651,7 @@ class HostSession extends BaseConnectionManager {
         if (isCancelled(attempt)) return abandon();
       }
 
-      if (!wifi) {
+      if (!wifi && adopted == null) {
         // Over Wi-Fi these have been waiting since before the server was up.
         _helloReceived = Completer<void>();
         _proof = Completer<_Proof>();
@@ -695,6 +743,17 @@ class HostSession extends BaseConnectionManager {
 
       setPhase(ConnectionPhase.streaming);
       startHeartbeat();
+      // A device on Wi-Fi that said who it is (its install id) is known from
+      // now on, like a tablet over USB: its display serial, name and mode.
+      // Never the last-used device, which is an adb serial.
+      if (adopted?.tail != null) {
+        await settings.rememberDevice(key,
+            model: activeDevice.value?.model,
+            vdSerial: vdSerial,
+            choice: choice,
+            lastDevice: false);
+        if (isCancelled(attempt)) return;
+      }
       if (!wifi) {
         final device = activeDevice.value;
         // Remember the device only once the link is actually live — saving it
@@ -816,7 +875,11 @@ class HostSession extends BaseConnectionManager {
   Future<void> identityWasReset() async {
     _identity = null;
     final p = phase.value;
-    if (_wifiSession) {
+    if (peer != null) {
+      // It got in with the old token: it goes, and comes back through the
+      // listener with the new identity once it has been paired again.
+      _peerGone();
+    } else if (_wifiSession) {
       // In `error` the pending retry makes its own identity; idle, the next
       // connect does.
       if (p.isConnecting || p.isActive) {
@@ -1677,6 +1740,15 @@ class HostSession extends BaseConnectionManager {
     );
   }
 
+  /// A [peer] session's link is gone for good: it ends with no retry, and
+  /// the hub ends it.
+  @override
+  Future<void> handleLinkFailure({bool retry = true}) async {
+    if (peer == null) return super.handleLinkFailure(retry: retry);
+    await super.handleLinkFailure(retry: false);
+    _peerGone();
+  }
+
   @override
   Future<void> onTeardown() async {
     // Stop native wake callbacks from resurrecting capture after a disconnect.
@@ -1697,7 +1769,9 @@ class HostSession extends BaseConnectionManager {
     }
     // The responder is the Wi-Fi session's: a USB session's teardown must
     // not stop it under the session listening beside it.
-    if (_wifiSession && Get.isRegistered<WifiDiscoveryService>()) {
+    // (Nor a session the hub's listener handed a device to: the responder
+    // is the listener's then, and runs as long as it does.)
+    if (_wifiSession && peer == null && Get.isRegistered<WifiDiscoveryService>()) {
       _discovery.stopResponder();
     }
     final reverse = spec.isReverseRemote;

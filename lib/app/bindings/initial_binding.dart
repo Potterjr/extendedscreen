@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:get/get.dart';
 import 'package:extendedscreen/shared/connection/socket_service.dart';
@@ -63,6 +65,11 @@ class InitialBinding extends Bindings {
       // app's container). Inert until called; in the P0 spike only the
       // debug-only iPhones list in Settings calls it.
       Get.put(IosDeviceService(), permanent: true);
+      // The Mac has no link selector since several devices can join on
+      // Wi-Fi: USB always runs and Wi-Fi is Home's Listen switch. A Mac left
+      // on the Wi-Fi link listens instead (both values change at once in
+      // memory; the writes follow).
+      unawaited(Get.find<SettingsService>().migrateHostLinkToListen());
       Get.put<BaseConnectionManager>(HostConnectionManager(), permanent: true);
     } else if (defaultTargetPlatform == TargetPlatform.android || runsOnIos) {
       // CLIENT (Android, or the iOS client over Wi-Fi): video decoder, plus

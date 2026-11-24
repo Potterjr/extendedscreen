@@ -154,14 +154,13 @@ class AppTranslations extends Translations {
     'home_sharing_hint':
         'The Mac can now see and control this tablet. Disconnect to stop.',
     'home_add_tablet': 'Add a tablet',
-    'home_wifi_listen': 'Listen on Wi-Fi too',
+    'home_wifi_listen': 'Listen on Wi-Fi',
     'home_wifi_listen_desc':
-        'A paired iPhone or tablet can join over Wi-Fi beside the USB tablets',
-    'home_wifi_listen_needs_two':
-        'Needs Maximum tablets of 2 or more (Settings → Tablets)',
+        'Paired iPhones and tablets can join over Wi-Fi beside the USB tablets',
+    'home_wifi_listening_at': 'Listening on Wi-Fi at @addr',
+    'home_wifi_turned_away':
+        '@n device(s) turned away: every place is taken (Settings → Tablets)',
     'session_wifi_beside': 'Wi-Fi device',
-    'session_wifi_waiting':
-        'Waiting for a paired device to connect over Wi-Fi',
     'home_tablets_count': '@n of @cap tablet slots in use',
     'home_encoder_load': 'encoder @load% (@codec)',
     'home_appbar_tablets': '@n tablets',
@@ -526,13 +525,13 @@ class AppTranslations extends Translations {
     'home_sharing_hint':
         'ตอนนี้ Mac เห็นและควบคุมแท็บเล็ตนี้ได้แล้ว ตัดการเชื่อมต่อเพื่อหยุด',
     'home_add_tablet': 'เพิ่มแท็บเล็ต',
-    'home_wifi_listen': 'รับการเชื่อมต่อผ่าน Wi-Fi ด้วย',
+    'home_wifi_listen': 'รับการเชื่อมต่อผ่าน Wi-Fi',
     'home_wifi_listen_desc':
-        'iPhone หรือแท็บเล็ตที่จับคู่ไว้เข้าร่วมผ่าน Wi-Fi ได้ พร้อมกับแท็บเล็ตที่ต่อ USB',
-    'home_wifi_listen_needs_two':
-        'ต้องตั้งจำนวนแท็บเล็ตสูงสุดตั้งแต่ 2 ขึ้นไป (การตั้งค่า → แท็บเล็ต)',
+        'iPhone และแท็บเล็ตที่จับคู่ไว้เข้าร่วมผ่าน Wi-Fi ได้ พร้อมกับแท็บเล็ตที่ต่อ USB',
+    'home_wifi_listening_at': 'กำลังรอการเชื่อมต่อผ่าน Wi-Fi ที่ @addr',
+    'home_wifi_turned_away':
+        'ปฏิเสธไป @n เครื่อง เพราะช่องเต็ม (การตั้งค่า → แท็บเล็ต)',
     'session_wifi_beside': 'อุปกรณ์ Wi-Fi',
-    'session_wifi_waiting': 'รออุปกรณ์ที่จับคู่ไว้เชื่อมต่อผ่าน Wi-Fi',
     'home_tablets_count': 'ใช้ช่องแท็บเล็ตไปแล้ว @n จาก @cap ช่อง',
     'home_encoder_load': 'ตัวเข้ารหัส @load% (@codec)',
     'home_appbar_tablets': '@n เครื่อง',

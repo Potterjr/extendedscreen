@@ -229,9 +229,10 @@ class SocketService extends GetxService {
     _resetOut();
     _paced = true;
     _untrustedLimit = untrustedPayloadLimit;
-    _secureServer = await SecureServerSocket.bind(
-        InternetAddress.anyIPv4, port, context,
-        shared: true);
+    // Not shared: a second listener on the same port in this process would
+    // quietly split the connections between the two.
+    _secureServer =
+        await SecureServerSocket.bind(InternetAddress.anyIPv4, port, context);
     _clientReady = Completer<void>();
     _serverSub = _secureServer!.listen(
       _accept,
@@ -274,6 +275,31 @@ class SocketService extends GetxService {
     _connectionId++;
     _bind(client);
     if (!(_clientReady?.isCompleted ?? true)) _clientReady!.complete();
+  }
+
+  /// Makes [client], a connection accepted elsewhere (the hub's Wi-Fi
+  /// listener), this service's peer, as if this service had accepted it:
+  /// no server of its own. [paced] for a link that can fall behind (Wi-Fi);
+  /// until [trustPeer] the peer may not announce a payload over
+  /// [untrustedPayloadLimit] bytes. False when the socket is already gone
+  /// (it is destroyed then); the caller then has no link.
+  bool adoptClient(Socket client,
+      {bool paced = true, int untrustedPayloadLimit = 1024}) {
+    try {
+      client.setOption(SocketOption.tcpNoDelay, true);
+    } catch (_) {
+      client.destroy();
+      return false;
+    }
+    _resetOut();
+    _resetRecv();
+    _paced = paced;
+    _untrustedLimit = untrustedPayloadLimit;
+    _inboundLimit = untrustedPayloadLimit;
+    _socket = client;
+    _connectionId++;
+    _bind(client);
+    return true;
   }
 
   /// Completes when the first client connects (server mode).

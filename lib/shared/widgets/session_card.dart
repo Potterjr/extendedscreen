@@ -67,21 +67,16 @@ class SessionCard extends StatelessWidget {
     return Obx(() {
       final s = session;
       final phase = s.phase.value;
-      // The session beside the USB tablets, with no device on it yet.
-      final listening = s.beside && !s.trusted.value;
-      // Listening, the last device it had is no longer there.
-      final device = listening ? null : s.activeDevice.value ?? listed;
+      final device = s.activeDevice.value ?? listed;
       final model = device?.model;
       final wifi = s.link == LinkType.wifi;
       final granted = s.granted.value;
-      final error =
-          _errorLine(
-            phase,
-            s.errorKey.value,
-            s.errorMessage.value,
-            s.notice.value,
-          ) ??
-          (listening && phase.isConnecting ? 'session_wifi_waiting'.tr : null);
+      final error = _errorLine(
+        phase,
+        s.errorKey.value,
+        s.errorMessage.value,
+        s.notice.value,
+      );
       final latency = s.latencyMs.value;
       final hz = s.refreshRateHz.value;
       final bitrate = s.streamBitrate.value;
@@ -115,7 +110,8 @@ class SessionCard extends StatelessWidget {
                   builder: (context, box) => Row(
                     children: [
                       Icon(
-                        model == 'iPhone'
+                        s.platform == HostSession.helloPlatformIphone ||
+                                model == 'iPhone'
                             ? Icons.phone_iphone
                             : Icons.tablet_android,
                         color: _accent,
@@ -136,9 +132,10 @@ class SessionCard extends StatelessWidget {
                                 fontSize: 14,
                               ),
                             ),
-                            if (model != null)
+                            // Over Wi-Fi the device's address, always: two
+                            // devices with no model would look alike.
+                            if (model != null || (wifi && device != null))
                               Text(
-                                // Over Wi-Fi the device's address.
                                 wifi ? device!.serial : s.key,
                                 overflow: TextOverflow.ellipsis,
                                 style: TextStyle(
@@ -176,8 +173,7 @@ class SessionCard extends StatelessWidget {
                             if (onMode case final onMode?
                                 when (!wifi || s.beside) &&
                                     (phase.isActive ||
-                                        phase == ConnectionPhase.error ||
-                                        listening)) ...[
+                                        phase == ConnectionPhase.error)) ...[
                               const SizedBox(width: 2),
                               _ModeMenu(session: s, onMode: onMode),
                             ],

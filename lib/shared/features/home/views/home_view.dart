@@ -427,7 +427,8 @@ class _HostBody extends StatelessWidget {
         const SizedBox(height: 12),
       ],
       if (sessions.isNotEmpty) const SizedBox(height: 4),
-      if (selectors) ..._linkSelector(),
+      // No link selector on the Mac: USB always runs, and Wi-Fi is the add
+      // panel's switch.
       DevicePickerCard(
         // Snapshots taken here, inside the Obx builder, so GetX subscribes
         // to them. Passing the RxList itself registers nothing (the card
@@ -461,8 +462,9 @@ class _HostBody extends StatelessWidget {
           _WifiListenSwitch(
             key: const ValueKey('next/wifi-listen'),
             on: settings.wifiListenRx.value,
-            // Beside the tablets means two places at least.
-            allowed: hub.canListenBeside,
+            listening: hub.listening.value,
+            addresses: controller.localAddresses.toList(),
+            turnedAway: hub.wifiTurnedAway.value,
             onChanged: controller.onWifiListen,
           ),
         ],
@@ -1087,18 +1089,23 @@ class _ErrorBanner extends StatelessWidget {
   }
 }
 
-/// The add panel's "Listen on Wi-Fi too" switch: while it is on, the Mac
-/// also waits for one paired device on Wi-Fi (an iPhone, say) beside the
-/// USB tablets. With room for one tablet only it cannot be on, and says
-/// why.
+/// The add panel's "Listen on Wi-Fi" switch: while it is on, the Mac also
+/// takes paired devices on Wi-Fi (an iPhone, a tablet set to Wi-Fi) beside
+/// the USB tablets, each in a place of its own under Maximum tablets. While
+/// it listens it says where (the Mac's addresses, to type on a device that
+/// cannot find it), and how many devices it had no place for.
 class _WifiListenSwitch extends StatelessWidget {
   final bool on;
-  final bool allowed;
+  final bool listening;
+  final List<String> addresses;
+  final int turnedAway;
   final ValueChanged<bool> onChanged;
   const _WifiListenSwitch({
     super.key,
     required this.on,
-    required this.allowed,
+    required this.listening,
+    required this.addresses,
+    required this.turnedAway,
     required this.onChanged,
   });
 
@@ -1110,17 +1117,23 @@ class _WifiListenSwitch extends StatelessWidget {
       type: MaterialType.transparency,
       child: SwitchListTile(
         contentPadding: const EdgeInsets.symmetric(horizontal: 4),
-        value: on && allowed,
-        onChanged: allowed ? onChanged : null,
+        value: on,
+        onChanged: onChanged,
         secondary: const Icon(Icons.wifi, color: Colors.white70, size: 20),
         title: Text(
           'home_wifi_listen'.tr,
           style: const TextStyle(color: Colors.white, fontSize: 14),
         ),
         subtitle: Text(
-          allowed
-              ? 'home_wifi_listen_desc'.tr
-              : 'home_wifi_listen_needs_two'.tr,
+          [
+            if (on && listening && addresses.isNotEmpty)
+              'home_wifi_listening_at'
+                  .trParams({'addr': addresses.join(', ')})
+            else
+              'home_wifi_listen_desc'.tr,
+            if (on && turnedAway > 0)
+              'home_wifi_turned_away'.trParams({'n': '$turnedAway'}),
+          ].join('\n'),
           style: TextStyle(
             color: Colors.white.withValues(alpha: 0.5),
             fontSize: 12,

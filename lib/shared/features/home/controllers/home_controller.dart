@@ -357,20 +357,14 @@ class HomeController extends GetxController with WidgetsBindingObserver {
   /// or waits to retry. Ends that tablet's session alone, and the automatic
   /// connects leave the tablet alone until the user connects it again.
   Future<void> onSessionStop(String key) async {
-    final hub = _connection;
-    // The session beside the USB tablets is the Listen on Wi-Fi switch's:
-    // stopping it turns that off, so it does not come back by itself.
-    if (hub is HostConnectionManager &&
-        identical(hub.besideSession, hub.sessions[key]) &&
-        hub.besideSession != null) {
-      await _settings.setWifiListen(false);
-      return;
-    }
+    // A device on Wi-Fi is stopped like a tablet: the listener turns it
+    // away until listening is turned on again (a device without an install
+    // id is a new one each time, and comes back when it redials).
     await _connection.disconnectSession(key, userStopped: true);
   }
 
-  /// Host, the add panel: Listen on Wi-Fi too, turned on or off. Saved;
-  /// the hub starts or ends the session beside the tablets itself. Turning
+  /// Host, the add panel: Listen on Wi-Fi, turned on or off. Saved; the hub
+  /// starts or stops its listener (and the Wi-Fi devices' sessions) itself. Turning
   /// it on needs the two permissions, like a connect from Home.
   Future<void> onWifiListen(bool on) async {
     if (on && isHost && !await _ensureHostPermissions()) return;

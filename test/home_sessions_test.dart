@@ -342,7 +342,8 @@ void main() {
       ..retryPending.value = true
       ..phase.value = ConnectionPhase.error;
     await tester.pump();
-    expect(find.text('link_usb_desc'), findsOneWidget);
+    expect(find.text('link_usb_desc'), findsNothing,
+        reason: 'the Mac has no link selector');
     expect(_inPicker(find.text('link_usb_desc')), findsNothing);
     expect(_action('SERIAL-A', 'common_cancel'), findsOneWidget);
     expect(_inPicker(_next('mode/extendedScreen')), findsOneWidget);
@@ -689,7 +690,8 @@ void main() {
         ..retryPending.value = true
         ..phase.value = ConnectionPhase.error;
       await tester.pump();
-      expect(find.text('link_usb_desc'), findsOneWidget);
+      expect(find.text('link_usb_desc'), findsNothing,
+        reason: 'the Mac has no link selector');
       selectorsInPanel(direction: false);
       expect(title, findsOneWidget);
 
@@ -706,7 +708,8 @@ void main() {
       hub.phase.value = ConnectionPhase.disconnected;
       await tester.pump();
       selectorsInPanel(direction: false);
-      expect(find.text('link_usb_desc'), findsOneWidget);
+      expect(find.text('link_usb_desc'), findsNothing,
+        reason: 'the Mac has no link selector');
       expect(title, findsNothing);
       expect(_inTitle(find.text('session_extended_label')), findsOneWidget);
       await tester.tap(_next('mode/remoteControl'));
@@ -818,7 +821,7 @@ void main() {
       ..phase.value = ConnectionPhase.error;
     hub.sessions.remove('SERIAL-B');
     await tester.pump();
-    expect(link, findsOneWidget, reason: 'one idle tablet, as ever');
+    expect(link, findsNothing, reason: 'the Mac has no link selector');
     expect(find.textContaining(count(1)), findsOneWidget);
 
     // The same, but B is on its way back in another mode.
@@ -845,7 +848,7 @@ void main() {
     // B is back: Home's usual rule again.
     hub.between.clear();
     await tester.pump();
-    expect(link, findsOneWidget);
+    expect(link, findsNothing, reason: 'the Mac has no link selector');
   });
 
   testWidgets("the encoder's load follows a capacity the hub learned, with "
@@ -1614,40 +1617,10 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  group('Listen on Wi-Fi beside USB', () {
-    /// The session beside the USB tablets, with no device on it.
-    HostSession listener() => HostSession(
-          key: HostConnectionManager.wifiKey,
-          link: LinkType.wifi,
-          beside: true,
-          pipeline: hub.pipeline,
-          adb: adb,
-          socket: SocketService(),
-        )..phase.value = ConnectionPhase.handshaking;
-
-    testWidgets('a listener alone hides nothing: the link selector and the '
-        'facade card stay, its own card says it waits, and it holds no place',
+  group('Listen on Wi-Fi', () {
+    testWidgets("the add panel's switch turns listening on and off, and says "
+        'where the Mac listens and how many devices it turned away',
         (tester) async {
-      tester.view.physicalSize = const Size(1000, 2400);
-      tester.view.devicePixelRatio = 1;
-      addTearDown(tester.view.reset);
-      await settings.setWifiListen(true);
-      await start(tester, 0, permissions: true);
-      hub.sessions[HostConnectionManager.wifiKey] = listener();
-      await tester.pump();
-
-      expect(_card(HostConnectionManager.wifiKey), findsOneWidget);
-      expect(_inCards(find.text('session_wifi_beside')), findsOneWidget);
-      expect(_inCards(find.text('session_wifi_waiting')), findsOneWidget);
-      expect(find.text('link_usb_desc'), findsOneWidget,
-          reason: 'a listener is under way for nobody');
-      expect(hub.heldPlaces, isEmpty);
-      expect(_inPicker(_next('wifi-listen')), findsOneWidget);
-      expect(tester.takeException(), isNull);
-    });
-
-    testWidgets("the add panel's switch turns listening on and off, and is "
-        'off with room for one tablet only', (tester) async {
       tester.view.physicalSize = const Size(1000, 2400);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
@@ -1655,37 +1628,50 @@ void main() {
       final toggle = find.descendant(
           of: _next('wifi-listen'), matching: find.byType(Switch));
       expect(tester.widget<Switch>(toggle).value, isFalse);
+      expect(find.text('home_wifi_listen_desc'), findsOneWidget);
 
       await tester.tap(toggle);
-      // The permissions are asked about first; then the switch moves.
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 300));
       expect(settings.wifiListen, isTrue);
       expect(tester.widget<Switch>(toggle).value, isTrue);
 
-      await settings.setMaxTablets(1);
+      Get.find<HomeController>().localAddresses.value = ['192.168.1.5'];
+      hub.listening.value = true;
+      hub.wifiTurnedAway.value = 2;
       await tester.pump();
-      expect(tester.widget<Switch>(toggle).onChanged, isNull);
-      expect(tester.widget<Switch>(toggle).value, isFalse);
-      expect(find.text('home_wifi_listen_needs_two'), findsOneWidget);
+      expect(find.textContaining('home_wifi_listening_at'), findsOneWidget);
+      expect(find.textContaining('home_wifi_turned_away'), findsOneWidget);
     });
 
-    testWidgets("a listener's Cancel turns listening off rather than stopping "
-        'a tablet', (tester) async {
+    testWidgets("a Wi-Fi device's card stops it like a tablet's", (tester) async {
       tester.view.physicalSize = const Size(1000, 2400);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
       await settings.setWifiListen(true);
       await start(tester, 1, permissions: true);
-      hub.sessions[HostConnectionManager.wifiKey] = listener();
+      const key = 'wifi:0101';
+      hub.sessions[key] = HostSession(
+        key: key,
+        link: LinkType.wifi,
+        beside: true,
+        pipeline: hub.pipeline,
+        adb: adb,
+        socket: SocketService(),
+      )
+        ..activeDevice.value = const DeviceModel(
+            serial: '192.168.1.20',
+            model: 'iPhone',
+            status: DeviceStatus.connected)
+        ..phase.value = ConnectionPhase.streaming;
       await tester.pump();
 
-      await tester.tap(_action(HostConnectionManager.wifiKey, 'common_cancel'));
+      expect(_inCards(find.text('iPhone')), findsOneWidget);
+      expect(_inCards(find.text('192.168.1.20')), findsOneWidget);
+      await tester.tap(_action(key, 'common_disconnect'));
       await tester.pump();
-      expect(settings.wifiListen, isFalse);
-      // The hub ends it for the switch, and stops no tablet: it is not
-      // put among the ones the user stopped.
-      expect(hub.stops, [(HostConnectionManager.wifiKey, false)]);
+      expect(hub.stops, [(key, true)]);
+      expect(settings.wifiListen, isTrue, reason: 'listening goes on');
     });
   });
 }

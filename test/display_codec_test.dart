@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:extendedscreen/shared/protocol/client_hello.dart';
 import 'package:get/get.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -326,8 +327,12 @@ void main() {
 
     final hello = socket.sent.firstWhere(
         (p) => p.type == PacketType.control && p.payload[0] == 0x01);
-    expect(hello.payload, [0x01, 0x02, 2960 >> 8, 2960 & 0xFF,
+    expect(hello.payload.sublist(0, 7), [0x01, 0x02, 2960 >> 8, 2960 & 0xFF,
         1848 >> 8, 1848 & 0xFF, 120]);
+    // Then who it is: the identity tail, its install id made once.
+    final tail = HelloTail.parse(hello.payload);
+    expect(tail, isNotNull);
+    expect(tail!.installId, Get.find<SettingsService>().installId);
 
     await closeAll(tester);
   });
@@ -393,7 +398,7 @@ void main() {
 
       final hello = socket.sent.firstWhere(
           (p) => p.type == PacketType.control && p.payload[0] == 0x01);
-      expect(hello.payload, [0x01, 0x03, 2496 >> 8, 2496 & 0xFF,
+      expect(hello.payload.sublist(0, 7), [0x01, 0x03, 2496 >> 8, 2496 & 0xFF,
           1320 >> 8, 1320 & 0xFF, 120]);
       expect(phone.helloSize.value, const Size(2496, 1320));
 
@@ -416,7 +421,7 @@ void main() {
 
       final hello = socket.sent.firstWhere(
           (p) => p.type == PacketType.control && p.payload[0] == 0x01);
-      expect(hello.payload, [0x01, 0x04, 2752 >> 8, 2752 & 0xFF,
+      expect(hello.payload.sublist(0, 7), [0x01, 0x04, 2752 >> 8, 2752 & 0xFF,
           2024 >> 8, 2024 & 0xFF, 120]);
 
       await pad.disconnect();
