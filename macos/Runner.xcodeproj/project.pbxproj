@@ -34,6 +34,9 @@
 		AA001007AA001007AA001007 /* SocketSender.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA001008AA001008AA001008 /* SocketSender.swift */; };
 		AA001011AA001011AA001011 /* RemoteVideoPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA001012AA001012AA001012 /* RemoteVideoPlugin.swift */; };
 		AA00F011AA00F011AA00F011 /* IosScreenPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA00F012AA00F012AA00F012 /* IosScreenPlugin.swift */; };
+		AA00F021AA00F021AA00F021 /* RemoteWindowPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA00F022AA00F022AA00F022 /* RemoteWindowPlugin.swift */; };
+		AA00F023AA00F023AA00F023 /* RemoteWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA00F024AA00F024AA00F024 /* RemoteWindowController.swift */; };
+		AA00F025AA00F025AA00F025 /* RemoteSurfaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA00F026AA00F026AA00F026 /* RemoteSurfaceView.swift */; };
 		6E2D579CA9C6DB29B3C0BBD9 /* Pods_Runner.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 5DB51058942DDD1241A59E66 /* Pods_Runner.framework */; };
 		C1EB18BB2B3148935F855BA4 /* Pods_RunnerTests.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8056F586FA3750CF91DDC91A /* Pods_RunnerTests.framework */; };
 		78A318202AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage in Frameworks */ = {isa = PBXBuildFile; productRef = 78A3181F2AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage */; };
@@ -89,6 +92,9 @@
 		AA001008AA001008AA001008 /* SocketSender.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SocketSender.swift; sourceTree = "<group>"; };
 		AA001012AA001012AA001012 /* RemoteVideoPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteVideoPlugin.swift; sourceTree = "<group>"; };
 		AA00F012AA00F012AA00F012 /* IosScreenPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IosScreenPlugin.swift; sourceTree = "<group>"; };
+		AA00F022AA00F022AA00F022 /* RemoteWindowPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteWindowPlugin.swift; sourceTree = "<group>"; };
+		AA00F024AA00F024AA00F024 /* RemoteWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteWindowController.swift; sourceTree = "<group>"; };
+		AA00F026AA00F026AA00F026 /* RemoteSurfaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteSurfaceView.swift; sourceTree = "<group>"; };
 		33CEB47222A05771004F2AC0 /* Flutter-Debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = "Flutter-Debug.xcconfig"; sourceTree = "<group>"; };
 		33CEB47422A05771004F2AC0 /* Flutter-Release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = "Flutter-Release.xcconfig"; sourceTree = "<group>"; };
 		33CEB47722A0578A004F2AC0 /* Flutter-Generated.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = "Flutter-Generated.xcconfig"; path = "ephemeral/Flutter-Generated.xcconfig"; sourceTree = "<group>"; };
@@ -202,6 +208,9 @@
 				AA001008AA001008AA001008 /* SocketSender.swift */,
 				AA001012AA001012AA001012 /* RemoteVideoPlugin.swift */,
 				AA00F012AA00F012AA00F012 /* IosScreenPlugin.swift */,
+				AA00F022AA00F022AA00F022 /* RemoteWindowPlugin.swift */,
+				AA00F024AA00F024AA00F024 /* RemoteWindowController.swift */,
+				AA00F026AA00F026AA00F026 /* RemoteSurfaceView.swift */,
 				33E51913231747F40026EE4D /* DebugProfile.entitlements */,
 				33E51914231749380026EE4D /* Release.entitlements */,
 				33CC11242044D66E0003C045 /* Resources */,
@@ -478,6 +487,9 @@
 				AA001007AA001007AA001007 /* SocketSender.swift in Sources */,
 				AA001011AA001011AA001011 /* RemoteVideoPlugin.swift in Sources */,
 				AA00F011AA00F011AA00F011 /* IosScreenPlugin.swift in Sources */,
+				AA00F021AA00F021AA00F021 /* RemoteWindowPlugin.swift in Sources */,
+				AA00F023AA00F023AA00F023 /* RemoteWindowController.swift in Sources */,
+				AA00F025AA00F025AA00F025 /* RemoteSurfaceView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

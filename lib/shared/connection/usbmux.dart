@@ -23,6 +23,81 @@ class UsbmuxDevice {
   bool get isUsb => connectionType == 'USB';
 }
 
+/// What a `Listen` connection to usbmuxd reports (see [UsbmuxClient.listen]).
+enum UsbmuxEventKind {
+  /// usbmuxd took the Listen: what follows is its device events.
+  listening,
+
+  /// A device came (or, right after [listening], is already there).
+  attached,
+
+  /// A device went. Also sent for every device still attached when the
+  /// Listen connection drops (usbmuxd restarting): the next [listening]
+  /// reports each one attached again.
+  detached,
+
+  /// The Listen connection dropped (after its [detached] events); it is
+  /// opened again after the client's retry delay.
+  lost,
+}
+
+/// One message of a `Listen` connection. [device] is set for [attached]
+/// (the device as [UsbmuxClient.listDevices] would list it) and for
+/// [detached] when the attachment was reported before (usbmuxd's Detached
+/// names only the `DeviceID`).
+class UsbmuxEvent {
+  const UsbmuxEvent(this.kind, {this.deviceId, this.device});
+  final UsbmuxEventKind kind;
+  final int? deviceId;
+  final UsbmuxDevice? device;
+
+  @override
+  String toString() =>
+      'UsbmuxEvent(${kind.name}${deviceId == null ? '' : ' $deviceId'}'
+      '${device == null ? '' : ' ${device!.serial} ${device!.connectionType}'})';
+}
+
+/// The 16-byte-header plist messages of one usbmuxd connection, from its
+/// bytes as they arrive: several messages in one chunk, or one split across
+/// chunks. [add] returns each complete message's plist body; a header no
+/// usbmuxd writes throws a [FormatException] (nothing after it can be framed).
+class UsbmuxFramer {
+  final _buf = BytesBuilder();
+
+  /// The longest message taken; usbmuxd's are a few KB.
+  static const maxMessage = 1 << 20;
+
+  List<Uint8List> add(List<int> chunk) {
+    _buf.add(chunk);
+    final out = <Uint8List>[];
+    var bytes = _buf.takeBytes();
+    var at = 0;
+    while (bytes.length - at >= 16) {
+      final length = ByteData.sublistView(bytes, at, at + 4).getUint32(0, Endian.little);
+      if (length < 16 || length > maxMessage) {
+        throw FormatException('usbmuxd sent a malformed header (length $length)');
+      }
+      if (bytes.length - at < length) break;
+      out.add(Uint8List.fromList(Uint8List.sublistView(bytes, at + 16, at + length)));
+      at += length;
+    }
+    if (at < bytes.length) _buf.add(Uint8List.sublistView(bytes, at));
+    return out;
+  }
+}
+
+/// A usbmuxd plist message: the 16-byte little-endian header (length,
+/// version 1, type 8, [tag]) and the XML body.
+Uint8List usbmuxMessage(Map<String, Object> message, int tag) {
+  final body = utf8.encode(Plist.encode(message));
+  final header = ByteData(16)
+    ..setUint32(0, 16 + body.length, Endian.little)
+    ..setUint32(4, 1, Endian.little)
+    ..setUint32(8, 8, Endian.little)
+    ..setUint32(12, tag, Endian.little);
+  return Uint8List.fromList([...header.buffer.asUint8List(), ...body]);
+}
+
 /// usbmuxd's answer to a Connect that did not open a stream.
 class UsbmuxRefused implements Exception {
   const UsbmuxRefused(this.code);
@@ -42,10 +117,18 @@ class UsbmuxRefused implements Exception {
 /// (length, version 1, type 8, tag). After a Connect that succeeds the
 /// socket is the stream itself.
 class UsbmuxClient {
-  UsbmuxClient({this.path = '/var/run/usbmuxd', this.timeout = const Duration(seconds: 5)});
+  UsbmuxClient({
+    this.path = '/var/run/usbmuxd',
+    this.timeout = const Duration(seconds: 5),
+    this.listenRetry = const Duration(seconds: 1),
+  });
 
   final String path;
   final Duration timeout;
+
+  /// How long [listen] waits before it opens its connection again after it
+  /// dropped (usbmuxd restarting) or could not be opened.
+  final Duration listenRetry;
 
   static const _progName = 'extendedscreen';
 
@@ -97,6 +180,104 @@ class UsbmuxClient {
       link.close();
       rethrow;
     }
+  }
+
+  /// usbmuxd's device events, on one long-lived `Listen` connection:
+  /// [UsbmuxEventKind.listening] once usbmuxd took it, then an attached event
+  /// for each device already there and an attached or detached one as each
+  /// comes and goes. Messages are framed by [UsbmuxFramer], so several in one
+  /// chunk and one split across chunks are both read. When the connection
+  /// drops (usbmuxd restarting, a malformed message) every device it had
+  /// reported is reported detached, then [UsbmuxEventKind.lost], and it is
+  /// opened again after [listenRetry], for as long as the stream is listened
+  /// to. Cancelling the subscription closes it. Errors are not added to the
+  /// stream: a Listen that cannot be opened is just tried again.
+  Stream<UsbmuxEvent> listen() {
+    late final StreamController<UsbmuxEvent> out;
+    var cancelled = false;
+    Socket? current;
+    Completer<void>? sleeping;
+
+    Future<void> run() async {
+      while (!cancelled) {
+        final known = <int, UsbmuxDevice>{};
+        var opened = false;
+        try {
+          final socket = current = await Socket.connect(
+                  InternetAddress(path, type: InternetAddressType.unix), 0)
+              .timeout(timeout);
+          if (cancelled) {
+            socket.destroy();
+            break;
+          }
+          opened = true;
+          socket.add(usbmuxMessage({
+            'MessageType': 'Listen',
+            'ClientVersionString': _progName,
+            'ProgName': _progName,
+            'kLibUSBMuxVersion': 3,
+          }, 1));
+          final framer = UsbmuxFramer();
+          await for (final chunk in socket) {
+            for (final body in framer.add(chunk)) {
+              if (cancelled) break;
+              final msg = Plist.decode(utf8.decode(body, allowMalformed: true));
+              final id = msg['DeviceID'];
+              switch (msg['MessageType']) {
+                case 'Result':
+                  final code = msg['Number'];
+                  if (code != 0) throw UsbmuxRefused(code is int ? code : -1);
+                  out.add(const UsbmuxEvent(UsbmuxEventKind.listening));
+                case 'Attached' when id is int:
+                  final props = msg['Properties'];
+                  final device = UsbmuxDevice(
+                    deviceId: id,
+                    serial: props is Map ? '${props['SerialNumber'] ?? ''}' : '',
+                    connectionType:
+                        props is Map ? '${props['ConnectionType'] ?? ''}' : '',
+                  );
+                  known[id] = device;
+                  out.add(UsbmuxEvent(UsbmuxEventKind.attached,
+                      deviceId: id, device: device));
+                case 'Detached' when id is int:
+                  out.add(UsbmuxEvent(UsbmuxEventKind.detached,
+                      deviceId: id, device: known.remove(id)));
+              }
+            }
+            if (cancelled) break;
+          }
+        } catch (_) {
+          // Dropped, refused or malformed: reported below, then tried again.
+        } finally {
+          current?.destroy();
+          current = null;
+        }
+        if (cancelled) break;
+        for (final MapEntry(:key, :value) in known.entries) {
+          out.add(UsbmuxEvent(UsbmuxEventKind.detached,
+              deviceId: key, device: value));
+        }
+        if (opened) out.add(const UsbmuxEvent(UsbmuxEventKind.lost));
+        final wake = sleeping = Completer<void>();
+        final timer = Timer(listenRetry, () {
+          if (!wake.isCompleted) wake.complete();
+        });
+        await wake.future;
+        timer.cancel();
+        sleeping = null;
+      }
+    }
+
+    out = StreamController<UsbmuxEvent>(
+      onListen: () => unawaited(run()),
+      onCancel: () {
+        cancelled = true;
+        current?.destroy();
+        final s = sleeping;
+        if (s != null && !s.isCompleted) s.complete();
+      },
+    );
+    return out.stream;
   }
 
   Future<_Link> _open() async => _Link(await Socket.connect(
@@ -177,14 +358,8 @@ class _Link {
   }
 
   Future<Map<String, Object?>> request(Map<String, Object> message, int tag) async {
-    final body = utf8.encode(Plist.encode(message));
-    final header = ByteData(16)
-      ..setUint32(0, 16 + body.length, Endian.little)
-      ..setUint32(4, 1, Endian.little)
-      ..setUint32(8, 8, Endian.little)
-      ..setUint32(12, tag, Endian.little);
     final reply = _reply = Completer<Uint8List>();
-    _socket.add([...header.buffer.asUint8List(), ...body]);
+    _socket.add(usbmuxMessage(message, tag));
     _drain();
     final bytes = await reply.future.timeout(_timeout);
     return Plist.decode(utf8.decode(bytes, allowMalformed: true));

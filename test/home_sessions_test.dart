@@ -9,7 +9,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:extendedscreen/app/routes/app_routes.dart';
 import 'package:extendedscreen/modules/remote_screen/host/ios_screen_channel.dart';
 import 'package:extendedscreen/modules/remote_screen/host/ios_touch_service.dart';
-import 'package:extendedscreen/modules/remote_screen/host/remote_host/controllers/remote_grid_controller.dart';
+import 'package:extendedscreen/modules/remote_screen/host/remote_window/iphone_remote_window.dart';
+import 'package:extendedscreen/modules/remote_screen/host/remote_window/remote_driver.dart';
+import 'package:extendedscreen/modules/remote_screen/host/remote_window/remote_window_channel.dart';
+import 'package:extendedscreen/modules/remote_screen/host/remote_window/tablet_remote_window.dart';
+import 'package:extendedscreen/modules/remote_screen/host/remote_window/tablet_window_opener.dart';
 import 'package:extendedscreen/shared/connection/adb_service.dart';
 import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
 import 'package:extendedscreen/shared/connection/connection_state.dart';
@@ -117,17 +121,41 @@ class _Phones extends IosScreenChannel {
   }
 }
 
-/// The pushes of the remote view, with what each was given.
-class _Pushes extends NavigatorObserver {
-  final arguments = <Object?>[];
+/// Native remote windows recorded instead of opened: a second open of an
+/// id that has a window focuses it, as the real channel does.
+class _Windows extends RemoteWindowChannel {
+  final opened = <RemoteDriver>[];
+  final focused = <String>[];
 
-  int get remote => arguments.length;
+  @override
+  Future<bool> openDriver(RemoteDriver driver) async {
+    if (openIds.contains(driver.id)) {
+      focused.add(driver.id);
+      return true;
+    }
+    opened.add(driver);
+    openIds.add(driver.id);
+    return true;
+  }
+
+  @override
+  Future<bool> focus(String id) async {
+    if (!openIds.contains(id)) return false;
+    focused.add(id);
+    return true;
+  }
+
+  /// The ids of [opened], in order.
+  List<String> get openedIds => [for (final d in opened) d.id];
+}
+
+/// The routes pushed after Home, by name.
+class _Pushes extends NavigatorObserver {
+  final names = <String?>[];
 
   @override
   void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) {
-    if (route.settings.name == AppRoutes.remoteHost) {
-      arguments.add(route.settings.arguments);
-    }
+    if (route.settings.name != AppRoutes.home) names.add(route.settings.name);
   }
 }
 
@@ -297,9 +325,8 @@ void main() {
 
   /// Home over [count] live tablets, `SERIAL-A`, `SERIAL-B`, … (the first
   /// one focused), all attached, each made as [choice]. With [routed], Home
-  /// is the app's `/home` route, as in the app (the remote view opens by
-  /// itself only from there), and `/remote-host` a stand-in page with the
-  /// remote view's own controller; [routed] hears the pushes. [iosPoll] is
+  /// is the app's `/home` route, as in the app, beside a stand-in Settings
+  /// page; [routed] hears the pushes. [iosPoll] is
   /// how often Home lists the iPhones on USB (none: only as it opens).
   Future<List<HostSession>> start(
     WidgetTester tester,
@@ -345,19 +372,8 @@ void main() {
               }),
             ),
             GetPage(
-              name: AppRoutes.remoteHost,
-              page: () => const Scaffold(body: Text('remote view')),
-              binding: BindingsBuilder(() {
-                Get.put(RemoteGridController());
-              }),
-            ),
-            GetPage(
               name: AppRoutes.settings,
               page: () => const Scaffold(body: Text('settings')),
-            ),
-            GetPage(
-              name: AppRoutes.iphoneRemote,
-              page: () => const Scaffold(body: Text('iphone page')),
             ),
           ],
         ),
@@ -404,10 +420,7 @@ void main() {
       expect(_chip(tester, key, _reverse).selected, isFalse, reason: key);
     }
     expect(_inCards(find.text('role_extended')), findsNWidgets(2));
-    expect(
-      _inAdd(find.text('home_all_attached_connected')),
-      findsOneWidget,
-    );
+    expect(_inAdd(find.text('home_all_attached_connected')), findsOneWidget);
     // Nothing on the page says what the next tablet runs as, and the Mac
     // has no link selector; nor the old phone button in the bar.
     _noSelectors();
@@ -467,7 +480,10 @@ void main() {
 
     expect(find.text('common_retry'), findsOneWidget);
     expect(
-      find.descendant(of: _card('SERIAL-B'), matching: find.text('error_encode_limit')),
+      find.descendant(
+        of: _card('SERIAL-B'),
+        matching: find.text('error_encode_limit'),
+      ),
       findsOneWidget,
     );
     // Its status line says it waits for the user, not that it retries.
@@ -505,8 +521,9 @@ void main() {
       'retry now, beside Cancel', (tester) async {
     final sessions = await start(tester, 2, permissions: true);
     final b = sessions[1];
-    b.errorMessage.value = const LinkError('error_usb_unverified_client')
-        .toString();
+    b.errorMessage.value = const LinkError(
+      'error_usb_unverified_client',
+    ).toString();
     b.errorKey.value = 'error_usb_unverified_client';
     b.retryPending.value = true;
     b.phase.value = ConnectionPhase.error;
@@ -548,7 +565,10 @@ void main() {
       await tester.pump();
       expect(hub.phase.value, ConnectionPhase.streaming);
       expect(
-        find.descendant(of: _row('SERIAL-A'), matching: find.text('home_disconnecting')),
+        find.descendant(
+          of: _row('SERIAL-A'),
+          matching: find.text('home_disconnecting'),
+        ),
         findsOneWidget,
       );
       expect(find.text('home_row_full'), findsNothing);
@@ -640,12 +660,21 @@ void main() {
         settings.setKnownChoice('SERIAL-X', choice);
         hub.availableDevices.refresh();
         await tester.pump();
-        expect(_connectBtn('SERIAL-X'), fits ? findsOneWidget : findsNothing,
-            reason: '$choice');
-        expect(_chooseBtn('SERIAL-X'), fits ? findsNothing : findsOneWidget,
-            reason: '$choice');
         expect(
-          _pressable(tester, fits ? _connectBtn('SERIAL-X') : _chooseBtn('SERIAL-X')),
+          _connectBtn('SERIAL-X'),
+          fits ? findsOneWidget : findsNothing,
+          reason: '$choice',
+        );
+        expect(
+          _chooseBtn('SERIAL-X'),
+          fits ? findsNothing : findsOneWidget,
+          reason: '$choice',
+        );
+        expect(
+          _pressable(
+            tester,
+            fits ? _connectBtn('SERIAL-X') : _chooseBtn('SERIAL-X'),
+          ),
           isTrue,
           reason: '$choice',
         );
@@ -716,7 +745,10 @@ void main() {
       Color? colour(SessionChoice c) => tester
           .widget<Material>(
             find
-                .descendant(of: _option('SERIAL-X', c), matching: find.byType(Material))
+                .descendant(
+                  of: _option('SERIAL-X', c),
+                  matching: find.byType(Material),
+                )
                 .first,
           )
           .color;
@@ -728,8 +760,11 @@ void main() {
         expect(_option('SERIAL-X', c), findsOneWidget, reason: '$c');
         expect(_pickable(tester, 'SERIAL-X', c), isTrue, reason: '$c');
       }
-      expect(colour(_reverse), isNot(colour(_extended)),
-          reason: 'the last role picked is highlighted');
+      expect(
+        colour(_reverse),
+        isNot(colour(_extended)),
+        reason: 'the last role picked is highlighted',
+      );
       expect(colour(_driving), colour(_extended));
       await tester.tap(find.byKey(const ValueKey('choose/SERIAL-X/cancel')));
       await dialog(tester);
@@ -761,8 +796,9 @@ void main() {
     });
 
     testWidgets('the chooser highlights the default role by what it does: '
-        'Extended saved with the Mac → tablet direction is Second display',
-        (tester) async {
+        'Extended saved with the Mac → tablet direction is Second display', (
+      tester,
+    ) async {
       tester.view.physicalSize = const Size(1000, 2400);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
@@ -776,20 +812,26 @@ void main() {
           .widget<Material>(
             find
                 .descendant(
-                    of: _option('SERIAL-X', c), matching: find.byType(Material))
+                  of: _option('SERIAL-X', c),
+                  matching: find.byType(Material),
+                )
                 .first,
           )
           .color;
       await tester.tap(_chooseBtn('SERIAL-X'));
       await dialog(tester);
-      expect(colour(_extended), isNot(colour(_driving)),
-          reason: 'Second display is highlighted');
+      expect(
+        colour(_extended),
+        isNot(colour(_driving)),
+        reason: 'Second display is highlighted',
+      );
       expect(colour(_reverse), colour(_driving));
     });
 
     testWidgets('a pick from the chooser that ends in Settings for the '
-        'permissions connects nothing and leaves the default role alone',
-        (tester) async {
+        'permissions connects nothing and leaves the default role alone', (
+      tester,
+    ) async {
       tester.view.physicalSize = const Size(1000, 2400);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
@@ -814,9 +856,7 @@ void main() {
 
     testWidgets('a pick from the chooser is checked again when the dialog '
         'closes: a place taken meanwhile, or the device connected by '
-        'itself, refuses it with a message, and saves no role', (
-      tester,
-    ) async {
+        'itself, refuses it with a message, and saves no role', (tester) async {
       tester.view.physicalSize = const Size(1000, 2400);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
@@ -891,11 +931,9 @@ void main() {
       await settle(tester);
       expect(Get.currentRoute, AppRoutes.settings);
       expect(hub.connects, isEmpty);
-      expect(
-        hub.stoppedDevices,
-        {'SERIAL-X'},
-        reason: 'nothing was connected: the tablet is still stopped',
-      );
+      expect(hub.stoppedDevices, {
+        'SERIAL-X',
+      }, reason: 'nothing was connected: the tablet is still stopped');
       expect(hub.autoConnectPaused.value, isTrue);
       // Back to Home, the message about the permissions going with it.
       Get.back<void>(closeOverlays: true);
@@ -936,8 +974,12 @@ void main() {
       tester.view.physicalSize = const Size(1000, 2400);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
-      final a = (await start(tester, 1, translated: true, choice: _driving))
-          .single;
+      final a = (await start(
+        tester,
+        1,
+        translated: true,
+        choice: _driving,
+      )).single;
       await attachExtra(tester);
       expect(hub.cap, greaterThan(1));
 
@@ -1036,14 +1078,19 @@ void main() {
           '${text(locale, 'home_row_last_role').replaceAll('@role', text(locale, 'role_mac_controls'))}';
       String unknown(String locale) =>
           '${text(locale, 'home_row_plugged_in')} · ${text(locale, 'home_row_new')}';
-      expect(known('en'),
-          'Plugged in · last time: The Mac controls this device');
+      expect(
+        known('en'),
+        'Plugged in · last time: The Mac controls this device',
+      );
       expect(
         find.descendant(of: _row('SERIAL-X'), matching: find.text(known('en'))),
         findsOneWidget,
       );
       expect(
-        find.descendant(of: _row('SERIAL-Y'), matching: find.text(unknown('en'))),
+        find.descendant(
+          of: _row('SERIAL-Y'),
+          matching: find.text(unknown('en')),
+        ),
         findsOneWidget,
       );
       expect(find.text(known('en')), findsOneWidget, reason: 'no card says it');
@@ -1065,7 +1112,10 @@ void main() {
         findsOneWidget,
       );
       expect(
-        find.descendant(of: _row('SERIAL-Y'), matching: find.text(unknown('th'))),
+        find.descendant(
+          of: _row('SERIAL-Y'),
+          matching: find.text(unknown('th')),
+        ),
         findsOneWidget,
       );
       expect(find.text(known('en')), findsNothing);
@@ -1246,9 +1296,7 @@ void main() {
                 )
                 .map((c) => c.decoration)
                 .whereType<BoxDecoration>()
-                .firstWhere(
-                  (d) => d.borderRadius == BorderRadius.circular(18),
-                )
+                .firstWhere((d) => d.borderRadius == BorderRadius.circular(18))
                 .border!
             as Border;
     expect(border('SERIAL-B').top.width, 2);
@@ -1315,74 +1363,89 @@ void main() {
     expect(status('SERIAL-B'), isNot(contains('SERIAL-B')));
   });
 
-  group('the remote view', () {
+  group("a tablet's remote window", () {
     /// The card's Open remote button.
     Finder openRemote(String key) => find.byKey(ValueKey('$key/open-remote'));
 
-    /// Back out of the remote view, to Home.
-    Future<void> back(WidgetTester tester) async {
-      Get.back<void>();
-      await settle(tester);
-      expect(Get.currentRoute, AppRoutes.home);
+    /// The window channel and the opener, as the app registers them.
+    _Windows windows() {
+      final w = Get.put<RemoteWindowChannel>(_Windows()) as _Windows;
+      Get.put(TabletWindowOpener());
+      return w;
     }
 
-    testWidgets("a card's Open remote opens the view on that tablet's tile, "
-        'and leaves the focus where it was', (tester) async {
+    testWidgets("each live tablet the Mac controls gets its own window; a "
+        "card's Open remote brings that one forward, and leaves the focus "
+        'where it was', (tester) async {
       tester.view.physicalSize = const Size(1000, 2400);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
+      final w = windows();
       final pushes = _Pushes();
       await start(tester, 2, choice: _reverse, routed: pushes);
-      expect(hub.reverseActive.value, 2);
 
-      // Both were live when Home opened: the view came up by itself, on
-      // every tile.
-      expect(Get.currentRoute, AppRoutes.remoteHost);
-      expect(pushes.arguments, [null]);
-      expect(Get.find<RemoteGridController>().expanded.value, isNull);
-      await back(tester);
-      expect(hub.focused?.key, 'SERIAL-A');
+      // Both went live: a window each, by key, and no page pushed.
+      expect(w.openedIds, ['SERIAL-A', 'SERIAL-B']);
+      for (final d in w.opened) {
+        expect(d, isA<TabletRemoteWindow>());
+        expect(d.kind, 'tablet');
+      }
+      expect(pushes.names, isEmpty);
+      expect(Get.currentRoute, AppRoutes.home);
 
       await tester.tap(openRemote('SERIAL-B'));
       await settle(tester);
-
-      expect(Get.currentRoute, AppRoutes.remoteHost);
-      expect(pushes.arguments, [
-        null,
-        {'focus': 'SERIAL-B'},
-      ]);
-      // The view's own controller took it: B's tile alone.
-      final grid = Get.find<RemoteGridController>();
-      expect(grid.tiles.map((t) => t.key), ['SERIAL-A', 'SERIAL-B']);
-      expect(grid.expanded.value, 'SERIAL-B');
+      expect(w.focused, ['SERIAL-B']);
+      expect(w.opened, hasLength(2), reason: 'brought forward, not opened');
+      expect(pushes.names, isEmpty);
       // The hub shows the tablet it showed, and nothing was started or
       // stopped for it.
       expect(hub.focused?.key, 'SERIAL-A');
       expect(hub.focusedKey.value, 'SERIAL-A');
       expect(hub.connects, isEmpty);
       expect(hub.stops, isEmpty);
-
-      // Asked again with the view open: no second route, only the tile.
-      Get.find<HomeController>().onOpenRemoteView(key: 'SERIAL-A');
-      await settle(tester);
-      expect(pushes.remote, 2);
-      expect(grid.expanded.value, 'SERIAL-A');
-      Get.find<HomeController>().onOpenRemoteView();
-      await settle(tester);
-      expect(pushes.remote, 2);
-      expect(grid.expanded.value, 'SERIAL-A', reason: 'no tile named');
-      expect(hub.focused?.key, 'SERIAL-A');
     });
 
-    testWidgets('a second tablet the Mac controls going live while the view '
-        'is open joins it, and opens nothing', (tester) async {
+    testWidgets("Open remote on a tablet whose window was closed opens a new "
+        'one, and lets the tablet connect again', (tester) async {
       tester.view.physicalSize = const Size(1000, 2400);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
+      final w = windows();
+      await start(tester, 1, choice: _reverse, routed: _Pushes());
+      expect(w.openedIds, ['SERIAL-A']);
+
+      // The user closed it: the window has gone, and its tablet was
+      // stopped (as the driver's disconnectSession(userStopped) does).
+      w.openIds.remove('SERIAL-A');
+      hub.stoppedDevices.add('SERIAL-A');
+      hub.pauseAutoConnect();
+      await tester.pump();
+
+      await Get.find<HomeController>().onOpenRemoteView('SERIAL-A');
+      expect(w.openedIds, ['SERIAL-A', 'SERIAL-A']);
+      expect(w.opened.last, isA<TabletRemoteWindow>());
+      expect(w.focused, isEmpty);
+      expect(hub.stoppedDevices, isNot(contains('SERIAL-A')));
+      expect(hub.autoConnectPaused.value, isFalse);
+
+      // Not stopped: the pause is left as it is.
+      hub.pauseAutoConnect();
+      await Get.find<HomeController>().onOpenRemoteView('SERIAL-A');
+      expect(w.focused, ['SERIAL-A']);
+      expect(hub.autoConnectPaused.value, isTrue);
+    });
+
+    testWidgets('a second tablet going live opens a window of its own; a '
+        'link that drops and comes back opens nothing more, a new session '
+        'for the tablet does', (tester) async {
+      tester.view.physicalSize = const Size(1000, 2400);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final w = windows();
       final pushes = _Pushes();
-      final a = (await start(tester, 1, choice: _reverse, routed: pushes)).single;
-      expect(Get.currentRoute, AppRoutes.remoteHost);
-      expect(pushes.remote, 1);
+      await start(tester, 1, choice: _reverse, routed: pushes);
+      expect(w.openedIds, ['SERIAL-A']);
 
       // The second one connects, then goes live.
       final b = tablet(
@@ -1392,39 +1455,34 @@ void main() {
       );
       hub.sessions[b.key] = b;
       await settle(tester);
-      expect(hub.reverseActive.value, 1);
+      expect(w.openedIds, ['SERIAL-A']);
       b.phase.value = ConnectionPhase.streaming;
       await settle(tester);
-      expect(hub.reverseActive.value, 2);
-      expect(pushes.remote, 1);
-      expect(Get.currentRoute, AppRoutes.remoteHost);
-      expect(Get.find<RemoteGridController>().tiles.map((t) => t.key), [
-        'SERIAL-A',
-        'SERIAL-B',
-      ]);
+      expect(w.openedIds, ['SERIAL-A', 'SERIAL-B']);
 
-      // Back on Home, its link drops and comes back: still not the first.
-      await back(tester);
+      // Its window closed, its link drops and comes back: the same
+      // session, so nothing opens again.
+      w.openIds.remove('SERIAL-B');
       b.phase.value = ConnectionPhase.error;
       await settle(tester);
       b.phase.value = ConnectionPhase.streaming;
       await settle(tester);
-      expect(hub.reverseActive.value, 2);
-      expect(pushes.remote, 1);
-      expect(Get.currentRoute, AppRoutes.home);
+      expect(w.openedIds, ['SERIAL-A', 'SERIAL-B']);
 
-      // Every one of them down, then one back: the view opens again, as
-      // it does for a lone tablet whose link was retried.
-      a.phase.value = ConnectionPhase.error;
-      b.phase.value = ConnectionPhase.error;
+      // A new session for the tablet (brought back from Home): a window
+      // when it goes live.
+      final again = tablet(
+        'B',
+        choice: _reverse,
+        phase: ConnectionPhase.handshaking,
+      );
+      hub.sessions[again.key] = again;
       await settle(tester);
-      expect(hub.reverseActive.value, 0);
-      expect(pushes.remote, 1);
-      a.phase.value = ConnectionPhase.streaming;
+      expect(w.openedIds, ['SERIAL-A', 'SERIAL-B']);
+      again.phase.value = ConnectionPhase.streaming;
       await settle(tester);
-      expect(pushes.remote, 2);
-      expect(pushes.arguments.last, isNull);
-      expect(Get.currentRoute, AppRoutes.remoteHost);
+      expect(w.openedIds, ['SERIAL-A', 'SERIAL-B', 'SERIAL-B']);
+      expect(pushes.names, isEmpty);
     });
 
     testWidgets('an Extended tablet going live while what a new device gets '
@@ -1435,6 +1493,7 @@ void main() {
       addTearDown(tester.view.reset);
       await settings.setSessionMode(SessionMode.remoteControl);
       await settings.setRemoteDirection(RemoteDirection.macControlsTab);
+      final w = windows();
       final pushes = _Pushes();
       final sessions = await start(
         tester,
@@ -1454,7 +1513,8 @@ void main() {
       await settle(tester);
       expect(hub.phase.value, ConnectionPhase.streaming);
       expect(hub.reverseActive.value, 0);
-      expect(pushes.remote, 0);
+      expect(w.opened, isEmpty);
+      expect(pushes.names, isEmpty);
       expect(Get.currentRoute, AppRoutes.home);
       expect(openRemote('SERIAL-A'), findsNothing);
       expect(find.text('home_open_remote'), findsNothing);
@@ -1554,11 +1614,17 @@ void main() {
         expect(_role(key, _driving), findsOneWidget, reason: key);
       }
       expect(
-        find.descendant(of: _card('SERIAL-A'), matching: find.byIcon(Icons.phone_iphone)),
+        find.descendant(
+          of: _card('SERIAL-A'),
+          matching: find.byIcon(Icons.phone_iphone),
+        ),
         findsOneWidget,
       );
       expect(
-        find.descendant(of: _card('SERIAL-B'), matching: find.byIcon(Icons.tablet_mac)),
+        find.descendant(
+          of: _card('SERIAL-B'),
+          matching: find.byIcon(Icons.tablet_mac),
+        ),
         findsOneWidget,
       );
       expect(_role('SERIAL-C', _reverse), findsOneWidget, reason: 'Android');
@@ -1777,9 +1843,15 @@ void main() {
           await tester.pump();
         }
         final share = map['home_start_share']!;
-        final toReverse = map['session_mode_hint_to_reverse']!
-            .replaceAll('@share', share);
-        for (final key in ['role_extended', 'role_controls_mac', 'role_mac_controls']) {
+        final toReverse = map['session_mode_hint_to_reverse']!.replaceAll(
+          '@share',
+          share,
+        );
+        for (final key in [
+          'role_extended',
+          'role_controls_mac',
+          'role_mac_controls',
+        ]) {
           expect(_inCards(find.text(map[key]!)), findsOneWidget, reason: key);
         }
         expect(find.text(map['home_devices']!), findsOneWidget);
@@ -1858,8 +1930,10 @@ void main() {
       expect(th['home_devices_at_cap'], contains('@cap'));
       expect(th['home_row_full_mac'], contains('@cap'));
       expect(th['home_row_role_no_room'], contains('@role'));
-      expect(th['home_wifi_turned_away_mac'],
-          allOf(contains('@n'), contains('@cap')));
+      expect(
+        th['home_wifi_turned_away_mac'],
+        allOf(contains('@n'), contains('@cap')),
+      );
       // Plain words while a tablet connects: no protocol step names, and
       // English status words begin with a capital, like the rest.
       expect(en['home_status_waiting_you'], contains('Retry'));
@@ -1973,7 +2047,9 @@ void main() {
     await dialog(tester);
     expect(find.byType(DeviceSettingsSheet), findsOneWidget);
     expect(
-      tester.widget<DeviceSettingsSheet>(find.byType(DeviceSettingsSheet)).deviceKey,
+      tester
+          .widget<DeviceSettingsSheet>(find.byType(DeviceSettingsSheet))
+          .deviceKey,
       'SERIAL-A',
     );
     expect(hub.focused?.key, 'SERIAL-A');
@@ -2012,8 +2088,8 @@ void main() {
   });
 
   group('iPhones over USB', () {
-    testWidgets('one plugged in gets a card whose Open screen opens its '
-        'page with its id; none listed, no card', (tester) async {
+    testWidgets('one plugged in gets a card; none listed, no card; with no '
+        'window plugin its Open screen opens nothing', (tester) async {
       tester.view.physicalSize = const Size(1000, 2400);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
@@ -2061,11 +2137,9 @@ void main() {
       expect(_inAdd(find.text('home_all_attached_connected')), findsOneWidget);
       expect(hub.heldPlaces, isEmpty);
 
+      // The window plugin is the only way to show a phone: without it
+      // (not macOS) nothing opens, and no page is pushed.
       await tester.tap(find.byKey(const ValueKey('iphone-usb/cam-1/open')));
-      await settle(tester);
-      expect(Get.currentRoute, AppRoutes.iphoneRemote);
-      expect(Get.arguments, {'id': 'cam-1'});
-      Get.back<void>();
       await settle(tester);
       expect(Get.currentRoute, AppRoutes.home);
 
@@ -2075,6 +2149,54 @@ void main() {
       await tester.pump();
       expect(find.byKey(const ValueKey('iphone-usb/cam-1')), findsNothing);
       expect(find.byKey(const ValueKey('home/empty')), findsOneWidget);
+    });
+
+    testWidgets('Open screen opens the phone\'s native window (a second '
+        'click shows it), and the card says it is open', (tester) async {
+      tester.view.physicalSize = const Size(1000, 2400);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final phones = Get.put<IosScreenChannel>(_Phones()) as _Phones;
+      phones.list = const [IosScreenDevice('cam-1', 'iPhone 17 Pro')];
+      final windows = Get.put<RemoteWindowChannel>(_Windows()) as _Windows;
+      await start(tester, 0, permissions: true, routed: _Pushes());
+      await Get.find<HomeController>().refreshIosDevices();
+      await tester.pump();
+      final open = find.byKey(const ValueKey('iphone-usb/cam-1/open'));
+      expect(
+        find.descendant(of: open, matching: find.text('iphone_usb_open')),
+        findsOneWidget,
+      );
+
+      await tester.tap(open);
+      await settle(tester);
+      expect(Get.currentRoute, AppRoutes.home, reason: 'no page pushed');
+      expect(windows.opened, hasLength(1));
+      final driver = windows.opened.single;
+      expect(driver, isA<IphoneRemoteWindow>());
+      expect(
+        (driver.id, driver.kind, driver.title),
+        ('cam-1', 'iphone', 'iPhone 17 Pro'),
+      );
+      expect(
+        find.descendant(
+          of: open,
+          matching: find.text('iphone_usb_show_window'),
+        ),
+        findsOneWidget,
+      );
+      await tester.tap(open);
+      await settle(tester);
+      expect(windows.opened, hasLength(1));
+      expect(windows.focused, ['cam-1']);
+
+      // Closed: the card offers to open it again.
+      windows.openIds.remove('cam-1');
+      await tester.pump();
+      expect(
+        find.descendant(of: open, matching: find.text('iphone_usb_open')),
+        findsOneWidget,
+      );
     });
 
     testWidgets("the card's status says whether touch works only once it "
@@ -2198,11 +2320,7 @@ void main() {
       await tester.scrollUntilVisible(_card(key), 200, scrollable: list);
       expect(tester.takeException(), isNull, reason: key);
     }
-    await tester.scrollUntilVisible(
-      _wifiRow,
-      200,
-      scrollable: list,
-    );
+    await tester.scrollUntilVisible(_wifiRow, 200, scrollable: list);
     await tester.pump();
     expect(_wifiRow, findsOneWidget);
     expect(tester.takeException(), isNull);
@@ -2244,13 +2362,14 @@ void main() {
 
       /// How many lines [key]'s chips take.
       int lines(String key) => {
-        for (final c in SessionChoice.all)
-          tester.getTopLeft(_role(key, c)).dy,
+        for (final c in SessionChoice.all) tester.getTopLeft(_role(key, c)).dy,
       }.length;
 
       expect(find.byType(DeviceCard), findsNWidgets(2));
       expect(tester.takeException(), isNull);
-      final narrow = {for (final k in ['SERIAL-A', 'SERIAL-B']) k: lines(k)};
+      final narrow = {
+        for (final k in ['SERIAL-A', 'SERIAL-B']) k: lines(k),
+      };
       for (final key in ['SERIAL-A', 'SERIAL-B']) {
         // The tablet's name keeps some room beside its action.
         expect(
@@ -2440,7 +2559,10 @@ void main() {
       Finder says(String text) =>
           find.descendant(of: _wifiRow, matching: find.textContaining(text));
       expect(tester.widget<Switch>(toggle).value, isFalse);
-      expect(says('home_wifi_accept_desc · wifi_host_no_network'), findsOneWidget);
+      expect(
+        says('home_wifi_accept_desc · wifi_host_no_network'),
+        findsOneWidget,
+      );
       expect(says('home_wifi_not_listening'), findsNothing);
       // Below every row of the panel.
       expect(
@@ -2478,19 +2600,21 @@ void main() {
       await settings.setWifiListen(true);
       await start(tester, 1, permissions: true);
       const key = 'wifi:0101';
-      hub.sessions[key] = HostSession(
-        key: key,
-        link: LinkType.wifi,
-        beside: true,
-        pipeline: hub.pipeline,
-        adb: adb,
-        socket: SocketService(),
-      )
-        ..activeDevice.value = const DeviceModel(
-            serial: '192.168.1.20',
-            model: 'iPhone',
-            status: DeviceStatus.connected)
-        ..phase.value = ConnectionPhase.streaming;
+      hub.sessions[key] =
+          HostSession(
+              key: key,
+              link: LinkType.wifi,
+              beside: true,
+              pipeline: hub.pipeline,
+              adb: adb,
+              socket: SocketService(),
+            )
+            ..activeDevice.value = const DeviceModel(
+              serial: '192.168.1.20',
+              model: 'iPhone',
+              status: DeviceStatus.connected,
+            )
+            ..phase.value = ConnectionPhase.streaming;
       await tester.pump();
 
       expect(_inCards(find.text('iPhone')), findsOneWidget);
@@ -2499,7 +2623,10 @@ void main() {
         matching: find.textContaining('192.168.1.20'),
       );
       expect(status, findsOneWidget);
-      expect(tester.widget<Text>(status).data, startsWith('Wi-Fi · 192.168.1.20'));
+      expect(
+        tester.widget<Text>(status).data,
+        startsWith('Wi-Fi · 192.168.1.20'),
+      );
       expect(_role(key, _extended), findsOneWidget);
       expect(_role(key, _driving), findsOneWidget);
       expect(_role(key, _reverse), findsNothing);

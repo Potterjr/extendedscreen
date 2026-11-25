@@ -15,9 +15,25 @@ private func remoteLogLine(_ message: String) {
 }
 
 /// Reverse remote (Mac controls tablet): decodes the H.264/H.265 Annex-B streams
-/// coming FROM the tablets via VideoToolbox and exposes each tablet's decoded
-/// frames to Flutter as a `FlutterTexture`. The mirror image of the Android
-/// `VideoDecoderPlugin`.
+/// coming FROM the tablets via VideoToolbox and shows each tablet's decoded
+/// frames either in a native remote window (`initializeWindow`: each picture
+/// is enqueued on that window's `RemotePictureSink`) or as a `FlutterTexture`
+/// (`initialize`, which the debug Loopback preview uses). The mirror image of
+/// the Android `VideoDecoderPlugin`.
+///
+/// - `initialize {session, codec}` → the texture id.
+/// - `initializeWindow {session, codec, window}` → `true`: a decoder that
+///   registers no texture and enqueues on the sink of the remote window whose
+///   id is `window` (`RemoteWindowPlugin.sink(for:)`, looked up per frame, so
+///   a window opened later shows the next frame; with none open the frame is
+///   only kept). Its picture size goes to `RemoteWindowPlugin.frameSizeChanged`
+///   whenever a new decompression session has other dimensions than the last
+///   reported, never on every keyframe. A `FlutterError` when it cannot be
+///   made (`BAD_ARGS`).
+/// - `replayLatest {session}` → whether a picture was enqueued: the window
+///   decoder's last picture, once, on its window's sink (a still tablet sends
+///   nothing new for a window opened on it).
+/// - `dispose {session}`.
 ///
 /// One decoder per session (the id Dart sends as `session`; none means 0).
 /// NAL units arrive over a binary message channel (no codec overhead), each
@@ -80,24 +96,21 @@ class RemoteVideoPlugin: NSObject {
         case "initialize":
             // A session starting again gets a fresh decoder and texture.
             decoders.removeValue(forKey: id)?.teardown()
-            let decoder = RemoteDecoder(
-                id: id, isHEVC: (args["codec"] as? String) == "h265",
-                registrar: registrar,
-                anotherDecoderLive: { [weak self] in
-                    self?.decoders.contains { $0.key != id } ?? false
-                },
-                onError: { [weak self] message in
-                    self?.channel.invokeMethod("onCodecError", arguments: ["session": id, "error": message])
-                },
-                onReady: { [weak self] in
-                    self?.channel.invokeMethod("onDecoderReady", arguments: ["session": id])
-                },
-                onRequestIdr: { [weak self] in
-                    self?.channel.invokeMethod("onRequestIdr", arguments: ["session": id])
-                })
+            let decoder = makeDecoder(id: id, args: args, windowId: nil)
             decoders[id] = decoder
             holdActivityWhileDecoding()
             result(NSNumber(value: decoder.register()))
+        case "initializeWindow":
+            guard let window = args["window"] as? String, !window.isEmpty else {
+                result(FlutterError(code: "BAD_ARGS", message: "No window id", details: nil))
+                return
+            }
+            decoders.removeValue(forKey: id)?.teardown()
+            decoders[id] = makeDecoder(id: id, args: args, windowId: window)
+            holdActivityWhileDecoding()
+            result(true)
+        case "replayLatest":
+            result(decoders[id]?.replayLatest() ?? false)
         case "dispose":
             decoders.removeValue(forKey: id)?.teardown()
             holdActivityWhileDecoding()
@@ -105,6 +118,26 @@ class RemoteVideoPlugin: NSObject {
         default:
             result(FlutterMethodNotImplemented)
         }
+    }
+
+    /// A decoder for session [id]: a texture one ([windowId] nil) or one
+    /// that feeds the remote window [windowId].
+    private func makeDecoder(id: Int, args: [String: Any], windowId: String?) -> RemoteDecoder {
+        RemoteDecoder(
+            id: id, isHEVC: (args["codec"] as? String) == "h265",
+            registrar: registrar, windowId: windowId,
+            anotherDecoderLive: { [weak self] in
+                self?.decoders.contains { $0.key != id } ?? false
+            },
+            onError: { [weak self] message in
+                self?.channel.invokeMethod("onCodecError", arguments: ["session": id, "error": message])
+            },
+            onReady: { [weak self] in
+                self?.channel.invokeMethod("onDecoderReady", arguments: ["session": id])
+            },
+            onRequestIdr: { [weak self] in
+                self?.channel.invokeMethod("onRequestIdr", arguments: ["session": id])
+            })
     }
 
     /// Begins the activity with the first decoder and ends it with the last
@@ -121,10 +154,17 @@ class RemoteVideoPlugin: NSObject {
     }
 }
 
-/// One tablet's decoder and the texture it renders into.
+/// One tablet's decoder and what it renders into: a Flutter texture, or
+/// (with [windowId]) the picture sink of that remote window.
 private final class RemoteDecoder: NSObject, FlutterTexture {
     private let id: Int
     private let registrar: FlutterPluginRegistrar
+    /// The remote window this decoder feeds; nil for a texture decoder.
+    private let windowId: String?
+    /// The picture size last reported to the window (main thread), so a
+    /// session made again with the same dimensions (every keyframe can bring
+    /// one) does not snap a window the user is resizing.
+    private var reportedSize: CGSize?
     // Whether another session's decoder exists right now (main thread).
     private let anotherDecoderLive: () -> Bool
     private let onError: (String) -> Void
@@ -160,19 +200,25 @@ private final class RemoteDecoder: NSObject, FlutterTexture {
     // needs nothing before it is not kept either (main thread).
     private var keyframeFailure: OSStatus = noErr
 
-    // Guards latestPixelBuffer and alive: the decoder's output thread writes,
-    // Flutter's raster thread reads, teardown (main) ends it.
+    // Guards latestPixelBuffer, alive and the window format description:
+    // the decoder's output thread writes, Flutter's raster thread or the main
+    // thread (replayLatest) reads, teardown (main) ends it.
     private let lock = NSLock()
     private var latestPixelBuffer: CVPixelBuffer?
     private var alive = true
+    // The format description the window's sample buffers were last made
+    // with, and the image buffer shape it was made for.
+    private var windowFormat: CMVideoFormatDescription?
+    private var windowFormatKey: (width: Int, height: Int, pixelFormat: OSType)?
 
-    init(id: Int, isHEVC: Bool, registrar: FlutterPluginRegistrar,
+    init(id: Int, isHEVC: Bool, registrar: FlutterPluginRegistrar, windowId: String?,
          anotherDecoderLive: @escaping () -> Bool,
          onError: @escaping (String) -> Void, onReady: @escaping () -> Void,
          onRequestIdr: @escaping () -> Void) {
         self.id = id
         self.isHEVC = isHEVC
         self.registrar = registrar
+        self.windowId = windowId
         self.anotherDecoderLive = anotherDecoderLive
         self.onError = onError
         self.onReady = onReady
@@ -184,6 +230,66 @@ private final class RemoteDecoder: NSObject, FlutterTexture {
     func register() -> Int64 {
         textureId = registrar.textures.register(self)
         return textureId
+    }
+
+    // MARK: - Window
+
+    /// Enqueues [img] on the window's sink, if it is open and takes sample
+    /// buffers; otherwise the picture is dropped (it stays the latest). Any
+    /// thread, never under `lock`'s hold: the sink takes its own locks.
+    private func enqueueOnWindow(_ img: CVImageBuffer, windowId: String) {
+        guard let sink = RemoteWindowPlugin.sink(for: windowId), sink.takesSampleBuffers,
+              let format = windowFormat(for: img) else { return }
+        // No timing: the sink marks each buffer DisplayImmediately.
+        var sampleBuffer: CMSampleBuffer?
+        var timing = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: .invalid,
+                                        decodeTimeStamp: .invalid)
+        let status = CMSampleBufferCreateReadyWithImageBuffer(
+            allocator: kCFAllocatorDefault, imageBuffer: img, formatDescription: format,
+            sampleTiming: &timing, sampleBufferOut: &sampleBuffer)
+        guard status == noErr, let sb = sampleBuffer else { return }
+        sink.enqueue(sb)
+    }
+
+    /// The format description for an image buffer shaped like [img], made
+    /// again only when its size or pixel format differs from the last one.
+    private func windowFormat(for img: CVImageBuffer) -> CMVideoFormatDescription? {
+        let key = (width: CVPixelBufferGetWidth(img), height: CVPixelBufferGetHeight(img),
+                   pixelFormat: CVPixelBufferGetPixelFormatType(img))
+        lock.lock()
+        if let cached = windowFormat, let k = windowFormatKey, k == key {
+            lock.unlock()
+            return cached
+        }
+        lock.unlock()
+        var desc: CMVideoFormatDescription?
+        guard CMVideoFormatDescriptionCreateForImageBuffer(
+            allocator: kCFAllocatorDefault, imageBuffer: img,
+            formatDescriptionOut: &desc) == noErr, let made = desc else { return nil }
+        lock.lock()
+        windowFormat = made
+        windowFormatKey = key
+        lock.unlock()
+        return made
+    }
+
+    /// Enqueues the latest picture once on the window's sink. Main thread.
+    func replayLatest() -> Bool {
+        guard let windowId else { return false }
+        lock.lock()
+        let img = alive ? latestPixelBuffer : nil
+        lock.unlock()
+        guard let img, RemoteWindowPlugin.sink(for: windowId) != nil else { return false }
+        enqueueOnWindow(img, windowId: windowId)
+        return true
+    }
+
+    /// A session was made for pictures of [size]: the window follows the
+    /// shape, only when it differs from the last one reported. Main thread.
+    private func reportFrameSize(_ size: CGSize) {
+        guard let windowId, size.width > 0, size.height > 0, size != reportedSize else { return }
+        reportedSize = size
+        RemoteWindowPlugin.shared?.frameSizeChanged(id: windowId, size: size)
     }
 
     // MARK: - FlutterTexture
@@ -345,6 +451,12 @@ private final class RemoteDecoder: NSObject, FlutterTexture {
         }
         builtSets = sets
         let size = CMVideoFormatDescriptionGetDimensions(newFd)
+        // The picture's own size (the clean aperture: a 1080-line stream is
+        // coded 1088 high).
+        let shown = CMVideoFormatDescriptionGetPresentationDimensions(
+            newFd, usePixelAspectRatio: true, useCleanAperture: true)
+        reportFrameSize(shown.width > 0 && shown.height > 0
+            ? shown : CGSize(width: CGFloat(size.width), height: CGFloat(size.height)))
         remoteLogLine("[ExtendedScreen] s\(id) remote decoder made (\(reason)): "
             + "\(isHEVC ? "H.265" : "H.264") \(size.width)x\(size.height), "
             + "\(Self.usesHardware(made) ? "hardware" : "software")"
@@ -442,8 +554,14 @@ private final class RemoteDecoder: NSObject, FlutterTexture {
             let alive = self.alive
             if alive { self.latestPixelBuffer = img }
             self.lock.unlock()
-            // Never for a texture that has been unregistered.
-            if alive { self.registrar.textures.textureFrameAvailable(self.textureId) }
+            guard alive else { return }
+            if let windowId = self.windowId {
+                // Outside the lock: rebuild and teardown take it too.
+                self.enqueueOnWindow(img, windowId: windowId)
+            } else {
+                // Never for a texture that has been unregistered.
+                self.registrar.textures.textureFrameAvailable(self.textureId)
+            }
         }
         // A session that is gone can refuse the frame outright, with no
         // callback: without this its status would never be seen, and with
@@ -473,7 +591,10 @@ private final class RemoteDecoder: NSObject, FlutterTexture {
     }
 
     func teardown() {
-        lock.lock(); alive = false; latestPixelBuffer = nil; lock.unlock()
+        lock.lock()
+        alive = false; latestPixelBuffer = nil
+        windowFormat = nil; windowFormatKey = nil
+        lock.unlock()
         if let s = session { VTDecompressionSessionInvalidate(s) }
         session = nil
         formatDesc = nil

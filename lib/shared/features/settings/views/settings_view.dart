@@ -57,6 +57,13 @@ class SettingsView extends GetView<SettingsController> {
                     value: controller.keepMacCursor.value,
                     onChanged: (_) => controller.toggleKeepMacCursor(),
                   )),
+              Obx(() => _ToggleRow(
+                    key: const ValueKey('settings/iphone-live-drag'),
+                    label: 'settings_iphone_live_drag'.tr,
+                    description: 'settings_iphone_live_drag_desc'.tr,
+                    value: controller.iphoneLiveDrag.value,
+                    onChanged: (_) => controller.toggleIphoneLiveDrag(),
+                  )),
             ]),
             const SizedBox(height: 16),
             _SectionHeader('settings_section_performance'.tr),
@@ -459,6 +466,7 @@ class _ToggleRow extends StatelessWidget {
   final bool value;
   final ValueChanged<bool> onChanged;
   const _ToggleRow({
+    super.key,
     required this.label,
     this.description,
     required this.value,

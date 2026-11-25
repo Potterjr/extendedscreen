@@ -4,6 +4,8 @@ import 'package:flutter/foundation.dart';
 import 'package:get/get.dart';
 import 'package:extendedscreen/modules/remote_screen/host/ios_screen_channel.dart';
 import 'package:extendedscreen/modules/remote_screen/host/ios_touch_service.dart';
+import 'package:extendedscreen/modules/remote_screen/host/remote_window/remote_window_channel.dart';
+import 'package:extendedscreen/modules/remote_screen/host/remote_window/tablet_window_opener.dart';
 import 'package:extendedscreen/shared/connection/socket_service.dart';
 import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
 import 'package:extendedscreen/shared/services/settings_service.dart';
@@ -71,12 +73,20 @@ class InitialBinding extends Bindings {
       // (the TouchRunner over usbmuxd). Inert until its view opens.
       Get.put(IosScreenChannel(), permanent: true);
       Get.put(IosTouchService(), permanent: true);
+      // Native remote windows (one per device id): an iPhone's view, its
+      // capture drawn straight into the window, and each tablet's the Mac
+      // views and drives.
+      Get.put(RemoteWindowChannel(), permanent: true);
       // The Mac has no link selector since several devices can join on
       // Wi-Fi: USB always runs and Wi-Fi is Home's Listen switch. A Mac left
       // on the Wi-Fi link listens instead (both values change at once in
       // memory; the writes follow).
       unawaited(Get.find<SettingsService>().migrateHostLinkToListen());
       Get.put<BaseConnectionManager>(HostConnectionManager(), permanent: true);
+      // A tablet the Mac views and drives gets its native window when its
+      // session goes live, once per session, with or without a Home screen
+      // (a hidden launch builds none). After the hub, which it watches.
+      Get.put(TabletWindowOpener(), permanent: true);
     } else if (defaultTargetPlatform == TargetPlatform.android || runsOnIos) {
       // CLIENT (Android, or the iOS client over Wi-Fi): video decoder, plus
       // on Android the reverse-remote screen capturer, then the client

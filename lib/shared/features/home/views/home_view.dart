@@ -309,10 +309,9 @@ class _HostBody extends StatelessWidget {
               onFocus: () => controller.onFocus(s.key),
               onStop: controller.onSessionStop,
               onRetry: controller.onSessionRetry,
-              // The remote view shows every device the Mac controls; the
-              // key only says which tile to show alone. The hub's focus
-              // stays.
-              onOpenRemote: () => controller.onOpenRemoteView(key: s.key),
+              // That tablet's own native window, opened or brought
+              // forward. The hub's focus stays.
+              onOpenRemote: () => controller.onOpenRemoteView(s.key),
               onPictureSettings: () => DeviceSettingsSheet.show(
                 context,
                 s.key,
@@ -336,6 +335,7 @@ class _HostBody extends StatelessWidget {
               // devices do not name: with two attached, neither card can say
               // whose touch it is.
               touch: iosDevices.length == 1 ? controller.iosTouchState : null,
+              windowOpen: controller.iphoneWindowOpen(d.id),
               onOpen: () => controller.onOpenIphone(d.id),
             ),
             const SizedBox(height: 12),

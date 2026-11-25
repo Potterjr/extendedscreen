@@ -128,9 +128,6 @@ class AppTranslations extends Translations {
     'remote_tablet_screen_hint':
         'The tablet keeps running and you can still control it: only its screen goes dark.',
     'remote_tablet_screen_failed': "Couldn't turn the tablet's screen off",
-    'remote_grid_empty': 'No tablet is being controlled from this Mac',
-    'remote_tile_expand': 'Expand',
-    'remote_tile_show_all': 'Show all',
     'remote_tile_reconnecting': 'Reconnecting…',
 
     // ── Home ────────────────────────────────────────────────────────────
@@ -145,6 +142,7 @@ class AppTranslations extends Translations {
     'home_sharing_hint':
         'The Mac can now see and control this tablet. Disconnect to stop.',
     'iphone_remote_title': 'iPhone over USB',
+    'remote_window_more': 'More controls',
     'iphone_remote_no_device': 'Plug an iPhone or iPad in over USB and unlock it.',
     'iphone_remote_waiting':
         "Waiting for the iPhone's screen. Unlock it: it sends a picture when something on it changes.",
@@ -154,10 +152,34 @@ class AppTranslations extends Translations {
     'iphone_remote_runner_missing':
         'Touches need the TouchRunner on the iPhone: open ios/TouchRunner/TouchRunner.xcodeproj in Xcode and run its test (testServe) on the iPhone.',
     'iphone_remote_home': 'Home Screen',
+    'iphone_remote_gestures':
+        'Click to tap, drag to swipe, hold the button still to long-press '
+            '(it opens while you hold). A press that stays still for a third '
+            'of a second becomes a long press, so start a drag as you press. '
+            'To hold and then drag, such as moving a Home Screen icon, hold '
+            'Shift as you press.',
     'iphone_remote_home_failed':
         'The iPhone did not go to the Home Screen: start TouchRunner again from ios/TouchRunner in Xcode.',
+    'iphone_remote_switcher': 'App Switcher',
+    'iphone_remote_spotlight': 'Spotlight',
+    'iphone_remote_control_center': 'Control Center',
+    'iphone_remote_notifications': 'Notification Center',
+    'iphone_remote_gesture_failed':
+        'The iPhone did not take @name: start TouchRunner again from ios/TouchRunner in Xcode.',
+    'iphone_remote_gesture_needs_runner':
+        '@name needs a newer TouchRunner: run its test again from ios/TouchRunner in Xcode.',
     'iphone_remote_touch_ready': 'Touch on',
     'iphone_remote_touch_off': 'Touch off',
+    'iphone_touch_reconnecting': 'Touch reconnecting…',
+    'iphone_touch_no_runner': 'Touch: no runner',
+    'iphone_touch_refused': 'Touch: runner refused',
+    'iphone_touch_several': 'Touch off: several phones',
+    'iphone_touch_no_device': 'Touch: no phone on usbmuxd',
+    'iphone_touch_dropped': '@n touch commands dropped while the link was down',
+    'iphone_remote_runner_refused':
+        'Something answered on the TouchRunner\'s port, but not as the runner does. Start TouchRunner again from Xcode.',
+    'iphone_remote_several':
+        'Touch works with one iPhone or iPad plugged in. Unplug the others to touch this one.',
     'iphone_probe_menu': 'Latency probe',
     'iphone_probe_run_tap': '@n taps at the last click',
     'iphone_probe_run_swipe': '@n swipes up and down',
@@ -225,6 +247,7 @@ class AppTranslations extends Translations {
     'home_status_waiting_you': 'Press Retry to try again',
     'home_status_shared': 'Shared encoder',
     'iphone_usb_open': 'Open screen',
+    'iphone_usb_show_window': 'Show window',
     'session_unplugged':
         'Unplugged. Plug it in again; the Mac keeps trying.',
     'session_mode_hint_restart': 'Restarts this tablet only',
@@ -364,6 +387,11 @@ class AppTranslations extends Translations {
         'Taps and drags on the tablet borrow the cursor and give it back as '
             'your finger lifts; scrolling leaves it alone. Turn off to leave '
             'it where you touched.',
+    'settings_iphone_live_drag': 'Live drags on the iPhone',
+    'settings_iphone_live_drag_desc':
+        'A drag on the iPhone picture moves the phone while the button is '
+            'held, a piece at a time. Turn off to send each drag once you let '
+            'go, as before.',
 
     // ── Settings: custom ────────────────────────────────────────────────
     'settings_custom_values': 'Custom Values',
@@ -550,9 +578,6 @@ class AppTranslations extends Translations {
     'remote_tablet_screen_on': 'เปิดจอแท็บเล็ต',
     'remote_tablet_screen_hint': 'แท็บเล็ตยังทำงานและคุมได้ตามปกติ แค่จอดับ',
     'remote_tablet_screen_failed': 'ปิดจอแท็บเล็ตไม่ได้',
-    'remote_grid_empty': 'ไม่มีแท็บเล็ตที่ควบคุมจาก Mac นี้',
-    'remote_tile_expand': 'ขยาย',
-    'remote_tile_show_all': 'แสดงทั้งหมด',
     'remote_tile_reconnecting': 'กำลังเชื่อมต่อใหม่…',
 
     // ── Home ────────────────────────────────────────────────────────────
@@ -567,6 +592,7 @@ class AppTranslations extends Translations {
     'home_sharing_hint':
         'ตอนนี้ Mac เห็นและควบคุมแท็บเล็ตนี้ได้แล้ว ตัดการเชื่อมต่อเพื่อหยุด',
     'iphone_remote_title': 'iPhone ผ่าน USB',
+    'remote_window_more': 'ตัวควบคุมเพิ่มเติม',
     'iphone_remote_no_device': 'เสียบ iPhone หรือ iPad ผ่าน USB แล้วปลดล็อกเครื่อง',
     'iphone_remote_waiting':
         'กำลังรอภาพจอ iPhone ปลดล็อกเครื่องไว้ ภาพจะมาเมื่อมีอะไรบนจอเปลี่ยน',
@@ -576,10 +602,32 @@ class AppTranslations extends Translations {
     'iphone_remote_runner_missing':
         'การแตะต้องใช้ TouchRunner บน iPhone: เปิด ios/TouchRunner/TouchRunner.xcodeproj ใน Xcode แล้วรันเทสต์ (testServe) บน iPhone',
     'iphone_remote_home': 'หน้าโฮม',
+    'iphone_remote_gestures':
+        'คลิกเพื่อแตะ ลากเพื่อปัด กดค้างไว้นิ่ง ๆ เพื่อกดค้าง (เปิดขึ้นขณะยังกดอยู่) '
+            'ถ้ากดนิ่งไว้ราวหนึ่งในสามวินาทีจะกลายเป็นการกดค้าง จึงควรเริ่มลากทันทีที่กด '
+            'ถ้าจะกดค้างแล้วลาก เช่น ย้ายไอคอนบนหน้าโฮม ให้กด Shift ค้างไว้ตอนกด',
     'iphone_remote_home_failed':
         'iPhone ไม่กลับหน้าโฮม: เปิด TouchRunner ใหม่จาก ios/TouchRunner ใน Xcode',
+    'iphone_remote_switcher': 'ตัวสลับแอป',
+    'iphone_remote_spotlight': 'Spotlight',
+    'iphone_remote_control_center': 'ศูนย์ควบคุม',
+    'iphone_remote_notifications': 'ศูนย์การแจ้งเตือน',
+    'iphone_remote_gesture_failed':
+        'iPhone ไม่รับคำสั่ง @name: เปิด TouchRunner ใหม่จาก ios/TouchRunner ใน Xcode',
+    'iphone_remote_gesture_needs_runner':
+        '@name ต้องใช้ TouchRunner รุ่นใหม่: รันเทสต์ของมันใหม่จาก ios/TouchRunner ใน Xcode',
     'iphone_remote_touch_ready': 'แตะได้',
     'iphone_remote_touch_off': 'แตะไม่ได้',
+    'iphone_touch_reconnecting': 'กำลังเชื่อมต่อการแตะใหม่…',
+    'iphone_touch_no_runner': 'แตะ: ไม่มีตัวรับคำสั่ง',
+    'iphone_touch_refused': 'แตะ: ตัวรับคำสั่งปฏิเสธ',
+    'iphone_touch_several': 'แตะไม่ได้: มีหลายเครื่อง',
+    'iphone_touch_no_device': 'แตะ: ไม่พบเครื่องใน usbmuxd',
+    'iphone_touch_dropped': 'คำสั่งแตะหลุด @n ครั้งระหว่างที่การเชื่อมต่อขาด',
+    'iphone_remote_runner_refused':
+        'มีโปรแกรมตอบที่พอร์ตของ TouchRunner แต่ไม่ใช่แบบที่ตัวรับคำสั่งตอบ เปิด TouchRunner ใหม่จาก Xcode',
+    'iphone_remote_several':
+        'แตะได้เมื่อเสียบ iPhone หรือ iPad ไว้เครื่องเดียว ถอดเครื่องอื่นออกก่อนจึงจะแตะเครื่องนี้ได้',
     'iphone_probe_menu': 'วัดความหน่วง',
     'iphone_probe_run_tap': 'แตะ @n ครั้งที่จุดที่คลิกล่าสุด',
     'iphone_probe_run_swipe': 'ปัดขึ้นลง @n ครั้ง',
@@ -647,6 +695,7 @@ class AppTranslations extends Translations {
     'home_status_waiting_you': 'รอให้คุณกดลองอีกครั้ง',
     'home_status_shared': 'ใช้ตัวเข้ารหัสร่วม',
     'iphone_usb_open': 'เปิดหน้าจอ',
+    'iphone_usb_show_window': 'แสดงหน้าต่าง',
     'session_unplugged': 'ถอดสายอยู่ เสียบใหม่ได้เลย Mac จะลองเชื่อมต่อต่อไป',
     'session_mode_hint_restart': 'เริ่มแท็บเล็ตเครื่องนี้ใหม่เท่านั้น',
     'session_mode_hint_to_reverse':
@@ -784,6 +833,10 @@ class AppTranslations extends Translations {
     'settings_keep_mac_cursor_desc':
         'การแตะและลากบนแท็บเล็ตจะยืมเคอร์เซอร์ไปชั่วคราว แล้วคืนที่เดิมเมื่อยกนิ้ว '
             'ส่วนการเลื่อนจะไม่ขยับเคอร์เซอร์เลย ปิดไว้ถ้าอยากให้เคอร์เซอร์อยู่ตรงจุดที่แตะ',
+    'settings_iphone_live_drag': 'ลากต่อเนื่องบน iPhone',
+    'settings_iphone_live_drag_desc':
+        'การลากบนภาพ iPhone จะขยับจอโทรศัพท์ตามไปทีละช่วงระหว่างที่ยังกดปุ่มค้าง '
+            'ปิดไว้เพื่อส่งการลากแต่ละครั้งเมื่อปล่อยปุ่มแล้ว แบบเดิม',
 
     // ── Settings: custom ────────────────────────────────────────────────
     'settings_custom_values': 'ค่ากำหนดเอง',

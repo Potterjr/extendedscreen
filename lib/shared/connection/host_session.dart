@@ -358,8 +358,10 @@ class HostSession extends BaseConnectionManager {
   }
 
   /// Texture id of the decoded tablet stream (reverse remote: Mac controls the
-  /// tablet). Null unless a reverse-remote session is live; the remote-view
-  /// widget renders a `Texture` from it.
+  /// tablet). Always null now: a session's decoder shows its picture in the
+  /// tablet's native remote window (`RemoteVideoChannel.initializeWindow`),
+  /// not in a texture. Kept so the hub's focused-session facade still has
+  /// something to mirror.
   final remoteTextureId = Rxn<int>();
 
   /// Reverse remote: the tablet's picture has started to arrive this session
@@ -1540,8 +1542,8 @@ class HostSession extends BaseConnectionManager {
   }
 
   /// Reverse remote (Mac controls tablet): the tablet captures + encodes its own
-  /// screen, so the host decodes the incoming stream into a Flutter texture and
-  /// injects input back via `adb shell input`. No ScreenCaptureKit here.
+  /// screen, so the host decodes the incoming stream into the tablet's native
+  /// remote window and injects input back via `adb shell input`. No ScreenCaptureKit here.
   ///
   /// [attempt] is the session this start belongs to, as for [_startCapture]:
   /// once it has ended, at the queue or while the decoder is being made,
@@ -1552,22 +1554,20 @@ class HostSession extends BaseConnectionManager {
     // Tell the client to switch into capture mode.
     _sendSessionMode();
 
-    // Stand up the decoder + texture sized to the tablet's native panel.
-    // From here the decoder's keyframe requests (routed here by the hub)
-    // become 0xFF to the tablet.
+    // Stand up the decoder for this tablet's native remote window (its id
+    // is the session key). From here the decoder's keyframe requests (routed
+    // here by the hub, by nativeId) become 0xFF to the tablet.
     _remoteWired = true;
     final p = panel;
-    final texId = await _remote.initialize(
+    final made = await _remote.initializeWindow(
       session: nativeId,
       codec: settings.codecFor(key),
-      width: p.width,
-      height: p.height,
+      window: key,
     );
     if (isCancelled(attempt)) return;
-    remoteTextureId.value = texId;
-    // No texture: nothing of this tablet can be shown. It is still asked
+    // No decoder: nothing of this tablet can be shown. It is still asked
     // for its screen, so the session stays what the tablet was told it is.
-    if (texId == null) notice.value = _noDecoderNotice;
+    if (!made) notice.value = _noDecoderNotice;
 
     // Here the *tablet's* encoder does the work, and Max's native @ 120 Hz is
     // beyond it (its HEVC encoder manages well under 120 fps at 4K), so Max
@@ -1607,7 +1607,8 @@ class HostSession extends BaseConnectionManager {
       timestampUs: DateTime.now().microsecondsSinceEpoch,
       payload: Uint8List.fromList([0xFF]),
     ));
-    log.i('Host: reverse remote — decoding tablet stream (texture $texId)');
+    log.i('Host: reverse remote — decoding tablet stream (window $key, '
+        '${made ? 'decoder made' : 'no decoder'})');
   }
 
   /// Reverse remote (USB): turns the tablet's panel off, or back on, while

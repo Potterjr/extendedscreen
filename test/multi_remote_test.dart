@@ -243,20 +243,19 @@ class _Input extends InputInjectChannel {
 /// The Mac's decoders, with one more thing a test can do: make a decoder
 /// take its time ([gate]), as VideoToolbox can.
 class _Remote extends RecordingRemoteVideo {
-  /// While set, [initialize] answers only once it completes.
+  /// While set, [initializeWindow] answers only once it completes.
   Completer<void>? gate;
 
   @override
-  Future<int?> initialize({
+  Future<bool> initializeWindow({
     required int session,
     required CodecType codec,
-    required int width,
-    required int height,
+    required String window,
   }) async {
-    final texture = await super.initialize(
-        session: session, codec: codec, width: width, height: height);
+    final made = await super.initializeWindow(
+        session: session, codec: codec, window: window);
     await gate?.future;
-    return texture;
+    return made;
   }
 }
 
@@ -365,19 +364,17 @@ void main() {
       expect(tablet.captureRequests, 1);
       expect(tablet.sharing, isTrue);
 
-      // One decoder, the session's own, the size of the tablet's panel.
+      // One decoder, the session's own, for the tablet's own window (its
+      // id the session key); no texture.
       expect(remote.made, [
         (
           session: session.nativeId,
           codec: CodecType.h265,
-          width: ultra.width,
-          height: ultra.height,
+          window: session.key,
         ),
       ]);
-      final texture = RecordingRemoteVideo.textureFor(session.nativeId);
-      expect(session.remoteTextureId.value, texture);
-      expect(hub.remoteTextureId.value, texture,
-          reason: 'the hub shows the focused session\'s');
+      expect(session.remoteTextureId.value, isNull);
+      expect(hub.remoteTextureId.value, isNull);
 
       // The Mac encodes nothing for this tablet: no share of the encoder,
       // no virtual display, no capture, no frame sent.
@@ -938,10 +935,7 @@ void main() {
       expect(remote.made.map((d) => d.session), [a.nativeId, b.nativeId]);
       expect(a.notice.value, isNull);
       expect(b.notice.value, isNull);
-      expect(a.remoteTextureId.value,
-          RecordingRemoteVideo.textureFor(a.nativeId));
-      expect(b.remoteTextureId.value,
-          RecordingRemoteVideo.textureFor(b.nativeId));
+      expect(remote.made.map((d) => d.window), [a.key, b.key]);
 
       // A decoder that says it was made, with no failure before it.
       await remote.ready(a.nativeId);
@@ -996,7 +990,7 @@ void main() {
       expect(b.notice.value, isNull);
     });
 
-    test('a tablet whose decoder and texture cannot be made at all says so, '
+    test('a tablet whose decoder cannot be made at all says so, '
         'and is still asked for its screen; the other tablet has its picture',
         () async {
       final a = made(tabletA);
@@ -1009,14 +1003,11 @@ void main() {
 
       expect(a.phase.value, ConnectionPhase.streaming);
       expect(a.notice.value, noDecoder);
-      expect(a.remoteTextureId.value, isNull);
       expect(tabletA.controls, [0xF9, 0xF8, 0xFF]);
       expect(tabletA.captureRequests, 1);
       expect(tabletA.sharing, isTrue);
 
       expect(b.notice.value, isNull);
-      expect(b.remoteTextureId.value,
-          RecordingRemoteVideo.textureFor(b.nativeId));
 
       // The next attempt starts with nothing said, and with a decoder this
       // time.
@@ -1025,8 +1016,7 @@ void main() {
       await _until(() => tabletA.keyframeRequests == 2);
       expect(a.phase.value, ConnectionPhase.streaming);
       expect(a.notice.value, isNull);
-      expect(a.remoteTextureId.value,
-          RecordingRemoteVideo.textureFor(a.nativeId));
+      expect(remote.made.where((d) => d.session == a.nativeId), hasLength(2));
       expect(b.notice.value, isNull);
     });
 
@@ -1679,20 +1669,11 @@ void main() {
         expect(t.direction, RemoteDirection.macControlsTab);
         expect(t.captureRequests, 1);
       }
-      // A decoder each, the size of its own tablet's panel.
+      // A decoder each, for its own tablet's window.
       expect(remote.made, [
-        for (final (i, s) in sessions.indexed)
-          (
-            session: s.nativeId,
-            codec: CodecType.h265,
-            width: panels[i].width,
-            height: panels[i].height,
-          ),
+        for (final s in sessions)
+          (session: s.nativeId, codec: CodecType.h265, window: s.key),
       ]);
-      for (final s in sessions) {
-        expect(s.remoteTextureId.value,
-            RecordingRemoteVideo.textureFor(s.nativeId));
-      }
 
       // Each tablet's frames go to its own decoder.
       tablets[1].sendFrame(_keyframe);

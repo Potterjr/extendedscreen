@@ -19,14 +19,15 @@ import 'package:extendedscreen/shared/models/display_config_model.dart';
 class RecordingRemoteVideo extends RemoteVideoChannel {
   static const _channel = MethodChannel('extended_screen/remote_video');
 
-  /// The texture id [initialize] answers for [session].
-  static int textureFor(int session) => 100 + session;
+  /// Every window decoder made, in order.
+  final made = <({int session, CodecType codec, String window})>[];
 
-  /// Every decoder made, in order.
-  final made = <({int session, CodecType codec, int width, int height})>[];
-
-  /// Sessions whose decoder cannot be made: [initialize] answers null.
+  /// Sessions whose decoder cannot be made: [initializeWindow] answers
+  /// false.
   final failing = <int>{};
+
+  /// Every [replayLatest], by session, in order.
+  final replayed = <int>[];
 
   /// How many frames each session's decoder was fed.
   final fed = <int, int>{};
@@ -35,14 +36,19 @@ class RecordingRemoteVideo extends RemoteVideoChannel {
   final disposed = <int>[];
 
   @override
-  Future<int?> initialize({
+  Future<bool> initializeWindow({
     required int session,
     required CodecType codec,
-    required int width,
-    required int height,
+    required String window,
   }) async {
-    made.add((session: session, codec: codec, width: width, height: height));
-    return failing.contains(session) ? null : textureFor(session);
+    made.add((session: session, codec: codec, window: window));
+    return !failing.contains(session);
+  }
+
+  @override
+  Future<bool> replayLatest(int session) async {
+    replayed.add(session);
+    return made.any((m) => m.session == session);
   }
 
   @override

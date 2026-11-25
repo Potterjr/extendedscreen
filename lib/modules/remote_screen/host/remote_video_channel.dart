@@ -5,7 +5,9 @@ import 'package:extendedscreen/shared/services/logger_service.dart';
 
 /// macOS only — the reverse of [VideoDecoderChannel]: decodes the H.264/H.265
 /// stream coming FROM the tablet (Mac-controls-tablet remote mode) via a Swift
-/// VideoToolbox decompression session and renders it into a Flutter `Texture`.
+/// VideoToolbox decompression session and shows it in the tablet's native
+/// remote window ([initializeWindow], a session's path) or renders it into a
+/// Flutter `Texture` ([initialize], the debug Loopback preview's).
 ///
 /// [initialize] returns the texture id to hand to a `Texture` widget; NAL units
 /// are fed over a binary channel to avoid `StandardMessageCodec` overhead on the
@@ -103,6 +105,43 @@ class RemoteVideoChannel extends GetxService {
     } catch (e, st) {
       _log.e('RemoteVideo initialize failed', e, st);
       return null;
+    }
+  }
+
+  /// Create [session]'s decoder for the native remote window whose id is
+  /// [window] (replacing one it had): no texture, each decoded picture goes
+  /// to that window's picture sink, looked up per frame, so a window opened
+  /// later shows the next picture. True once the decoder exists; false when
+  /// the native side could not make it.
+  Future<bool> initializeWindow({
+    required int session,
+    required CodecType codec,
+    required String window,
+  }) async {
+    try {
+      final made = await _channel.invokeMethod<bool>('initializeWindow', {
+        'session': session,
+        'codec': codec == CodecType.h265 ? 'h265' : 'h264',
+        'window': window,
+      });
+      _log.i('RemoteVideo decoder ready (session $session, window $window)');
+      return made == true;
+    } catch (e, st) {
+      _log.e('RemoteVideo initializeWindow failed', e, st);
+      return false;
+    }
+  }
+
+  /// Show [session]'s last decoded picture once more on its window (a still
+  /// tablet sends nothing new for a window opened on it). Whether a picture
+  /// was shown: false with no window decoder, no picture yet or no window.
+  Future<bool> replayLatest(int session) async {
+    try {
+      return await _channel
+              .invokeMethod<bool>('replayLatest', {'session': session}) ==
+          true;
+    } catch (_) {
+      return false;
     }
   }
 

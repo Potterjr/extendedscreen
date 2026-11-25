@@ -48,6 +48,7 @@ class SettingsService extends GetxService {
   static const _keyPerfOverlay = 'perf_overlay';
   static const _keyHudOverlay = 'hud_overlay';
   static const _keyKeepMacCursor = 'keep_mac_cursor';
+  static const _keyIphoneLiveDrag = 'iphone_live_drag';
   // Where a single tablet's screen-off choice used to live, before it was
   // kept per tablet. Read once, by [_migrateToPerTablet], then removed.
   static const _keyTabletScreenOff = 'tablet_screen_off';
@@ -72,6 +73,10 @@ class SettingsService extends GetxService {
   // Host only: the tablet's touches borrow the Mac's single cursor and hand it
   // back to where the user left it after each gesture (InputInjectPlugin).
   final keepMacCursor = true.obs;
+  // Host only: a drag on the iPhone picture streams to the phone as
+  // segments while the button is held (`seg`); off, it is replayed once let
+  // go, as before (IphoneRemoteController).
+  final iphoneLiveDrag = true.obs;
   // Reactive mirror of the active codec so UI (e.g. the home card) updates live.
   final codecRx = CodecType.h264.obs;
   // Reactive UI language code ('en' / 'th'); drives the language picker.
@@ -118,6 +123,7 @@ class SettingsService extends GetxService {
     showPerformanceOverlay.value = _prefs.getBool(_keyPerfOverlay) ?? false;
     showHudOverlay.value = _prefs.getBool(_keyHudOverlay) ?? true;
     keepMacCursor.value = _prefs.getBool(_keyKeepMacCursor) ?? true;
+    iphoneLiveDrag.value = _prefs.getBool(_keyIphoneLiveDrag) ?? true;
     codecRx.value = switch (_prefs.getString(_keyCodec)) {
       'h265' => CodecType.h265,
       'h264' => CodecType.h264,
@@ -775,6 +781,11 @@ class SettingsService extends GetxService {
   Future<void> setKeepMacCursor(bool v) {
     keepMacCursor.value = v;
     return _prefs.setBool(_keyKeepMacCursor, v);
+  }
+
+  Future<void> setIphoneLiveDrag(bool v) {
+    iphoneLiveDrag.value = v;
+    return _prefs.setBool(_keyIphoneLiveDrag, v);
   }
 
   /// Reverse remote: whether the tablet [serial]'s panel was last chosen to

@@ -96,6 +96,7 @@ class SettingsController extends GetxController {
   RxBool get showPerformanceOverlay => _settings.showPerformanceOverlay;
   RxBool get showHudOverlay => _settings.showHudOverlay;
   RxBool get keepMacCursor => _settings.keepMacCursor;
+  RxBool get iphoneLiveDrag => _settings.iphoneLiveDrag;
 
   /// Active UI language code ('en' / 'th') and its setter for the picker.
   RxString get localeCode => _settings.localeCode;
@@ -401,4 +402,9 @@ class SettingsController extends GetxController {
   /// and pushes it to the native injector.
   void toggleKeepMacCursor() =>
       _settings.setKeepMacCursor(!keepMacCursor.value);
+
+  /// Applies from the next drag on the iPhone picture, no reconnect: the
+  /// iPhone's window reads it at each pointer-down.
+  void toggleIphoneLiveDrag() =>
+      _settings.setIphoneLiveDrag(!iphoneLiveDrag.value);
 }

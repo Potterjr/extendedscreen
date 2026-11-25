@@ -3170,15 +3170,11 @@ void main() {
       expect(b.granted.value?.shared, isTrue);
       expect(c.granted.value, isNull);
 
-      // The one decoder is C's, the size of its panel.
+      // The one decoder is C's, for C's own window; no texture anywhere.
       expect(remote.made, hasLength(1));
       expect(remote.made.single.session, c.nativeId);
-      expect(remote.made.single.width, panelC.width);
-      expect(remote.made.single.height, panelC.height);
-      expect(
-        c.remoteTextureId.value,
-        RecordingRemoteVideo.textureFor(c.nativeId),
-      );
+      expect(remote.made.single.window, c.key);
+      expect(c.remoteTextureId.value, isNull);
       expect(a.remoteTextureId.value, isNull);
       expect(b.remoteTextureId.value, isNull);
       expect(hub.reverseActive.value, 1);

@@ -6,10 +6,10 @@ import 'package:extendedscreen/modules/remote_screen/host/ios_touch_service.dart
 const _accent = Color(0xFF00C8FF);
 
 /// Host, Home: an iPhone or iPad plugged in over USB, which the Mac shows
-/// and drives from its own page (`/iphone-remote`). Outside the hub: it
-/// takes no place under Maximum tablets and has no Disconnect (closing its
-/// page stops the capture). Its Open screen button opens that page on this
-/// device.
+/// and drives in its own native window. Outside the hub: it takes no place
+/// under Maximum tablets and has no Disconnect (closing its window stops
+/// the capture). Its Open screen button opens that window on this device
+/// (or brings it forward).
 class IphoneUsbCard extends StatelessWidget {
   final IosScreenDevice device;
 
@@ -21,11 +21,16 @@ class IphoneUsbCard extends StatelessWidget {
 
   final VoidCallback onOpen;
 
+  /// Whether the device's native window is open: the button then shows it
+  /// rather than opening it.
+  final bool windowOpen;
+
   const IphoneUsbCard({
     super.key,
     required this.device,
     required this.onOpen,
     this.touch,
+    this.windowOpen = false,
   });
 
   /// USB-C, the role, and whether touch works, once it has been tried
@@ -35,7 +40,7 @@ class IphoneUsbCard extends StatelessWidget {
     'role_mac_controls'.tr,
     if (state == IosTouchState.ready)
       'iphone_remote_touch_ready'.tr
-    else if (state == IosTouchState.noRunner || state == IosTouchState.noDevice)
+    else if (state != null && state != IosTouchState.idle)
       'iphone_remote_touch_off'.tr,
   ].join(' · ');
 
@@ -87,7 +92,9 @@ class IphoneUsbCard extends StatelessWidget {
               backgroundColor: _accent,
               foregroundColor: Colors.black,
             ),
-            child: Text('iphone_usb_open'.tr),
+            child: Text(
+              windowOpen ? 'iphone_usb_show_window'.tr : 'iphone_usb_open'.tr,
+            ),
           ),
         ],
       ),

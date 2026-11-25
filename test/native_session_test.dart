@@ -10,12 +10,15 @@ import 'package:extendedscreen/modules/extended_screen/host/screen_capture_chann
 import 'package:extendedscreen/modules/remote_screen/host/remote_video_channel.dart';
 import 'package:extendedscreen/shared/connection/adb_service.dart';
 import 'package:extendedscreen/shared/connection/connection_state.dart';
+import 'package:extendedscreen/shared/connection/debug/synthetic_tablet.dart';
 import 'package:extendedscreen/shared/connection/host_connection_manager.dart';
 import 'package:extendedscreen/shared/connection/host_session.dart';
 import 'package:extendedscreen/shared/connection/pipeline_queue.dart';
 import 'package:extendedscreen/shared/connection/socket_service.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
 import 'package:extendedscreen/shared/models/link_type.dart';
+import 'package:extendedscreen/shared/models/session_choice.dart';
+import 'package:extendedscreen/shared/models/session_mode.dart';
 import 'package:extendedscreen/shared/models/touch_event_model.dart';
 import 'package:extendedscreen/shared/services/logger_service.dart';
 import 'package:extendedscreen/shared/services/settings_service.dart';
@@ -374,6 +377,133 @@ void main() {
         {'session': 5, 'error': 'DECODER_BUSY'});
     await fromNative(
         'extended_screen/remote_video', 'onDecoderReady', {'session': 5});
+  });
+
+  test("a window's decoder names its session, codec and window; replaying "
+      'names its session; a refusal or a failure answers false', () async {
+    final channel = RemoteVideoChannel()..onInit();
+    expect(
+        await channel.initializeWindow(
+            session: 5, codec: CodecType.h265, window: 'R52X'),
+        isFalse,
+        reason: 'the mock answers null for it: no decoder');
+    expect(await channel.replayLatest(5), isFalse);
+    expect(calls.map((c) => c.method), ['initializeWindow', 'replayLatest']);
+    expect(calls.map((c) => c.arguments), [
+      {'session': 5, 'codec': 'h265', 'window': 'R52X'},
+      {'session': 5},
+    ]);
+
+    Object? answer = true;
+    messenger.setMockMethodCallHandler(remote, (call) async {
+      calls.add(call);
+      if (answer is Exception) throw answer;
+      return answer;
+    });
+    expect(
+        await channel.initializeWindow(
+            session: 6, codec: CodecType.h264, window: 'B'),
+        isTrue);
+    expect((calls.last.arguments as Map)['codec'], 'h264');
+    expect(await channel.replayLatest(6), isTrue);
+    answer = false;
+    expect(
+        await channel.initializeWindow(
+            session: 6, codec: CodecType.h264, window: 'B'),
+        isFalse);
+    answer = PlatformException(code: 'BAD_ARGS');
+    expect(
+        await channel.initializeWindow(
+            session: 6, codec: CodecType.h264, window: 'B'),
+        isFalse);
+    expect(await channel.replayLatest(6), isFalse);
+  });
+
+  group("a session the Mac controls the tablet in: its window's decoder", () {
+    const reverse = SessionChoice(
+        SessionMode.remoteControl, RemoteDirection.macControlsTab);
+    late FakeTablet tablet;
+    late HostSession session;
+
+    /// The remote channel answers `initializeWindow` with [answer] (an
+    /// exception is thrown, as a `FlutterError` reaches Dart).
+    void decoderAnswers(Object? answer) {
+      messenger.setMockMethodCallHandler(remote, (call) async {
+        calls.add(call);
+        if (call.method != 'initializeWindow') return null;
+        if (answer is Exception) throw answer;
+        return answer;
+      });
+    }
+
+    setUp(() {
+      Get.put(ScreenCaptureChannel());
+      Get.put(InputInjectChannel());
+      Get.put(RemoteVideoChannel());
+      tablet = FakeTablet('synth-1');
+      addTearDown(tablet.hangUp);
+      final adb = SynthAdb([tablet]);
+      Get.put<AdbService>(adb);
+      session = HostSession(
+        key: tablet.serial,
+        link: LinkType.usb,
+        serial: tablet.serial,
+        choice: reverse,
+        pipeline: PipelineQueue(),
+        adb: adb,
+        socket: SocketService(),
+      );
+      addTearDown(session.disconnect);
+    });
+
+    Future<void> live() async {
+      await session.connect();
+      expect(session.phase.value, ConnectionPhase.streaming);
+      final deadline = DateTime.now().add(const Duration(seconds: 10));
+      while (tablet.keyframeRequests < 1) {
+        if (DateTime.now().isAfter(deadline)) fail('no keyframe request');
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+    }
+
+    Iterable<MethodCall> made() =>
+        calls.where((c) => c.method == 'initializeWindow');
+
+    test('is made for the window named by the session key, with no texture, '
+        'and says nothing when it is made', () async {
+      decoderAnswers(true);
+      await live();
+      expect(made().map((c) => c.arguments), [
+        {
+          'session': session.nativeId,
+          'codec': Get.find<SettingsService>().codecFor(session.key) ==
+                  CodecType.h265
+              ? 'h265'
+              : 'h264',
+          'window': session.key,
+        },
+      ]);
+      expect(calls.where((c) => c.method == 'initialize'), isEmpty);
+      expect(session.remoteTextureId.value, isNull);
+      expect(session.notice.value, isNull);
+      expect(tablet.controls, [0xF9, 0xF8, 0xFF]);
+    });
+
+    for (final (what, answer) in [
+      ('answers false', false as Object?),
+      ('fails', PlatformException(code: 'BAD_ARGS') as Object?),
+    ]) {
+      test('that $what says so on the card; the tablet is still asked for '
+          'its screen', () async {
+        decoderAnswers(answer);
+        await live();
+        expect(made(), hasLength(1));
+        expect(session.notice.value, 'error_remote_decoder');
+        expect(session.remoteTextureId.value, isNull);
+        expect(session.phase.value, ConnectionPhase.streaming);
+        expect(tablet.controls, [0xF9, 0xF8, 0xFF]);
+      });
+    }
   });
 
   test('mouse, key and release calls name their session', () async {

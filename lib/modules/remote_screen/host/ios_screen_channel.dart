@@ -10,15 +10,19 @@ class IosScreenDevice {
   final String name;
 }
 
-/// One felt-latency probe's answer (`onProbe {id, ms}`): the first capture
-/// frame that differed from the picture shown when the probe was armed came
-/// [ms] milliseconds after the arming call reached Swift (one clock, the
-/// Mac's). [ms] is null when the probe gave up: nothing changed within 2 s,
-/// a newer probe replaced it, or the capture stopped.
+/// One felt-latency probe's answer (`onProbe {device, id, ms}`): on
+/// [device]'s capture, the first frame that differed from the picture shown
+/// when probe [id] was armed came [ms] milliseconds after its start (the
+/// input event's time when the arming call carried one, else the call's
+/// arrival in Swift; one clock, the Mac's). [ms] is null when the probe gave
+/// up: nothing changed within 2 s, a newer probe on that capture replaced
+/// it, or the capture stopped. [device] is null from a plugin that did not
+/// say.
 class ProbeResult {
-  const ProbeResult(this.id, this.ms);
+  const ProbeResult(this.id, this.ms, {this.device});
   final int id;
   final double? ms;
+  final String? device;
 
   bool get gaveUp => ms == null;
 
@@ -27,9 +31,13 @@ class ProbeResult {
     if (arguments is! Map) return null;
     final id = arguments['id'];
     final ms = arguments['ms'];
+    final device = arguments['device'];
     if (id is! num) return null;
     return ProbeResult(
-        id.toInt(), ms is num && ms.isFinite && ms >= 0 ? ms.toDouble() : null);
+      id.toInt(),
+      ms is num && ms.isFinite && ms >= 0 ? ms.toDouble() : null,
+      device: device is String ? device : null,
+    );
   }
 }
 
@@ -63,9 +71,17 @@ class ProbeSummary {
 }
 
 /// Mac: the screen of an iPhone or iPad over USB, through
-/// `IosScreenPlugin.swift` (AVFoundation's iOS screen capture into a
-/// texture). Not connected to the hub: nothing of the Wi-Fi or adb links is
+/// `IosScreenPlugin.swift` (AVFoundation's iOS screen capture, shown in the
+/// device's native remote window, `RemoteWindowChannel`, whose layer Swift
+/// feeds from the capture queue). Not connected to the hub: nothing of the Wi-Fi or adb links is
 /// used, and nothing needs to run on the phone for the picture.
+///
+/// One capture per device, keyed by the capture device's uniqueID (the `id`
+/// of every call and callback): [frameSizes] holds each one's.
+/// [frameSize] is the single-device view the iPhone controller reads: the
+/// device [start]ed last ([current]).
+/// A callback for any other device leaves them alone, and one for a device
+/// this channel never started is ignored.
 class IosScreenChannel extends GetxService {
   IosScreenChannel({MethodChannel? channel})
       : _channel = channel ?? const MethodChannel(channelName) {
@@ -76,12 +92,27 @@ class IosScreenChannel extends GetxService {
 
   final MethodChannel _channel;
 
-  /// The texture showing the phone's screen while a capture runs.
-  final textureId = Rxn<int>();
-
-  /// The size of the frames, in pixels (portrait or landscape as the phone
-  /// is held); null until the first frame.
+  /// The size of [current]'s frames, in pixels (portrait or landscape as
+  /// the phone is held); null until the first frame.
   final frameSize = Rxn<Size>();
+
+  /// Each running capture's frame size, by device id (from its first frame).
+  final frameSizes = RxMap<String, Size>();
+
+  /// The device [start]ed last, which [frameSize] follows;
+  /// null before a start, and once it is stopped or has stopped.
+  String? get current => _current;
+  String? _current;
+
+  /// Devices this channel has started (or is starting) and not stopped.
+  final _known = <String>{};
+
+  /// Of [_known], those whose start has answered: their capture runs.
+  final _started = <String>{};
+
+  /// Starts under way without a device id: until each answers which device
+  /// it took, a callback for an unknown device may be its.
+  int _unnamedStarts = 0;
 
   final _probes = StreamController<ProbeResult>.broadcast();
 
@@ -89,31 +120,99 @@ class IosScreenChannel extends GetxService {
   Stream<ProbeResult> get probes => _probes.stream;
 
   Future<dynamic> _onCall(MethodCall call) async {
+    final a = call.arguments is Map ? call.arguments as Map : const {};
+    final id = a['id'];
     switch (call.method) {
       case 'onFrameSize':
-        final a = call.arguments as Map;
-        frameSize.value = Size((a['width'] as num).toDouble(),
-            (a['height'] as num).toDouble());
+        if (id is! String || !_heard(id)) return;
+        final size = Size(
+          (a['width'] as num).toDouble(),
+          (a['height'] as num).toDouble(),
+        );
+        frameSizes[id] = size;
+        if (id == _current) frameSize.value = size;
       case 'onStopped':
-        textureId.value = null;
-        frameSize.value = null;
+        if (id is! String || !_known.contains(id)) return;
+        _forget(id);
       case 'onProbe':
         final r = ProbeResult.parse(call.arguments);
         if (r != null && !_probes.isClosed) _probes.add(r);
     }
   }
 
-  /// Arms felt-latency probe [id]: Swift takes the time as the call arrives
-  /// and answers on [probes] once a capture frame differs from the one shown
-  /// now. False when nothing was armed (no picture yet, no plugin).
-  Future<bool> markProbe(int id) async {
+  /// Whether a callback for [id] is one of this channel's captures (or may
+  /// be: an unnamed start has not answered yet).
+  bool _heard(String id) => _known.contains(id) || _unnamedStarts > 0;
+
+  /// Whether [id]'s capture runs, or its start is under way: started here
+  /// and not stopped since (nor stopped by itself, `onStopped`).
+  bool isRunning(String id) => _known.contains(id);
+
+  /// Points the single view at [id]'s capture (nothing when null).
+  void _show(String? id) {
+    _current = id;
+    frameSize.value = id == null ? null : frameSizes[id];
+  }
+
+  void _forget(String id) {
+    _known.remove(id);
+    _started.remove(id);
+    frameSizes.remove(id);
+    if (id == _current) _show(null);
+  }
+
+  /// Arms felt-latency probe [id] (Dart's probe number) on [device]'s
+  /// capture (the only one running when null). Its start is [t0Us] when
+  /// given (an input event's time, µs of the Mac's uptime), else the moment
+  /// the call reaches Swift; it answers on [probes] once a capture frame
+  /// differs from the one shown now. False when nothing was armed (no
+  /// picture yet, no such capture, no plugin).
+  Future<bool> markProbe(int id, {String? device, int? t0Us}) async {
     try {
-      return await _channel.invokeMethod<bool>('markProbe', {'id': id}) ??
+      return await _channel.invokeMethod<bool>('markProbe', {
+            'device': ?device,
+            'id': id,
+            't0Us': ?t0Us,
+          }) ??
           false;
     } on MissingPluginException {
       return false;
     } on PlatformException {
       return false;
+    }
+  }
+
+  /// Lets CoreMediaIO publish iOS screen-capture devices now, before the
+  /// first [listDevices] (which would do it too): the devices appear a
+  /// moment after it. Switching it on moves every attached iPhone or iPad
+  /// into its QuickTime USB configuration, which takes each off usbmuxd for
+  /// a moment, so it is done only when a phone's window opens or Home lists
+  /// the phones. True when this call is what switched it on (so the phones
+  /// may not be listed yet); false when it already was, or with no plugin.
+  Future<bool> prepare() async {
+    try {
+      return await _channel.invokeMethod<bool>('prepare') ?? false;
+    } on MissingPluginException {
+      return false;
+    } on PlatformException {
+      return false;
+    }
+  }
+
+  /// Writes [device]'s capture uniqueID (the only capture's when null) next
+  /// to [udid] (the touch link's usbmux SerialNumber) in the unified log, so
+  /// which one is which can be read off a real phone (category
+  /// `ios_screen`). Nothing is assumed from it.
+  Future<void> notePairing(String udid, {String? device}) async {
+    try {
+      await _channel.invokeMethod('notePairing', {
+        'udid': udid,
+        'device': ?device,
+      });
+    } on MissingPluginException {
+      // No plugin: nothing to log.
+    } on PlatformException {
+      // Nothing to log.
     }
   }
 
@@ -129,13 +228,40 @@ class IosScreenChannel extends GetxService {
     }
   }
 
-  /// Starts showing [id]'s screen (the first device when null). Throws a
-  /// [PlatformException] (`PERMISSION_DENIED`, `NO_DEVICE`, `START_FAILED`).
-  Future<void> start([String? id]) async {
+  /// Starts showing [id]'s screen (the first device when null) in its
+  /// native window. It becomes [current]; another device's capture goes
+  /// on. Throws a [PlatformException] (`PERMISSION_DENIED`, `NO_DEVICE`,
+  /// `START_FAILED`, `CANCELLED`).
+  Future<void> start(String? id) async {
+    final before = _current;
+    if (id != null) {
+      _known.add(id);
+      _current = id;
+    } else {
+      _unnamedStarts++;
+    }
     frameSize.value = null;
-    final r = await _channel.invokeMapMethod<String, dynamic>(
-        'start', {'id': ?id});
-    textureId.value = (r?['textureId'] as num?)?.toInt();
+    try {
+      final r = await _channel.invokeMapMethod<String, dynamic>('start', {
+        'id': ?id,
+      });
+      final key = r?['id'] is String ? r!['id'] as String : id;
+      // A plugin that did not say which device: nothing to keep.
+      if (key == null) return;
+      _known.add(key);
+      _started.add(key);
+      _current = key;
+      frameSize.value = frameSizes[key];
+    } on PlatformException {
+      // The plugin left every running capture as it was: the single view
+      // goes back to the one it showed, and a device that never ran is no
+      // longer expected.
+      if (id != null && !_started.contains(id)) _forget(id);
+      _show(before != null && _started.contains(before) ? before : null);
+      rethrow;
+    } finally {
+      if (id == null) _unnamedStarts--;
+    }
   }
 
   @override
@@ -144,11 +270,18 @@ class IosScreenChannel extends GetxService {
     super.onClose();
   }
 
-  Future<void> stop() async {
-    textureId.value = null;
-    frameSize.value = null;
+  /// Stops [id]'s capture; every capture when null.
+  Future<void> stop([String? id]) async {
+    if (id == null) {
+      for (final k in [..._known]) {
+        _forget(k);
+      }
+      _show(null);
+    } else {
+      _forget(id);
+    }
     try {
-      await _channel.invokeMethod('stop');
+      await _channel.invokeMethod('stop', {'id': ?id});
     } on MissingPluginException {
       // Nothing to stop.
     }

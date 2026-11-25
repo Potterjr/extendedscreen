@@ -5,7 +5,9 @@ import 'package:get/get.dart';
 import 'package:extendedscreen/app/routes/app_routes.dart';
 import 'package:extendedscreen/modules/remote_screen/host/ios_screen_channel.dart';
 import 'package:extendedscreen/modules/remote_screen/host/ios_touch_service.dart';
-import 'package:extendedscreen/modules/remote_screen/host/remote_host/controllers/remote_grid_controller.dart';
+import 'package:extendedscreen/modules/remote_screen/host/remote_window/iphone_remote_window.dart';
+import 'package:extendedscreen/modules/remote_screen/host/remote_window/remote_window_channel.dart';
+import 'package:extendedscreen/modules/remote_screen/host/remote_window/tablet_remote_window.dart';
 import 'package:extendedscreen/shared/connection/base_connection_manager.dart';
 import 'package:extendedscreen/shared/connection/connection_state.dart';
 import 'package:extendedscreen/shared/connection/host_connection_manager.dart';
@@ -57,7 +59,9 @@ class HomeController extends GetxController with WidgetsBindingObserver {
   /// and on resume (tests).
   final Duration? iosPollInterval;
 
-  HomeController({this.iosPollInterval = const Duration(seconds: 2)});
+  HomeController({
+    this.iosPollInterval = const Duration(seconds: 2),
+  });
 
   Timer? _iosPoll;
   Future<void>? _iosListing;
@@ -95,9 +99,24 @@ class HomeController extends GetxController with WidgetsBindingObserver {
     }();
   }
 
-  /// Host, an iPhone's card: its page, showing that phone.
-  void onOpenIphone(String id) =>
-      Get.toNamed(AppRoutes.iphoneRemote, arguments: {'id': id});
+  /// Host, an iPhone's card: that phone in its own native window (one
+  /// iPhone window at a time; a second click brings it forward). Nothing
+  /// without the window plugin (it is registered on macOS only).
+  Future<void> onOpenIphone(String id) async {
+    final windows = _remoteWindows;
+    if (windows == null) return;
+    final name = iosUsbDevices.firstWhereOrNull((d) => d.id == id)?.name;
+    await windows.openDriver(IphoneRemoteWindow(id, title: name ?? ''));
+  }
+
+  /// Host: whether [id]'s native window is open (its card then offers to
+  /// show it). Read in an `Obx`, it follows the window opening and closing.
+  bool iphoneWindowOpen(String id) => _remoteWindows?.isOpen(id) ?? false;
+
+  RemoteWindowChannel? get _remoteWindows =>
+      Get.isRegistered<RemoteWindowChannel>()
+      ? Get.find<RemoteWindowChannel>()
+      : null;
 
   /// Host: a manual device-list refresh (the picker's refresh button) is
   /// running. Lets the picker show it is working: when the list comes back
@@ -173,26 +192,24 @@ class HomeController extends GetxController with WidgetsBindingObserver {
     await _connection.connect();
   }
 
-  /// Host: (re)open the remote view, to get back in after backing out of it
-  /// while a tablet the Mac controls is still live. With [key] (a tablet's
-  /// card) the view is asked to show that tablet's tile alone, which it
-  /// does only beside other tiles. The hub's focus is left as it is: the
-  /// view shows every such tablet, whichever one the hub shows.
-  void onOpenRemoteView({String? key}) {
-    if (Get.currentRoute == AppRoutes.remoteHost &&
-        Get.isRegistered<RemoteGridController>()) {
-      // Already open: nothing to push, only the tile to show.
-      if (key != null) Get.find<RemoteGridController>().expand(key);
+  /// Host, a card's Open remote: the tablet [key] in its native window,
+  /// brought forward when it has one open, else opened (the window opens
+  /// by itself when the tablet's session goes live, TabletWindowOpener;
+  /// this gets back in after closing it). A tablet the user stopped (closing
+  /// its window does) is let connect again first. The hub's focus is left
+  /// as it is. Nothing without the window plugin, or over a manager that is
+  /// not the hub.
+  Future<void> onOpenRemoteView(String key) async {
+    final hub = _connection;
+    if (hub is! HostConnectionManager) return;
+    if (hub.stoppedDevices.contains(key)) hub.allowDevice(key);
+    final windows = _remoteWindows;
+    if (windows == null) return;
+    if (windows.isOpen(key)) {
+      await windows.focus(key);
       return;
     }
-    Get.toNamed(AppRoutes.remoteHost,
-        arguments: key == null ? null : {'focus': key});
-  }
-
-  /// The remote view, by itself: only from Home, so it never opens over
-  /// Settings or a second time over itself.
-  void _openRemoteFromHome() {
-    if (Get.currentRoute == AppRoutes.home) Get.toNamed(AppRoutes.remoteHost);
+    await windows.openDriver(TabletRemoteWindow(key, hub: hub));
   }
 
   /// Navigation workers registered in [onInit], disposed in [onClose].
@@ -234,11 +251,13 @@ class HomeController extends GetxController with WidgetsBindingObserver {
     // pop back.
     if (!_connection.isHost) {
       _workers.add(
-          everAll([_settings.sessionModeRx, _settings.remoteDirectionRx], (_) {
-        if (_settings.isReverseRemote && Get.currentRoute == AppRoutes.display) {
-          Get.back();
-        }
-      }));
+        everAll([_settings.sessionModeRx, _settings.remoteDirectionRx], (_) {
+          if (_settings.isReverseRemote &&
+              Get.currentRoute == AppRoutes.display) {
+            Get.back();
+          }
+        }),
+      );
       // Already streaming when home opens (resumed onto home while live) —
       // `ever` won't fire without a change, so jump after the first frame.
       if (_connection.phase.value.isActive && !_settings.isReverseRemote) {
@@ -248,28 +267,10 @@ class HomeController extends GetxController with WidgetsBindingObserver {
           }
         });
       }
-    } else {
-      // Host: the Mac is the viewer of every tablet it controls (remote
-      // control, Mac controls tablet). The remote view opens when the first
-      // of them goes live: the count of live ones leaving 0, whichever
-      // tablet the hub shows and whatever the selectors say now. A tablet
-      // that joins later gets a tile in the view and opens nothing, and an
-      // Extended or tablet-controls-Mac session never counts.
-      var live = _connection.reverseActive.value;
-      _workers.add(ever<int>(_connection.reverseActive, (now) {
-        final before = live;
-        live = now;
-        if (before == 0 && now > 0) _openRemoteFromHome();
-      }));
-      // Already live when Home opens: the launch connected by itself
-      // (HostConnectionManager.autoConnect), before the splash moved on or
-      // while the window was hidden, and `ever` only sees changes.
-      if (live > 0) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (_connection.reverseActive.value > 0) _openRemoteFromHome();
-        });
-      }
     }
+    // Host: a tablet the Mac views and drives has a native window of its
+    // own, which TabletWindowOpener opens when its session goes live, with
+    // or without this screen.
   }
 
   @override
@@ -349,9 +350,8 @@ class HomeController extends GetxController with WidgetsBindingObserver {
   /// again, or the next focus (or the device poll) would undo the Cancel.
   void onConnectTap() {
     final p = _connection.phase.value;
-    final stops = p.isActive ||
-        p.isConnecting ||
-        (isHost && p == ConnectionPhase.error);
+    final stops =
+        p.isActive || p.isConnecting || (isHost && p == ConnectionPhase.error);
     if (stops) {
       _connection.pauseAutoConnect();
       _connection.disconnect();
