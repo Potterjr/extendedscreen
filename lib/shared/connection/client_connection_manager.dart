@@ -17,6 +17,7 @@ import 'package:extendedscreen/shared/models/packet_model.dart';
 import 'package:extendedscreen/shared/models/session_mode.dart';
 import 'package:extendedscreen/shared/platform/ios_app.dart';
 import 'package:extendedscreen/shared/platform/keepalive_channel.dart';
+import 'package:extendedscreen/shared/platform/windows_app.dart';
 import 'package:extendedscreen/shared/protocol/client_hello.dart';
 import 'package:extendedscreen/modules/remote_screen/client/android_capture_channel.dart';
 import 'package:extendedscreen/modules/extended_screen/client/video_decoder_channel.dart';
@@ -39,12 +40,18 @@ import 'package:extendedscreen/modules/extended_screen/client/video_decoder_chan
 class ClientConnectionManager extends BaseConnectionManager {
   /// [ios] defaults to the platform ([runsOnIos]); tests pass it to play the
   /// iOS client's lifecycle on any host.
-  ClientConnectionManager({super.socket, super.port, bool? ios})
-      : ios = ios ?? runsOnIos;
+  ClientConnectionManager({super.socket, super.port, bool? ios, bool? windows})
+      : ios = ios ?? runsOnIos,
+        windows = windows ?? runsOnWindows;
 
   /// The iOS client: foreground only (see [didChangeAppLifecycleState]),
   /// HELLO platform `0x03`/`0x04`, no reverse capture.
   final bool ios;
+
+  /// The Windows client: HELLO platform `0x05` with its monitor's size, no
+  /// reverse capture. [windows] defaults to the platform ([runsOnWindows]);
+  /// tests pass it.
+  final bool windows;
 
   @override
   bool get isHost => false;
@@ -367,6 +374,7 @@ class ClientConnectionManager extends BaseConnectionManager {
         name: switch (hello.platform) {
           ClientPlatform.iphone => 'iPhone',
           ClientPlatform.ipad => 'iPad',
+          ClientPlatform.windows => 'Windows',
           ClientPlatform.android => '',
         },
       ),
@@ -394,7 +402,9 @@ class ClientConnectionManager extends BaseConnectionManager {
     }
     final platform = ios
         ? ClientHello.iosPlatformFor(displayPoints)
-        : ClientPlatform.android;
+        : windows
+            ? ClientPlatform.windows
+            : ClientPlatform.android;
     return (
       platform: platform,
       panel: ClientHello.panelSize(

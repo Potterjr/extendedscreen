@@ -26,6 +26,7 @@ import 'package:extendedscreen/shared/platform/battery_channel.dart';
 import 'package:extendedscreen/shared/platform/ios_app.dart';
 import 'package:extendedscreen/shared/platform/ios_device_service.dart';
 import 'package:extendedscreen/shared/platform/wifi_pairing_channel.dart';
+import 'package:extendedscreen/shared/platform/windows_app.dart';
 
 class InitialBinding extends Bindings {
   @override
@@ -48,7 +49,7 @@ class InitialBinding extends Bindings {
 
     // Role-specific wiring. The chosen manager is bound to BaseConnectionManager
     // so all shared UI depends on a single interface.
-    if (GetPlatform.isMacOS || GetPlatform.isDesktop) {
+    if (GetPlatform.isMacOS) {
       // HOST (macOS): capture + input + adb, plus the reverse-remote decoder
       // (Mac-controls-tablet), then the host connection manager.
       Get.put(ScreenCaptureChannel(), permanent: true);
@@ -87,17 +88,22 @@ class InitialBinding extends Bindings {
       // session goes live, once per session, with or without a Home screen
       // (a hidden launch builds none). After the hub, which it watches.
       Get.put(TabletWindowOpener(), permanent: true);
-    } else if (defaultTargetPlatform == TargetPlatform.android || runsOnIos) {
-      // CLIENT (Android, or the iOS client over Wi-Fi): video decoder, plus
-      // on Android the reverse-remote screen capturer, then the client
-      // connection manager. iOS cannot capture its screen for the Mac.
+    } else if (defaultTargetPlatform == TargetPlatform.android ||
+        wifiOnlyClient) {
+      // CLIENT (Android, or the iOS and Windows clients over Wi-Fi): video
+      // decoder, plus on Android the reverse-remote screen capturer, then
+      // the client connection manager. Neither iOS nor (yet) Windows
+      // captures its screen for the Mac.
       Get.put(VideoDecoderChannel(), permanent: true);
-      if (!runsOnIos) Get.put(AndroidCaptureChannel(), permanent: true);
+      if (defaultTargetPlatform == TargetPlatform.android) {
+        Get.put(AndroidCaptureChannel(), permanent: true);
+      }
       Get.put(BatteryChannel(), permanent: true);
       // What adb delivers from the Mac: the key of each USB session (kept
-      // by UsbSessionService) and its Wi-Fi pairing. On iOS the USB link
-      // never runs, so the service stays inert (registered so no Get.find
-      // throws), and the pairing comes from the devicectl inbox instead.
+      // by UsbSessionService) and its Wi-Fi pairing. On iOS and Windows the
+      // USB link never runs, so the service stays inert (registered so no
+      // Get.find throws); the iPhone's pairing comes from the devicectl
+      // inbox, the Windows client's from a pasted code (debug builds).
       Get.put(UsbSessionService(), permanent: true);
       Get.put(WifiPairingChannel(), permanent: true);
       Get.put<BaseConnectionManager>(ClientConnectionManager(), permanent: true);

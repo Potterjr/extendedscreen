@@ -101,6 +101,16 @@ class AppTranslations extends Translations {
     'wifi_client_not_paired_ios':
         'Not paired yet. Plug the iPhone into the Mac and press Pair in the '
             'Mac\'s Settings → Wi-Fi.',
+    'wifi_client_not_paired_windows':
+        'Not paired yet. Copy the pairing code from the Mac\'s Settings → '
+            'Wi-Fi and paste it below.',
+    'wifi_client_pairing_code_label': 'Pairing code',
+    'wifi_client_pairing_code_hint':
+        'From a debug build of the Mac: Settings → Wi-Fi → Copy code.',
+    'wifi_client_pairing_code_pair': 'Pair',
+    'wifi_client_pairing_code_stored': 'Paired with the Mac.',
+    'wifi_client_pairing_code_refused':
+        'That is not a pairing code, or it was refused.',
     'wifi_client_forget': 'Forget this Mac',
     'wifi_forget_title': 'Forget @name?',
     'wifi_forget_message':
@@ -329,6 +339,14 @@ class AppTranslations extends Translations {
     'settings_ios_debug_desc':
         'Pairs a cabled iPhone for Wi-Fi through Xcode\'s devicectl, or a '
             'booted simulator through its container. Debug builds only.',
+    'settings_pairing_code_title': 'Pairing code (debug)',
+    'settings_pairing_code_desc':
+        'For a Windows PC: copies this Mac\'s Wi-Fi pairing to paste there. '
+            'It holds the pairing token. Debug builds only.',
+    'settings_pairing_code_copy': 'Copy code',
+    'settings_pairing_code_copied':
+        'Copied. Paste it on the Windows PC, then copy something else.',
+    'settings_pairing_code_failed': 'No pairing could be made on this Mac.',
     'settings_ios_debug_none': 'devicectl lists no iPhone',
     'settings_ios_debug_unavailable': 'devicectl could not be asked',
     'settings_ios_pair': 'Pair',
@@ -554,6 +572,15 @@ class AppTranslations extends Translations {
     'wifi_client_not_paired_ios':
         'ยังไม่ได้จับคู่ ให้เสียบสาย iPhone เข้ากับ Mac แล้วกด "จับคู่" '
             'ในการตั้งค่า → Wi-Fi บน Mac',
+    'wifi_client_not_paired_windows':
+        'ยังไม่ได้จับคู่ ให้คัดลอกรหัสจับคู่จากการตั้งค่า → Wi-Fi บน Mac '
+            'แล้ววางในช่องด้านล่าง',
+    'wifi_client_pairing_code_label': 'รหัสจับคู่',
+    'wifi_client_pairing_code_hint':
+        'จาก Mac ที่รันบิลด์ดีบัก: การตั้งค่า → Wi-Fi → คัดลอกรหัส',
+    'wifi_client_pairing_code_pair': 'จับคู่',
+    'wifi_client_pairing_code_stored': 'จับคู่กับ Mac แล้ว',
+    'wifi_client_pairing_code_refused': 'ไม่ใช่รหัสจับคู่ หรือถูกปฏิเสธ',
     'wifi_client_forget': 'เลิกจับคู่กับ Mac เครื่องนี้',
     'wifi_forget_title': 'เลิกจับคู่กับ @name หรือไม่',
     'wifi_forget_message':
@@ -776,6 +803,14 @@ class AppTranslations extends Translations {
     'settings_ios_debug_desc':
         'จับคู่ iPhone ที่ต่อสายไว้สำหรับ Wi-Fi ผ่าน devicectl ของ Xcode '
             'หรือซิมูเลเตอร์ที่บูตอยู่ผ่านคอนเทนเนอร์ของแอป เฉพาะบิลด์ดีบัก',
+    'settings_pairing_code_title': 'รหัสจับคู่ (ดีบัก)',
+    'settings_pairing_code_desc':
+        'สำหรับเครื่อง Windows: คัดลอกการจับคู่ Wi-Fi ของ Mac นี้ไปวางที่นั่น '
+            'รหัสมีโทเค็นการจับคู่อยู่ เฉพาะบิลด์ดีบัก',
+    'settings_pairing_code_copy': 'คัดลอกรหัส',
+    'settings_pairing_code_copied':
+        'คัดลอกแล้ว วางที่เครื่อง Windows แล้วคัดลอกอย่างอื่นทับ',
+    'settings_pairing_code_failed': 'สร้างการจับคู่บน Mac นี้ไม่ได้',
     'settings_ios_debug_none': 'devicectl ไม่พบ iPhone',
     'settings_ios_debug_unavailable': 'เรียกใช้ devicectl ไม่ได้',
     'settings_ios_pair': 'จับคู่',

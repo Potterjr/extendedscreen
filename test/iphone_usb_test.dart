@@ -533,7 +533,15 @@ void main() {
     });
   });
 
-  group('UsbmuxClient', () {
+  // The stand-in usbmuxd is a Unix-domain socket, as on the Mac. Windows'
+  // AF_UNIX driver (afunix.sys) can blue-screen the machine when a process
+  // holding such a socket exits (see CLAUDE.md, Windows client), and the
+  // iPhone-over-USB path is the Mac's alone, so these are not run there.
+  final unixSockets = Platform.isWindows
+      ? 'Unix-domain sockets: the Mac host path, not run on Windows'
+      : null;
+
+  group('UsbmuxClient', skip: unixSockets, () {
     test('lists devices and opens a stream to a port on one', () async {
       final mux = _FakeUsbmuxd(path,
           devices: const [(7, 'UDID-1', 'USB'), (9, 'UDID-2', 'Network')]);
@@ -588,7 +596,7 @@ void main() {
     });
   });
 
-  group('usbmux Listen', () {
+  group('usbmux Listen', skip: unixSockets, () {
     test('the framer reads two messages from one chunk and one split '
         'anywhere across chunks', () {
       final a = usbmuxMessage(_FakeUsbmuxd.attachedMessage(3, 'A'), 0);
@@ -668,7 +676,7 @@ void main() {
     });
   });
 
-  group('IosTouchService', () {
+  group('IosTouchService', skip: unixSockets, () {
     test('connects to the runner over usbmuxd and sends taps and swipes '
         'without waiting for them to land', () async {
       final mux = _FakeUsbmuxd(path);

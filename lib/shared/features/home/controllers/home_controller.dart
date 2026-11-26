@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/widgets.dart';
 import 'package:get/get.dart';
 import 'package:extendedscreen/app/routes/app_routes.dart';
@@ -20,6 +21,7 @@ import 'package:extendedscreen/shared/models/session_choice.dart';
 import 'package:extendedscreen/shared/models/session_spec.dart';
 import 'package:extendedscreen/shared/platform/battery_channel.dart';
 import 'package:extendedscreen/shared/platform/permissions_channel.dart';
+import 'package:extendedscreen/shared/protocol/pairing_code.dart';
 import 'package:extendedscreen/shared/services/settings_service.dart';
 
 class HomeController extends GetxController with WidgetsBindingObserver {
@@ -161,6 +163,22 @@ class HomeController extends GetxController with WidgetsBindingObserver {
     if (!Get.isRegistered<WifiPairingService>()) return;
     if (!await Get.find<WifiPairingService>().forget(id)) return;
     if (isWifi) await _redialClient();
+  }
+
+  /// Client, debug builds of a client with neither adb nor devicectl (the
+  /// Windows client): store the pairing pasted as a [PairingCode], which a
+  /// debug build of the Mac shows in Settings → Wi-Fi. The text came from
+  /// the user, not from the link, so it may reach [storePairing]. Answers
+  /// whether a pairing was stored; a stored one starts the dial over.
+  Future<bool> onPastePairingCode(String text) async {
+    if (!kDebugMode || !Get.isRegistered<WifiPairingService>()) return false;
+    final payload = PairingCode.decode(text);
+    if (payload == null) return false;
+    if (!await Get.find<WifiPairingService>().storePairing(payload)) {
+      return false;
+    }
+    if (isWifi) await _redialClient();
+    return true;
   }
 
   /// Client, Wi-Fi: an address typed for the Mac ('' = find it).

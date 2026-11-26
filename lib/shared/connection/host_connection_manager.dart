@@ -703,6 +703,7 @@ class HostConnectionManager extends BaseConnectionManager {
         : switch (platform) {
             HostSession.helloPlatformIphone => 'iPhone',
             HostSession.helloPlatformIpad => 'iPad',
+            HostSession.helloPlatformWindows => 'Windows',
             _ => LinkType.wifi.chipLabel,
           };
     final session = HostSession(

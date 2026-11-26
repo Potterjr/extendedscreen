@@ -10,7 +10,8 @@ import 'package:flutter/painting.dart' show EdgeInsets;
 enum ClientPlatform {
   android(0x02),
   iphone(0x03),
-  ipad(0x04);
+  ipad(0x04),
+  windows(0x05);
 
   const ClientPlatform(this.byte);
   final int byte;
@@ -50,6 +51,10 @@ class ClientHello {
   ///   are not taken off: the picture runs under them.
   /// - iPad: the window (Split View, Stage Manager), less every safe-area
   ///   inset, rounded down to even.
+  /// - Windows: the monitor the window is on ([display], else [window]),
+  ///   rounded down to even, so the Mac's display matches it when the
+  ///   window is made full screen; a smaller window shows it letterboxed.
+  ///   Unlike a tablet it may be portrait: a PC monitor need not turn.
   ///
   /// [padding] is the view's safe area in physical pixels, as
   /// `FlutterView.padding` reports it for the window's orientation. Which of
@@ -79,6 +84,8 @@ class ClientHello {
           w: even(window.longestSide - acrossLong),
           h: even(window.shortestSide - acrossShort),
         );
+      case ClientPlatform.windows:
+        return (w: even(shown.width), h: even(shown.height));
     }
   }
 

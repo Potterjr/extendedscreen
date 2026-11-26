@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:extendedscreen/shared/features/settings/views/ios_devices_debug_card.dart';
+import 'package:extendedscreen/shared/features/settings/views/pairing_code_debug_card.dart';
 import 'package:extendedscreen/shared/features/settings/controllers/settings_controller.dart';
 import 'package:extendedscreen/shared/models/display_config_model.dart';
 import 'package:extendedscreen/shared/services/app_translations.dart';
@@ -170,6 +171,10 @@ class SettingsView extends GetView<SettingsController> {
               if (kDebugMode) ...[
                 const Divider(height: 1, color: Colors.white12),
                 const IosDevicesDebugCard(),
+                // A client with no adb or devicectl (Windows) is paired by
+                // pasting this code.
+                const Divider(height: 1, color: Colors.white12),
+                const PairingCodeDebugCard(),
               ],
             ]),
           ] else ...[

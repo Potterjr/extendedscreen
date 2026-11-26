@@ -215,7 +215,14 @@ void main() {
     });
   });
 
-  group('deliverPairing', () {
+  // The delivery writes its 0600 file with chmod and runs /bin tools, which
+  // only a Mac (or Linux) test host has; the Mac is the only host that ever
+  // delivers.
+  final macOnly = Platform.isWindows
+      ? 'needs chmod and /bin tools: the Mac host path, not run on Windows'
+      : null;
+
+  group('deliverPairing', skip: macOnly, () {
     test('copies a 0600 file into the app container, nudges the app, and '
         'reads its answer for this payload', () async {
       final d = _Devicectl(answer: 1);
@@ -330,7 +337,7 @@ void main() {
     });
   });
 
-  group('simulators (debug builds)', () {
+  group('simulators (debug builds)', skip: macOnly, () {
     late Directory container;
     setUp(() {
       container = Directory.systemTemp.createTempSync('es-simcontainer-');
@@ -517,7 +524,8 @@ void main() {
     expect(IosDeviceService.parseResult([1], h), isNull);
   });
 
-  test('the real runner ends a command at its timeout', () async {
+  test('the real runner ends a command at its timeout', skip: macOnly,
+      () async {
     final watch = Stopwatch()..start();
     final r = await IosDeviceService.runCommand(
         '/bin/sleep', ['10'], const Duration(milliseconds: 200));
